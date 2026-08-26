@@ -1,0 +1,171 @@
+# Alphaca: the chief-staff-engineer role, boxed. Install by linking this
+# directory where wormhole looks for roles:
+#
+#   ln -s "$(pwd)/roles/alphaca" ~/.config/wormhole/roles/alphaca
+#
+# then, in any workspace (`--role` beats the workspace's own manifest):
+#
+#   wormhole box --role alphaca
+
+version = 1
+name = "Alphaca"
+
+# Everything the image is made of, and nothing else. Change a line in here
+# and the next `wormhole build` builds; change one anywhere else and it
+# does not.
+[image]
+base = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.2-x86_64.tar.gz"
+base_sha256 = "412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be"
+
+# http on purpose: a fresh rootfs has no CA store, and apk verifies every
+# index and package against the signing keys it ships.
+package_sources = [
+  "http://dl-cdn.alpinelinux.org/alpine/v3.22/main",
+  "http://dl-cdn.alpinelinux.org/alpine/v3.22/community",
+]
+
+packages = [
+  "bash",
+  "nodejs",
+  "npm",
+  "git",
+  "openssh-client",
+  "ca-certificates",
+  # Rust: build-base gives cc and the linker. The compiler itself comes
+  # from rustup below, not from apk — see the build lines for why.
+  "build-base",
+  # Modern tools, called by name: a non-interactive shell reads no aliases.
+  "ripgrep", # grep
+  "fd",      # find
+  "eza",     # ls
+  "btop",    # top
+  "ncdu",    # du
+  # The group wrapper blocks on inotifywait when the inbox is empty.
+  "inotify-tools",
+]
+
+build = [
+  # `--offline` is the proof, not the optimisation: if anything here still
+  # wanted the registry, this line would fail instead of quietly fetching.
+  "npm install -g --offline /tmp/claude-code.tgz /tmp/claude-code-musl.tgz",
+  # An artifact is bound read-only and carries no execute bit — bytes off
+  # the network are not something to run by accident — so running one is a
+  # deliberate copy onto the scratch. Into a directory of its own, keeping
+  # the name: rustup-init decides what it is from its own argv[0], and one
+  # called anything else refuses with "unknown proxy name".
+  "mkdir -p /tmp/rustup && cp /tmp/rustup-init /tmp/rustup/ && chmod +x /tmp/rustup/rustup-init",
+  # The toolchain itself is rustup's own fetch over TLS, which no digest
+  # in a manifest can pin. It is why `host_ca` below still matters.
+  "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /tmp/rustup/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 -c rustfmt -c clippy -c rust-analyzer",
+  "ln -s /usr/local/cargo/bin/* /usr/local/bin/",
+  # /usr/local/bin is on every shell's default PATH; ~/.cargo/bin is not on
+  # the /bin/sh subshells Claude Code spawns for hooks.
+  "tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk",
+]
+
+# Everything this build would otherwise fetch for itself. Wormhole fetches
+# each one on the host, checks the digest, and binds it read-only on the
+# build box's /tmp — which is a tmpfs, so none of them reach the image.
+#
+# The box opens no connection for these, so a network that intercepts TLS
+# has nothing to intercept and the build cannot fail on a certificate it
+# was never shown. It is also what the digest already implied: a floating
+# fetch makes two builds of one recipe produce different bytes under a
+# digest that says they are the same image.
+
+# Claude Code, and the musl binary it carries as a platform dependency.
+# Both are named because `npm` would otherwise resolve that optional
+# dependency over the network — and then `--offline` below would fail,
+# which is the point of passing it.
+[[image.artifact]]
+url = "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.246.tgz"
+sha256 = "8243db25322e7295953455aee463324bfa229f37184fcf2adf90446818803dce"
+into = "/tmp/claude-code.tgz"
+
+[[image.artifact]]
+url = "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64-musl/-/claude-code-linux-x64-musl-2.1.246.tgz"
+sha256 = "d5214cfc4d4e8d0028bb9d754eb524391d1a4b54386365f36c2f29a8322fc780"
+into = "/tmp/claude-code-musl.tgz"
+
+# Rust from rustup, not from apk. Alpine pins one compiler per release
+# branch — 3.22 is 1.87 forever — so an apk toolchain cannot build a
+# workspace whose `rust-version` is newer, and no amount of waiting fixes
+# it.
+[[image.artifact]]
+url = "https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init"
+sha256 = "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1"
+into = "/tmp/rustup-init"
+
+# RTK, prebuilt musl binary. Not `cargo install`: that needs crates.io,
+# and a prebuilt binary needs no compiler at all.
+[[image.artifact]]
+url = "https://github.com/rtk-ai/rtk/releases/download/v0.45.0/rtk-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "c4c036fbf181fc55ef329786c8c17e0d427972b053b825944d968a6aafef1ba4"
+into = "/tmp/rtk.tar.gz"
+
+[agent]
+run = "claude"
+model = "claude-fable-5"
+# Both paths resolve against this directory, so the role is self-contained.
+instructions = "ROLE.md"
+preflight = "hooks/preflight.sh"
+
+# What the box can reach. Everything unnamed here is invisible to it.
+[access]
+# The credential file alone, not all of `~/.claude`: that directory's hooks
+# call host tools this box does not have.
+grants = ["~/.claude/.credentials.json", "~/.ssh"]
+# Change if you are on a VPN or split DNS. To take the route away entirely,
+# set `network = "none"` and `broker = true`, then drop this line and the
+# credentials grant: the box reaches the API through `wormhole broker`.
+dns = "1.1.1.1"
+# Some networks intercept TLS with their own CA — Cloudflare WARP, a
+# corporate proxy — and a fresh store rightly refuses it. This adds the
+# host's bundle to what the box trusts, in the running box and in the
+# build box alike. Adds, not replaces: the image's own roots keep working.
+#
+# Everything this recipe could pin is an artifact above and needs no trust
+# at all. This covers what it cannot: the toolchain rustup fetches for
+# itself, and anything cargo reaches at run time.
+host_ca = true
+
+# The box's whole environment. `default` lets the host's value win when it
+# has one; `fixed` ignores the host, for anything that describes the box.
+[env.ANTHROPIC_API_KEY]
+default = ""
+
+# Where the toolchain is. The shims on PATH find nothing without it, and
+# the host's value would name a directory this box does not have.
+#
+# `CARGO_HOME` is deliberately left alone: unset it defaults to
+# `~/.cargo`, which is the kept home, so the crate registry survives
+# between boxes instead of being refetched into a throwaway root.
+[env.RUSTUP_HOME]
+fixed = "/usr/local/rustup"
+
+# The caveman plugin's highest-priority mode source, above any config file.
+[env.CAVEMAN_DEFAULT_MODE]
+fixed = "ultra"
+
+[env.CONTEXT7_API_KEY]
+default = ""
+
+# Wormhole carries your terminal's own description into the box home on
+# every start, so your real TERM wins here. This is what the box is told
+# when there was no description to carry.
+[env.TERM]
+default = "xterm-256color"
+
+# What TERM does not say. Neither needs a terminfo entry.
+[env.COLORTERM]
+default = ""
+
+[env.TERM_PROGRAM]
+default = ""
+
+[env.TERM_PROGRAM_VERSION]
+default = ""
+
+# Claude Code dies without one, and it must exist inside the box.
+[env.SHELL]
+fixed = "/bin/bash"

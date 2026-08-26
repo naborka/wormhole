@@ -1,0 +1,49 @@
+name: wiki
+
+on:
+  push:
+    # `dev` is where the work is, and the only branch that exists. Add
+    # `main` here on the day there is one.
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/mdbook
+      - name: Render the wiki
+        run: sh docs/wiki.sh docs/book/markdown docs/src/SUMMARY.md rendered
+      # The wiki has to exist already: GitHub creates its repository with
+      # the first page, and until then there is nothing to clone. Says so
+      # rather than leaving a bare git error to be read.
+      - name: Clone the wiki
+        run: |
+          if ! git clone --depth 1 \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.wiki.git" wiki
+          then
+            echo "::error::No wiki yet for ${{ github.repository }}. Open the repository's Wiki tab, create one page by hand, then run this workflow again."
+            exit 1
+          fi
+      - name: Publish
+        run: |
+          rm -f wiki/*.md
+          cp rendered/*.md wiki/
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "the wiki is already up to date"
+            exit 0
+          fi
+          git commit -m "docs: ${GITHUB_SHA:0:7}"
+          git push

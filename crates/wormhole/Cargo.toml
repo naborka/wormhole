@@ -1,0 +1,26 @@
+[package]
+name = "wormhole"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+wormhole-core = { path = "../wormhole-core" }
+nix = { version = "0.30", features = ["sched", "mount", "user", "fs", "hostname", "process", "signal"] }
+tempfile = "3"
+sha2 = "0.10"
+landlock = "0.4.7"
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
+
+[dev-dependencies]
+# `term` is for the panel test only: it drives the panel on a real pty,
+# which is the only place a stray write to the terminal can be seen.
+nix = { version = "0.30", features = ["term"] }
+
+[features]
+# Integration tests that need a real kernel with unprivileged userns.
+kernel-tests = []
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[book]
+title = "wormhole"
+description = "Boxes for coding agents: everything the agent sees is declared, everything else is invisible."
+authors = ["Alexey Naborshchikov"]
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+# Two renderers, so the output moves into `book/html` and `book/markdown`.
+# The markdown is what the wiki is rendered from: same pages, includes
+# already expanded.
+[output.markdown]
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/naborka/wormhole"
