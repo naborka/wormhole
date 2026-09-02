@@ -5,7 +5,7 @@ Update this file in the same commit as the change it records.
 `CONCEPT.md` says what and why, `PLAN.md` says in what order and with which tests. This file only tracks state.
 `AGENT.md` holds the default instructions every box hands its agent, baked into the binary and seeded into the box home on every start.
 
-Tests today: **470** (`cargo test`: 369 pure, 101 binary), **31 kernel** (`cargo test -p wormhole --features kernel-tests`, real host only). The 17 in `tests/build.rs` fetch a rootfs through `curl`, so they need one on the host; everything else runs anywhere.
+Tests today: **477** (`cargo test`: 374 pure, 103 binary), **31 kernel** (`cargo test -p wormhole --features kernel-tests`, real host only). The 17 in `tests/build.rs` fetch a rootfs through `curl`, so they need one on the host; everything else runs anywhere.
 
 ## Done — an agent runs in a box today
 
@@ -14,6 +14,7 @@ from `wormhole.toml`, with permissions bypassed, and it holds the terminal.
 
 | What | Try it |
 |---|---|
+| `wormhole help` (also `--help`, `-h`) — the whole tool on one page under 140 lines and 80 columns: every command, the manifest that drives them, how to make a role, and how to move the agent's version. Prose is raw strings so what is written is what prints; the command lists render from the one table in `wormhole-core::help`, and a test reads the binary's own dispatch and fails if a command is missing from the page or on the page and dispatched by nothing. A refusal prints the parser's own usage line plus one pointer here, never the whole list | `cargo run -p wormhole -- help` |
 | `wormhole init` — a working manifest in this workspace, from the one starter recipe in `templates/wormhole.toml`. Never over one already there | `cargo run -p wormhole -- init` |
 | `wormhole box [--new \| --id <id\|name>] [--as <name>]` — the manifest's agent, in a fresh copy of the built image. A folder holds as many boxes as you make: a bare `box` resumes this workspace's most recently used free one for this role and makes another only when every one is busy; `--new` asks for another outright, `--id` names one by its id or by the name `--as` gave it. `--as` names the box this start makes or resumes, so `attach api` and `stop api` work instead of twelve hex characters; a name already on another box here is refused, and one spellable as an id is refused where it is set. Each box keeps its own `$HOME`, claim and snapshot. Prints the boundary banner as its last line before the agent takes the terminal | `cargo run -p wormhole -- box --new` |
 | `wormhole box -- <cmd>` — same box, your command instead of the agent | `cargo run -p wormhole -- box -- sh` |

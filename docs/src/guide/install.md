@@ -20,6 +20,13 @@ It runs nine probes — user namespaces, mount propagation, the pieces a box
 needs — and says plainly what works, what does not, and what that rules
 out. Exit code 0 means boxes will run.
 
+Then read the tool itself. One page, under 140 lines: every command, a
+commented manifest, how to make a role, and how to move the agent's version.
+
+```sh
+wormhole help
+```
+
 ## Requirements
 
 - Rust 1.97 or newer, to build it

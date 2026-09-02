@@ -19,6 +19,9 @@ Every key is in [the manifest reference](manifest.md). Read
 
 `init` never writes over a manifest that is already there.
 
+`wormhole help` is every command, the whole manifest and the update flow on
+one page — worth reading once before the rest of this guide.
+
 ## 2. Build the image (optional)
 
 ```sh

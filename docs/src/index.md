@@ -39,6 +39,7 @@ The rest of the commands:
 
 | | |
 |---|---|
+| `wormhole help` | the whole tool on one page — start here |
 | `wormhole doctor` | nine host probes and a plain verdict — run this first |
 | `wormhole ps [--all]` / `attach <id\|name>` | what is running or kept, and a second terminal into it |
 | `wormhole usage` | what is left of the account's usage windows |

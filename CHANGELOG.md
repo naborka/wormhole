@@ -9,6 +9,34 @@ true.
 
 ## Unreleased
 
+### `wormhole help` is the whole tool on one page
+
+There was no help. A wrong command printed one unbroken line naming every
+command and flag wormhole has — the worst of both, too long to scan and too
+short to explain anything. Nothing said what a box was, what went in
+`wormhole.toml`, how to make a role, or how to move the agent's version.
+
+`wormhole help` (or `--help`, or `-h`) now answers all of that in under 140
+lines and 80 columns: the commands grouped by what you are trying to do, a
+commented manifest, the four files a role is made of, and the update flow
+end to end. Short on purpose — it is written to be read in full, by a person
+who has never seen the tool and by an agent with one screenful to spare.
+
+A refusal no longer prints the wall. It prints the usage line for the exact
+command you got wrong, then one line saying where the rest is:
+
+```
+$ wormhole remove
+usage: wormhole remove <id|name> [<id|name>...]
+run `wormhole help` for the whole tool on one page
+```
+
+The command list has one home, and a test reads the binary's own dispatch
+and fails if a command is missing from the page — or on the page and
+answered by nothing. It caught one the moment it was written: `wormhole tui`
+had been dispatched and undocumented since the panel shipped. A help page
+that has drifted is worse than none, because it is believed.
+
 ### A box can be renamed, emptied, or taken away
 
 Wormhole could make a box and stop one. It could not get rid of one. A

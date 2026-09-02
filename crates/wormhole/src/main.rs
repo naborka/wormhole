@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use nix::fcntl::{Flock, FlockArg};
 
 use wormhole_core::{
-    doctor, gc, home, launch, limits_cgroup, manifest, paths, receipt, registry, run, seed, source,
-    tui,
+    doctor, gc, help, home, launch, limits_cgroup, manifest, paths, receipt, registry, run, seed,
+    source, tui,
 };
 
 const MANIFEST: &str = "wormhole.toml";
@@ -42,6 +42,12 @@ fn statusline_script() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        // Asked for, so it goes to stdout and exits 0 — a page you have to
+        // redirect stderr to read is a page nobody pipes anywhere.
+        Some("help" | "--help" | "-h") => {
+            print!("{}", help::page());
+            std::process::exit(0);
+        }
         Some("doctor") => {
             let verdict = doctor::evaluate(probes::run_all());
             print!("{verdict}");
@@ -2398,9 +2404,62 @@ fn fail(error: &str) -> ! {
 }
 
 fn usage(error: &str) -> ! {
-    eprintln!("wormhole: {error}");
-    eprintln!(
-        "usage: wormhole init | wormhole doctor | wormhole build [--role <name|dir|ref>] | wormhole box [--role <name|dir|ref>] [--new | --id <id|name>] [--as <name>] [-- <command>] | wormhole ps [--all] | wormhole attach <id|name> [-- <command>] | wormhole stop <id|name> | wormhole rename <id|name> <new name> | wormhole reset <id|name> | wormhole remove <id|name>... | wormhole role add <dir|ref> [--as <name>] | wormhole role list|show|remove | wormhole gc [--delete [--unreferenced]] | wormhole usage | wormhole run [--grant <path>]... [--dns <address>] [--image <dir>] -- <command> [args...]"
-    );
+    // The parsers already answer with a usage line for the exact command,
+    // which beats a general one. Anything else is a sentence, and gets the
+    // tool's name in front of it and the general shape under it.
+    if error.starts_with("usage:") {
+        eprintln!("{error}");
+    } else {
+        eprintln!("wormhole: {error}");
+        eprintln!("{}", help::USAGE);
+    }
+    eprintln!("{}", help::MORE);
     std::process::exit(2);
+}
+
+#[cfg(test)]
+mod tests {
+    /// The one thing a help page must never do: leave a command out.
+    ///
+    /// Read off the dispatch itself rather than a second list somebody has
+    /// to remember to update — that second list is exactly what drifts.
+    /// Internal commands (`__boxed` and friends) are not for anybody to
+    /// type, so they are not on the page and are skipped here.
+    #[test]
+    fn every_command_the_dispatch_answers_is_on_the_help_page() {
+        let source = include_str!("main.rs");
+        let page = wormhole_core::help::page();
+        let mut found = 0;
+        for arm in source.split("Some(\"").skip(1) {
+            let names = arm.split('"').next().expect("a quoted name");
+            for name in names.split("\" | \"") {
+                if name.starts_with("__") || name.starts_with('-') {
+                    continue;
+                }
+                found += 1;
+                assert!(
+                    page.contains(name),
+                    "`wormhole {name}` is dispatched and is not on the help page"
+                );
+            }
+        }
+        // A parser that matched nothing would pass every assertion above.
+        assert!(found > 10, "only found {found} commands to check");
+    }
+
+    /// And the other way: a page that lists a command the tool does not
+    /// answer to sends the reader somewhere that does not exist.
+    #[test]
+    fn every_command_the_help_page_lists_is_one_the_dispatch_answers() {
+        let source = include_str!("main.rs");
+        for command in wormhole_core::help::commands() {
+            // `role add` and friends are dispatched by their first word,
+            // then by their verb inside `role_cmd`.
+            let word = command.split_whitespace().next().expect("a word");
+            assert!(
+                source.contains(&format!("Some(\"{word}\"")),
+                "the help page lists `wormhole {command}`, which nothing dispatches"
+            );
+        }
+    }
 }

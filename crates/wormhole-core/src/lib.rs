@@ -4,6 +4,7 @@ pub mod broker;
 pub mod ca;
 pub mod doctor;
 pub mod gc;
+pub mod help;
 pub mod home;
 pub mod launch;
 pub mod limits;
