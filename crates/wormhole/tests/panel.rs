@@ -26,6 +26,34 @@ fn unreadable_home(data_home: &Path, name: &str) {
     std::fs::create_dir_all(data_home.join("wormhole/homes").join(name)).expect("home");
 }
 
+/// The gap this closes: the panel listed every box on the host and was
+/// the one surface from which none of them could be taken away.
+///
+/// Driven end to end on a real terminal rather than through the state
+/// machine alone, because the keys, the question and the removal have to
+/// line up — `x` asks, `y` answers, and only then is the home gone.
+#[test]
+fn x_then_y_removes_the_selected_box_from_the_panel() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let workspace = data.join("proj");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let workspace = workspace.canonicalize().expect("canonical");
+
+    let id = wormhole_core::paths::box_id(&workspace, 0);
+    let home = common::keep_box(data, &common::a_record(&workspace, &id, None));
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wormhole"));
+    command.env("XDG_DATA_HOME", data);
+    // Three keys in one answer: ask, confirm, leave. The panel reads them
+    // one at a time, which is what the sequence is here to prove.
+    let seen = on_a_terminal(command, "x remove", b"xyq");
+
+    assert!(seen.contains(&format!("remove box {id}")), "{seen:?}");
+    assert!(seen.contains("removed"), "{seen:?}");
+    assert!(!home.exists(), "the home survived the panel");
+}
+
 /// The bug this pins: the scan behind the box list used to print what it
 /// could not read straight to stderr, from inside the panel's own redraw
 /// loop, once a second, in raw mode. The panel is the only thing allowed

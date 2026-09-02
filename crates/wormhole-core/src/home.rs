@@ -79,9 +79,9 @@ pub fn parse(text: &str) -> Result<Record, String> {
 /// its directory name already ends in. Both zero times, so a listing sorts
 /// it last and the first start writes the real thing.
 pub fn from_legacy(home: &Path, stamped: &str) -> Option<Record> {
-    let id = home.file_name()?.to_str()?.rsplit_once('-')?.1.to_owned();
+    let id = crate::paths::key_id(home.file_name()?.to_str()?)?.to_owned();
     let workspace = stamped.trim();
-    if !crate::paths::is_box_id(&id) || workspace.is_empty() {
+    if workspace.is_empty() {
         return None;
     }
     Some(Record {
@@ -128,7 +128,13 @@ pub fn answers_to(id: &str, alias: Option<&str>, wanted: &str) -> bool {
 /// The one sentence every command says when nothing answers to what was
 /// typed, whichever form it was and whichever store was searched.
 pub fn no_box(wanted: &str) -> String {
-    format!("no box {wanted} in this workspace; `wormhole ps --all` lists the kept ones")
+    no_box_in(wanted, "in this workspace")
+}
+
+/// The one body behind every "nothing answers to that" sentence, so the
+/// scope is the only thing that ever differs and the rest cannot drift.
+fn no_box_in(wanted: &str, scope: &str) -> String {
+    format!("no box {wanted} {scope}; `wormhole ps --all` lists the kept ones")
 }
 
 /// The box in this workspace that `wanted` names.
@@ -139,6 +145,128 @@ pub fn by_name<'a>(records: &'a [Record], workspace: &Path, wanted: &str) -> Opt
     records.iter().find(|record| {
         record.workspace == workspace && answers_to(&record.id, record.alias.as_deref(), wanted)
     })
+}
+
+/// The box `wanted` names for a command that may reach any box on this
+/// host.
+///
+/// An id is derived from a workspace and an ordinal, so it names exactly
+/// one box everywhere and needs no workspace to be found by. A name
+/// belongs to the workspace it was set in, exactly as it does elsewhere.
+///
+/// [`by_name`] is the same question asked strictly inside one workspace,
+/// which is what *starting* a box needs: `--id` may only name a box of
+/// the tree you are standing in. `rm`, `reset` and `rename` are reached
+/// from the panel too, and the panel lists every box on the host — one
+/// it can show has to be one they can name.
+pub fn find<'a>(records: &'a [Record], workspace: &Path, wanted: &str) -> Option<&'a Record> {
+    match by_id(records, wanted) {
+        Some(found) => Some(found),
+        // Not an id at all, or an id nothing kept. Either way the name
+        // rule is what is left to try.
+        None if crate::paths::is_box_id(wanted) => None,
+        None => by_name(records, workspace, wanted),
+    }
+}
+
+/// The box with this id, from anywhere. `None` when the string is not an
+/// id at all, so a caller that has only an id — the panel, whose rows all
+/// carry one — needs no workspace to pass in.
+pub fn by_id<'a>(records: &'a [Record], wanted: &str) -> Option<&'a Record> {
+    if !crate::paths::is_box_id(wanted) {
+        return None;
+    }
+    records
+        .iter()
+        .find(|record| answers_to(&record.id, record.alias.as_deref(), wanted))
+}
+
+/// A box a lifecycle command is about to act on.
+///
+/// The key is what every store path is built from — home, lock, snapshot
+/// — and it is the home directory's own name, so it is known even when
+/// nothing inside that directory can be read. The record is what the box
+/// says about itself, and a box that can say nothing is still a box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub id: String,
+    pub key: String,
+    /// `None` for a home whose record is missing or corrupt. `--id`
+    /// already starts one of those; refusing to *remove* one would leave
+    /// a box you can see, cannot read, and cannot get rid of.
+    pub record: Option<Record>,
+}
+
+/// The box `wanted` names: by its record where there is one, and by its
+/// home directory where there is not.
+///
+/// The second half is the rule `--id` already lives by — an id names a box
+/// by its directory, and nothing in that directory has to be readable for
+/// it to. Only an id can do it: a name lives *in* the record, so a box
+/// with no record has none.
+///
+/// `keys` is every home directory the store holds. Pure, so the rule that
+/// decides which box gets deleted is testable without a store.
+pub fn target(
+    records: &[Record],
+    keys: &[String],
+    workspace: &Path,
+    wanted: &str,
+) -> Option<Target> {
+    if let Some(record) = find(records, workspace, wanted) {
+        return Some(Target {
+            id: record.id.clone(),
+            key: crate::paths::box_key(&record.workspace, &record.id),
+            record: Some(record.clone()),
+        });
+    }
+    if !crate::paths::is_box_id(wanted) {
+        return None;
+    }
+    keys.iter()
+        .find(|key| crate::paths::key_id(key) == Some(wanted))
+        .map(|key| Target {
+            id: wanted.to_owned(),
+            key: key.clone(),
+            record: None,
+        })
+}
+
+/// The box in `workspace` already answering to `alias`, when it is not
+/// `self_id`.
+///
+/// One rule and one sentence for "that name is taken", because a start,
+/// a rename and the panel all have to give the same answer — and the
+/// answer names the box holding it, so the way out is on the screen.
+pub fn alias_conflict<'a>(
+    records: &'a [Record],
+    workspace: &Path,
+    alias: &str,
+    self_id: &str,
+) -> Option<&'a Record> {
+    by_name(records, workspace, alias).filter(|taken| taken.id != self_id)
+}
+
+/// What to say when it is. Beside the rule, so the two cannot drift.
+pub fn alias_taken(alias: &str, by: &str) -> String {
+    format!(
+        "{alias} already names box {by} in that workspace; \
+         `wormhole rename {by} <other>` frees the name"
+    )
+}
+
+/// Why [`find`] came back empty, said in the scope it actually searched.
+///
+/// [`no_box`] is the same sentence for the workspace-scoped lookup a
+/// start does. Both exist because they answer different questions, and
+/// one sentence claiming a scope it did not search is how a person ends
+/// up looking for a box in the wrong place.
+pub fn no_box_found(wanted: &str) -> String {
+    if crate::paths::is_box_id(wanted) {
+        no_box_in(wanted, "on this host")
+    } else {
+        no_box(wanted)
+    }
 }
 
 /// The role a start is asking for.
@@ -316,6 +444,87 @@ mod tests {
     fn an_alias_from_another_workspace_is_not_found() {
         let records = [called(record("0123456789ab", "/other", None, 1), "api")];
         assert_eq!(by_name(&records, Path::new("/w"), "api"), None);
+    }
+
+    /// The gap this closes: a home whose record cannot be read is listed
+    /// as a problem and never as a box, so `--id` could start one and
+    /// nothing could ever remove it. Its directory name carries the id.
+    #[test]
+    fn a_box_whose_record_cannot_be_read_is_still_named_by_its_directory() {
+        let keys = ["proj-0123456789ab".to_owned()];
+        let found = target(&[], &keys, Path::new("/w"), "0123456789ab").expect("a target");
+        assert_eq!(found.id, "0123456789ab");
+        assert_eq!(found.key, "proj-0123456789ab");
+        assert_eq!(found.record, None);
+    }
+
+    /// A name lives in the record, so a box with no record has none —
+    /// and a directory scan must never answer a name with a guess.
+    #[test]
+    fn only_an_id_reaches_a_box_that_has_no_record() {
+        let keys = ["proj-0123456789ab".to_owned()];
+        assert_eq!(target(&[], &keys, Path::new("/w"), "api"), None);
+    }
+
+    #[test]
+    fn a_box_with_a_record_is_targeted_by_the_record_it_has() {
+        let records = [called(record("0123456789ab", "/w", None, 1), "api")];
+        let found = target(&records, &[], Path::new("/w"), "api").expect("a target");
+        assert_eq!(found.key, "w-0123456789ab");
+        assert_eq!(
+            found.record.expect("the record").alias.as_deref(),
+            Some("api")
+        );
+    }
+
+    /// One rule for "that name is taken", so a start, a rename and the
+    /// panel cannot answer it three ways.
+    #[test]
+    fn a_name_another_box_here_holds_is_a_conflict_and_the_box_itself_is_not() {
+        let records = [
+            called(record("0123456789ab", "/w", None, 1), "api"),
+            record("0123456789ac", "/w", None, 1),
+        ];
+        assert_eq!(
+            alias_conflict(&records, Path::new("/w"), "api", "0123456789ac").map(|r| r.id.as_str()),
+            Some("0123456789ab")
+        );
+        // Its own name is not a conflict with itself.
+        assert_eq!(
+            alias_conflict(&records, Path::new("/w"), "api", "0123456789ab"),
+            None
+        );
+        // And a name is workspace-scoped, here as everywhere.
+        assert_eq!(
+            alias_conflict(&records, Path::new("/other"), "api", "0123456789ac"),
+            None
+        );
+    }
+
+    /// The refusal names the box holding the name, so the way out is on
+    /// the screen rather than in the reader's head.
+    #[test]
+    fn a_taken_name_says_which_box_holds_it_and_how_to_free_it() {
+        let said = alias_taken("api", "0123456789ab");
+        assert!(said.contains("api"), "{said}");
+        assert!(said.contains("wormhole rename 0123456789ab"), "{said}");
+    }
+
+    /// The panel lists every box on the host, and `x` on one of them has
+    /// to reach it. An id is derived from a workspace and an ordinal, so
+    /// it already names exactly one box everywhere.
+    #[test]
+    fn an_id_names_its_box_from_any_workspace_but_a_name_does_not() {
+        let records = [called(record("0123456789ab", "/other", None, 1), "api")];
+        assert_eq!(
+            find(&records, Path::new("/w"), "0123456789ab").map(|r| r.id.as_str()),
+            Some("0123456789ab")
+        );
+        assert_eq!(find(&records, Path::new("/w"), "api"), None);
+        assert_eq!(
+            find(&records, Path::new("/other"), "api").map(|r| r.id.as_str()),
+            Some("0123456789ab")
+        );
     }
 
     /// One rule, whichever store is searched: a kept home and a running

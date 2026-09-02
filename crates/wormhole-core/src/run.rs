@@ -116,6 +116,10 @@ pub enum ParseError {
     UnusableAlias(String),
     BoxUsage,
     PsUsage,
+    RemoveUsage,
+    ResetUsage,
+    RenameUsage,
+    GcUsage,
 }
 
 impl fmt::Display for ParseError {
@@ -173,6 +177,14 @@ impl fmt::Display for ParseError {
                 )
             }
             ParseError::PsUsage => write!(f, "usage: wormhole ps [--all]"),
+            ParseError::RemoveUsage => write!(f, "usage: wormhole remove <id|name> [<id|name>...]"),
+            ParseError::ResetUsage => write!(f, "usage: wormhole reset <id|name>"),
+            ParseError::RenameUsage => write!(f, "usage: wormhole rename <id|name> <new name>"),
+            ParseError::GcUsage => write!(
+                f,
+                "usage: wormhole gc [--delete [--unreferenced]] — \
+                 `--unreferenced` widens what `--delete` takes and means nothing on its own"
+            ),
         }
     }
 }
@@ -413,6 +425,90 @@ pub fn parse_ps_args(args: &[String]) -> Result<PsArgs, ParseError> {
         [flag] if flag == "--all" || flag == "-a" => Ok(PsArgs { all: true }),
         _ => Err(ParseError::PsUsage),
     }
+}
+
+/// Command line after `rm`: the boxes to take away.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RemoveArgs {
+    /// Each one an id or the name somebody gave a box — the two forms
+    /// every command that takes a box takes.
+    pub ids: Vec<String>,
+}
+
+/// Whether an argument is a flag rather than the name of something.
+///
+/// One rule for every command that takes boxes by name, so `remove`,
+/// `reset` and `rename` cannot disagree about whether `--foo` is a typo
+/// or a box nobody has.
+fn is_flag(arg: &str) -> bool {
+    arg.starts_with('-')
+}
+
+pub fn parse_remove_args(args: &[String]) -> Result<RemoveArgs, ParseError> {
+    if args.is_empty() || args.iter().any(|arg| is_flag(arg)) {
+        return Err(ParseError::RemoveUsage);
+    }
+    Ok(RemoveArgs { ids: args.to_vec() })
+}
+
+/// Command line after `reset`: the one box to empty.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ResetArgs {
+    pub id: String,
+}
+
+pub fn parse_reset_args(args: &[String]) -> Result<ResetArgs, ParseError> {
+    match args {
+        [id] if !is_flag(id) => Ok(ResetArgs { id: id.clone() }),
+        _ => Err(ParseError::ResetUsage),
+    }
+}
+
+/// Command line after `rename`: the box, then what to call it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RenameArgs {
+    pub id: String,
+    pub alias: String,
+}
+
+pub fn parse_rename_args(args: &[String]) -> Result<RenameArgs, ParseError> {
+    let [id, alias] = args else {
+        return Err(ParseError::RenameUsage);
+    };
+    if is_flag(id) {
+        return Err(ParseError::RenameUsage);
+    }
+    // The same rule `--as` is held to, asked in the same place: what may
+    // name a box is one decision, and two spellings of it would drift.
+    if !crate::home::is_usable_alias(alias) {
+        return Err(ParseError::UnusableAlias(alias.clone()));
+    }
+    Ok(RenameArgs {
+        id: id.clone(),
+        alias: alias.clone(),
+    })
+}
+
+/// Command line after `gc`: whether to give anything back, and how much.
+///
+/// Parsed straight into the sweep `gc` acts on, so the flags a person
+/// typed and the policy the report and the delete loop both read are one
+/// value rather than three that have to agree.
+pub fn parse_gc_args(args: &[String]) -> Result<crate::gc::Sweep, ParseError> {
+    let mut parsed = crate::gc::Sweep::default();
+    for flag in args {
+        match flag.as_str() {
+            "--delete" => parsed.delete = true,
+            "--unreferenced" => parsed.unreferenced = true,
+            _ => return Err(ParseError::GcUsage),
+        }
+    }
+    // On its own it widens nothing, so it is a half-typed
+    // `--delete --unreferenced` and is answered as one.
+    if parsed.unreferenced && !parsed.delete {
+        return Err(ParseError::GcUsage);
+    }
+    Ok(parsed)
 }
 
 /// One-line identity map: the same id inside and outside, so a file the
@@ -888,6 +984,94 @@ mod tests {
         assert_eq!(
             parse_args(&strings(&["--pidfile", "--", "sh"])),
             Err(ParseError::PidfileWithoutPath)
+        );
+    }
+
+    /// `rm` takes several, because clearing up after a day's work is the
+    /// case it exists for and typing the command once per box is not it.
+    #[test]
+    fn rm_takes_one_box_or_several() {
+        assert_eq!(
+            parse_remove_args(&strings(&["0123456789ab"])).map(|args| args.ids),
+            Ok(vec!["0123456789ab".to_owned()])
+        );
+        assert_eq!(
+            parse_remove_args(&strings(&["api", "web"])).map(|args| args.ids),
+            Ok(vec!["api".to_owned(), "web".to_owned()])
+        );
+        assert_eq!(parse_remove_args(&[]), Err(ParseError::RemoveUsage));
+    }
+
+    /// Resetting is per box on purpose: it throws away one agent's whole
+    /// history, and a typo that did it to several at once is not a thing
+    /// this command should be able to do.
+    #[test]
+    fn reset_takes_exactly_one_box() {
+        assert_eq!(
+            parse_reset_args(&strings(&["api"])).map(|args| args.id),
+            Ok("api".to_owned())
+        );
+        assert_eq!(parse_reset_args(&[]), Err(ParseError::ResetUsage));
+        assert_eq!(
+            parse_reset_args(&strings(&["api", "web"])),
+            Err(ParseError::ResetUsage)
+        );
+    }
+
+    #[test]
+    fn rename_takes_the_box_then_its_new_name() {
+        let parsed = parse_rename_args(&strings(&["0123456789ab", "api"])).expect("parses");
+        assert_eq!(parsed.id, "0123456789ab");
+        assert_eq!(parsed.alias, "api");
+        assert_eq!(
+            parse_rename_args(&strings(&["api"])),
+            Err(ParseError::RenameUsage)
+        );
+    }
+
+    /// The same rule `--as` is held to, in the same words: one place
+    /// decides what may name a box, so the two spellings cannot drift.
+    #[test]
+    fn rename_refuses_a_name_that_could_be_an_id() {
+        assert_eq!(
+            parse_rename_args(&strings(&["api", "0123456789ab"])),
+            Err(ParseError::UnusableAlias("0123456789ab".to_owned()))
+        );
+    }
+
+    #[test]
+    fn gc_looks_by_default_and_deletes_when_told_to() {
+        assert_eq!(
+            parse_gc_args(&[]),
+            Ok(crate::gc::Sweep {
+                delete: false,
+                unreferenced: false
+            })
+        );
+        assert_eq!(
+            parse_gc_args(&strings(&["--delete"])),
+            Ok(crate::gc::Sweep {
+                delete: true,
+                unreferenced: false
+            })
+        );
+        assert_eq!(
+            parse_gc_args(&strings(&["--delete", "--unreferenced"])),
+            Ok(crate::gc::Sweep {
+                delete: true,
+                unreferenced: true
+            })
+        );
+    }
+
+    /// `--unreferenced` widens what `--delete` takes. On its own it would
+    /// widen nothing, so it is a typo for `--delete --unreferenced` and
+    /// is said to be one rather than quietly doing nothing.
+    #[test]
+    fn gc_refuses_unreferenced_without_delete() {
+        assert_eq!(
+            parse_gc_args(&strings(&["--unreferenced"])),
+            Err(ParseError::GcUsage)
         );
     }
 
