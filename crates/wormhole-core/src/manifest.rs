@@ -606,6 +606,26 @@ pub fn recipe_digest(manifest: &Manifest) -> String {
     crate::sha256_hex(recipe_text(manifest).as_bytes())
 }
 
+/// Every digest the store keeps on this recipe's behalf: the image it
+/// builds to, the base rootfs it starts from, and every artifact it pins.
+///
+/// This is what makes a built thing provably referenced. The store names
+/// all three by digest — `images/<recipe>`, `bases/<sha256>`,
+/// `artifacts/<sha256>` — so one list of digests decides which of them a
+/// recipe is still keeping alive, without anything having to record a
+/// back-pointer it would then have to maintain.
+pub fn referenced_digests(manifest: &Manifest) -> Vec<String> {
+    let mut digests = vec![recipe_digest(manifest), manifest.image.base_sha256.clone()];
+    digests.extend(
+        manifest
+            .image
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.sha256.clone()),
+    );
+    digests
+}
+
 /// The shell script that turns a base into the image: package sources
 /// first, then packages, then the manifest's own build lines, stopping at
 /// the first failure. Nothing when there is nothing to install.
@@ -652,6 +672,23 @@ mod tests {
 
     fn minimal() -> String {
         text("")
+    }
+
+    /// What `wormhole gc` needs to prove a built thing is still wanted:
+    /// one recipe names the image it builds to, the base it starts from,
+    /// and every artifact it pins — the three things the store keeps.
+    #[test]
+    fn a_recipe_names_every_digest_the_store_keeps_for_it() {
+        const PINNED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        let manifest = parse(&format!(
+            "{}build = [\"true\"]\n[[image.artifact]]\nurl = \"https://example.test/tool.tgz\"\nsha256 = \"{PINNED}\"\ninto = \"/tmp/tool.tgz\"\n",
+            minimal()
+        ))
+        .expect("valid");
+        let digests = referenced_digests(&manifest);
+        assert_eq!(digests[0], recipe_digest(&manifest));
+        assert!(digests.contains(&DIGEST.to_owned()), "{digests:?}");
+        assert!(digests.contains(&PINNED.to_owned()), "{digests:?}");
     }
 
     fn full(extra: &str) -> Manifest {

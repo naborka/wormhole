@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// naming the same rootfs share one extraction, and a changed digest can
 /// never reuse the old one.
 pub fn base_dir(data_home: &Path, sha256: &str) -> PathBuf {
-    data_home.join("wormhole/bases").join(sha256)
+    bases_dir(data_home).join(sha256)
 }
 
 /// A fetched artifact, under its own digest. The digest is the file's
@@ -22,11 +22,23 @@ pub fn artifacts_dir(data_home: &Path) -> PathBuf {
     data_home.join("wormhole/artifacts")
 }
 
+/// Where every fetched rootfs lives, for the scan that reports them.
+pub fn bases_dir(data_home: &Path) -> PathBuf {
+    data_home.join("wormhole/bases")
+}
+
+/// Where every built image lives, likewise. `gc` walks all three, and
+/// spelling the layout there instead of here is how a store grows two
+/// descriptions of itself.
+pub fn images_dir(data_home: &Path) -> PathBuf {
+    data_home.join("wormhole/images")
+}
+
 /// A base with the manifest's packages and setup applied, under the digest
 /// of the recipe that produced it. Change the recipe and you get a new
 /// image; change nothing and the built one is reused.
 pub fn image_dir(data_home: &Path, recipe: &str) -> PathBuf {
-    data_home.join("wormhole/images").join(recipe)
+    images_dir(data_home).join(recipe)
 }
 
 /// How many characters of a digest name a box. Twelve: short enough to
@@ -66,6 +78,19 @@ pub fn box_key(workspace: &Path, id: &str) -> String {
     format!("{name}-{id}")
 }
 
+/// The id a key ends in, when it ends in one.
+///
+/// This is what lets an id name a box by its *directory*, with nothing
+/// inside it read: a home whose record is corrupt is still a box, and one
+/// that could be started but never removed would be a box you can see and
+/// cannot name. The inverse of [`box_key`], as far as a key can be
+/// inverted — the workspace's basename is not recoverable and is not
+/// needed, because the key itself is what every store path is built from.
+pub fn key_id(key: &str) -> Option<&str> {
+    let id = key.rsplit_once('-')?.1;
+    is_box_id(id).then_some(id)
+}
+
 /// One kept home per box, so its history, settings, logins and installed
 /// toolchain survive every restart of that box. Several boxes may share a
 /// workspace; none of them shares a home.
@@ -103,7 +128,14 @@ pub fn xdg_dir(value: Option<&Path>, home: &Path, home_suffix: &str) -> PathBuf 
 /// agent's, wiped and rebuilt, and a claim that a `rm -rf` could drop is
 /// not a claim.
 pub fn lock_file(data_home: &Path, key: &str) -> PathBuf {
-    data_home.join("wormhole/locks").join(format!("{key}.lock"))
+    locks_dir(data_home).join(format!("{key}.lock"))
+}
+
+/// Where every box's claim token lives. `gc` reads the directory: a lock
+/// whose home is gone is a claim on a box that no longer exists, and the
+/// file stem is exactly the key its home is named by.
+pub fn locks_dir(data_home: &Path) -> PathBuf {
+    data_home.join("wormhole/locks")
 }
 
 /// A role: a manifest plus its instructions, kept in the user's config

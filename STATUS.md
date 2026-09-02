@@ -5,7 +5,7 @@ Update this file in the same commit as the change it records.
 `CONCEPT.md` says what and why, `PLAN.md` says in what order and with which tests. This file only tracks state.
 `AGENT.md` holds the default instructions every box hands its agent, baked into the binary and seeded into the box home on every start.
 
-Tests today: **357** (`cargo test`: 297 pure, 60 binary), **31 kernel** (`cargo test -p wormhole --features kernel-tests`, real host only).
+Tests today: **470** (`cargo test`: 369 pure, 101 binary), **31 kernel** (`cargo test -p wormhole --features kernel-tests`, real host only). The 17 in `tests/build.rs` fetch a rootfs through `curl`, so they need one on the host; everything else runs anywhere.
 
 ## Done — an agent runs in a box today
 
@@ -28,8 +28,12 @@ from `wormhole.toml`, with permissions bypassed, and it holds the terminal.
 | `wormhole role add <url>@<sha> [--as <name>]` — a role that lives in a git repository, pinned to a commit and never a branch. `git` verifies every object against its own hash, so the commit id is the proof and no digest of ours is kept. Fetches it, shows the whole recipe — grants, env, hooks, **and** the base, the packages and every `[image] build` line — and asks. One approval per commit, host-wide; a changed pin shows old sha → new sha and asks again. The pointer goes to config, the checkout to `~/.local/share/wormhole/checkouts/<sha>`. A bare path counts as a repository only when it carries a pin, which is what tells `/srv/mirror@<sha>` from a folder of files | `cargo run -p wormhole -- role add github:you/role@<sha>` |
 | `wormhole role list \| show <name\|dir> \| remove <name>` — what is installed and whether it can start; the whole recipe without installing it; and taking a name back. `remove` unlinks the name and never follows it, so removing an installed local role leaves the directory you work in alone | `cargo run -p wormhole -- role list` |
 | `wormhole usage` — what is left of the account's usage windows: session, weekly, and the scoped weekly one that binds first, with reset countdowns. During conversation the same reading shows in Claude Code's status bar as `SESSION: 13%  FABLE: 78%  WEEKLY: 47%`, kept fresh from the host — the box holds no credential and makes no call for it | `cargo run -p wormhole -- usage` |
-| bare `wormhole` — the panel: every box, running and idle, most recently used first. Enter does the one thing that row allows — join a running box's agent, or start an idle one again in its own workspace. `n` makes another box here: it picks a source (workspace manifest or an installed role), previews everything the box will see, then starts it; `d` stops the selected box and says so, and on a box that is not running says *that* instead of redrawing an unchanged screen; `q` quits | `cargo run -p wormhole` |
-| `wormhole gc [--delete]` — what the data home holds and what of it can be given back. Reclaims dead box directories and homes whose workspace is gone; images and bases are reported with their size and never removed, because nothing records what references them | `cargo run -p wormhole -- gc` |
+| bare `wormhole` — the panel: every box, running and idle, most recently used first. Enter does the one thing that row allows — join a running box's agent, or start an idle one again in its own workspace. `n` makes another box here: it picks a source (workspace manifest or an installed role), previews everything the box will see, then starts it; `d` stops the selected box and says so, and on a box that is not running says *that* instead of redrawing an unchanged screen; `x` removes a box and `r` resets one, both asking first with `y` as the only key that answers and every other key — `q` included — cancelling; `q` quits | `cargo run -p wormhole` |
+| `wormhole rename <id\|name> <new name>` — what a box answers to besides its id, set without starting it. Scoped to the box's workspace and refused where another box there already answers to it; refused while the box runs, because its registry entry carries the name it started under and nothing rewrites that in flight | `cargo run -p wormhole -- rename a3f9c1e40b2d api` |
+| `wormhole reset <id\|name>` — empties a box's home and keeps the box: same id, name, workspace and role, nothing the agent put there. The difference between starting over and starting somewhere else | `cargo run -p wormhole -- reset api` |
+| `wormhole remove <id\|name>...` — takes boxes away: the home each kept and the snapshot beside it. Several at once, every name resolved before any box goes, so a typo at the end refuses the line rather than leaving half of it done. A home whose record cannot be read is still a box — its directory name carries the id, which is what `--id` already starts one by | `cargo run -p wormhole -- remove api web` |
+| All three take the box's own claim first, so the kernel answers "is this running" rather than a list that can go stale, and no removal can reach a home an agent is writing to. The panel's `x` and `r` call the same bodies | |
+| `wormhole gc [--delete [--unreferenced]]` — what the data home holds and what of it can be given back. `--delete` takes what is proven dead: box directories whose process is gone, homes whose workspace no longer exists, locks whose box is gone. `--unreferenced` widens it to images, bases and artifacts no box on this host starts from — proven by reading every kept box's recipe, since a recipe names every digest the store keeps for it. Two claims, kept apart: a recipe built but never run from references nothing countable, so a bare `--delete` leaves it. One unreadable recipe makes the whole answer `unproven` and nothing is taken | `cargo run -p wormhole -- gc --delete --unreferenced` |
 | `wormhole broker` — the host-side proxy on a unix socket. Holds the credential, renews it under a lock, strips the box's dummy key and injects the real token, and streams the reply straight back. A box with `[access] broker = true` gets the socket and wormhole's own binary bound read-only under `/run`, starts a forwarder on its loopback, and is pointed at it by `ANTHROPIC_BASE_URL` — so the box holds no credential and needs no route | `cargo run -p wormhole -- broker` |
 | `wormhole doctor` — 9 host probes, pure verdict, exit code | `cargo run -p wormhole -- doctor` |
 | Purity guard: `wormhole-core` has no OS or I/O dependencies | `cargo test -p wormhole-core purity` |
@@ -110,6 +114,7 @@ does survives into the next box or back into the image.
 | N8 | `wormhole attach <id>`: joins the box's user, UTS, PID and mount namespaces through its PID 1 (host pid kept in `boxes/<id>/init.pid`), runs a shell or command in the workspace. The box gets its own `devpts` and `/dev/ptmx`, so terminal-opening tools work | **done**, needs a host run to confirm (`attach_joins_a_running_box`) |
 | N10 | Roles: `wormhole build/box --role <name\|dir>` reads the manifest, instructions and preflight from `~/.config/wormhole/roles/<name>/` or a directory path. An explicit `--role` beats the workspace's own manifest; `instructions` and `hooks.preflight` resolve against the role's directory (the hook is seeded into the box home) | **done** |
 | N9 | The panel, first slice: bare `wormhole` lists running boxes live, Enter joins the box's agent (execs `attach`), `n` starts a new box from the current workspace's manifest, `d` kills the box's PID 1, `q` quits. Pure state machine in `wormhole-core::tui`, thin `crossterm` shell around it. The role/grant picker is N9b | **done**, needs a host terminal to confirm |
+| N12 | The rest of a box's life: `wormhole rename`, `reset` and `remove`, and `x`/`r`/`y` in the panel. One rule for all three — the box must be idle, proven by taking its own claim rather than by reading a list. `gc` learns to prove a built thing unreferenced by reading every kept box's recipe, and reclaims orphaned locks. Every decision stays pure: `run::parse_*`, `tui::Act` and `tui::Key::from_char`, `gc::Sweep`/`plan`/`built_verdict`/`lock_verdict`, `manifest::referenced_digests`, `paths::key_id`, `home::target`/`find`/`alias_conflict`. The claim is the *type* the verbs act on (`Claimed`), so a fourth verb cannot forget to take it | **done**, 14 lifecycle tests plus the panel driven on a real pty |
 | N11 | Usage limits in the conversation: the host polls the endpoint behind Claude Code's own `/usage` (host credential, `curl` config over stdin so no token in argv), caches the reply, and `wormhole box` writes the rendered line into `<box home>/.claude/wormhole-limits` once a minute. A seeded status-line script reads that file; the `statusLine` entry is merged into the home's `.claude/settings.json` and one the user set themselves wins. Parsing and both renderings are pure (`wormhole-core::limits`), including the scoped per-model weekly window that binds before the headline weekly one | **done**, needs a host run to confirm the status bar |
 
 What the first real runs taught, each fixed at the root rather than patched:
@@ -128,6 +133,29 @@ What the first real runs taught, each fixed at the root rather than patched:
   absent in the box, so `env` gained `value` (fixed) beside `default`.
 
 What a review of the finished code found, each fixed at the root as well:
+
+- **`gc` reused the resolver a *launch* uses, so a listing could fetch and
+  prompt.** A box's recorded role may be a pinned ref; resolving one may
+  `git fetch` and take the terminal for an approval. A bare `wormhole gc`
+  could therefore reach the network, seize the screen and exit before
+  printing a line — and its answer depended on whether stdin was a
+  terminal, so the same store proved different things to a person and to
+  cron. Whether a resolve may fetch is now something the command says
+  (`Fetch::IfAsked` / `Fetch::Never`), asked at the edge rather than
+  inferred from who is watching.
+- **`gc` reaped the box directories it had just measured.** Its reference
+  scan called `live_boxes`, which renames a dead box's directory and
+  deletes it in a thread — after the recursive size walk, and before
+  `--delete` tried to remove a path that was already gone. Each store
+  directory is walked exactly once now, and reaping stays with `ps` and
+  the panel, which are the two things whose job it is.
+- **`gc --delete` used the quiet deleter and printed `removed` anyway.**
+  A person who asked for space back was told they had it whether or not
+  they did. The loud form is what a person's request takes, and the exit
+  code says so.
+- **Two booleans decided what the report described and what the loop
+  removed.** They had to agree and nothing made them. `gc::plan` partitions
+  once; the report prints that plan and the caller deletes from it.
 
 - **A registry entry was written in place, where every peer reads it.**
   `box.toml` was truncated and rewritten while `ps`, the panel and every
@@ -284,7 +312,7 @@ dead in a network-less box), the git and GitHub broker, and the control panel.
 | A credentials grant carries account-level capabilities the preview cannot show: `~/.claude/.credentials.json` brings every hosted MCP connector on the claude.ai account (JIRA, Slack, ...), executing server-side, invisible to the mount plan and the future broker. Documented in the handbook's access model; the real fix is a separate agent account or detached connectors | open |
 | An attached shell carries the attacher's environment, not the box's declared one — that environment lives in PID 1 and nothing can read it back | if it bites; the box's own terminal is authoritative |
 | Images are one verified tarball, not digest-pinned layers — your host has no unprivileged overlayfs and no `fuse-overlayfs`, so there is nothing to stack | when overlay is available |
-| An image or a base is never reclaimed automatically: nothing records which manifest or role a built image belongs to, so nothing can prove one is unreferenced. `wormhole gc` reports both with their size and removes neither | when an image records the recipe that built it |
+| An image built by `wormhole build` but never started from has no box, so `gc` reads it as `unreferenced` — correct as stated, and still not the same as unwanted. It is why `--unreferenced` is a flag of its own rather than part of `--delete` | by design; revisit if it bites |
 | Bare `wormhole run` inherits the host's environment apart from `HOME`, `HOSTNAME` and `PATH`. `wormhole box` passes only what the manifest declares; the build box passes nothing | closed for `box` |
 | PID 1 ignores any signal it has no handler for, and reaps no orphans. The agent being PID 1 is a design choice; a reaping init would undo it | revisit if zombies bite |
 | A recycled pid can make a dead box's registry entry look alive until its dir is removed | if it bites; the window is one pid wrap |

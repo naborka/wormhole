@@ -22,6 +22,11 @@ pub struct Tui {
     /// exactly what a key it does not understand already does. Two
     /// different answers must not look the same.
     note: Option<String>,
+    /// An act waiting to be answered for. Held here rather than on a
+    /// screen of its own so the question, the keys that answer it and the
+    /// refusals around it are all one testable state machine — the panel
+    /// draws what this says and decides nothing.
+    pending: Option<Act>,
 }
 
 /// How many unreadable things the panel names before it stops listing
@@ -52,12 +57,90 @@ pub enum Key {
     Enter,
     Stop,
     New,
+    Remove,
+    Reset,
+    /// The one key that answers a question. Anything else cancels it, so
+    /// a stray press can never delete an agent's history.
+    Yes,
     Quit,
 }
 
-/// What the binary must do after a key. Attaching and resuming name a box
-/// while stopping kills a process, so each carries what it actually needs
-/// — all read off the one selected row.
+impl Key {
+    /// Which key a character is, if it is one.
+    ///
+    /// The binding lives here, beside the hints that name it: a keycap
+    /// printed in one crate and decoded in another is a hint that can
+    /// start lying with every test still green. The binary keeps only
+    /// what is genuinely its own — arrows, Enter, Escape, `Ctrl-C`.
+    pub fn from_char(typed: char) -> Option<Key> {
+        Some(match typed {
+            'k' => Key::Up,
+            'j' => Key::Down,
+            'd' => Key::Stop,
+            'n' => Key::New,
+            'x' => Key::Remove,
+            'r' => Key::Reset,
+            'y' => Key::Yes,
+            'q' => Key::Quit,
+            _ => return None,
+        })
+    }
+}
+
+/// Something the panel does without leaving the screen, and the outcome
+/// comes back to it through [`Tui::acted`].
+///
+/// One type rather than one closure per verb: the panel hands these to a
+/// single caller, so a new in-place act is a variant here and nothing else
+/// has to change shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Act {
+    /// Kill this box's PID 1; its own `wormhole box` cleans up.
+    Stop(u32),
+    /// Take this box away: its home, and everything the agent kept in it.
+    Remove(String),
+    /// Empty this box's home, keeping the box itself — same id, same
+    /// name, same workspace, nothing the agent wrote.
+    Reset(String),
+}
+
+impl Act {
+    /// The question this has to be answered for, or `None` when it needs
+    /// no answer — which is also the note the screen shows while it is
+    /// waiting, so an act with nothing to ask puts nothing up.
+    ///
+    /// Stopping needs none: it ends a process the same row starts again,
+    /// so a confirm there would be friction over nothing. Removing and
+    /// resetting both take an agent's history, which no key press should
+    /// be able to do by accident.
+    fn question(&self) -> Option<String> {
+        match self {
+            Act::Stop(_) => None,
+            Act::Remove(id) => Some(format!(
+                "remove box {id}? its home goes with it — history, logins, \
+                 and whatever the agent installed. y confirm, any other key cancel"
+            )),
+            Act::Reset(id) => Some(format!(
+                "reset box {id}? it keeps its id, name and workspace, and starts \
+                 next time with an empty home. y confirm, any other key cancel"
+            )),
+        }
+    }
+
+    /// What the screen says once it has happened. Public because the
+    /// commands say the same thing when they do the same work, and two
+    /// sentences for one act would drift.
+    pub fn done(&self) -> String {
+        match self {
+            Act::Stop(_) => "stopping that box".to_owned(),
+            Act::Remove(id) => format!("box {id} removed"),
+            Act::Reset(id) => format!("box {id} reset; its next start begins fresh"),
+        }
+    }
+}
+
+/// What the binary must do after a key: leave the panel for something
+/// else, or do one thing here and stay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Redraw,
@@ -66,11 +149,12 @@ pub enum Action {
     /// Leave the TUI and start this idle box again, in its own workspace,
     /// with the home and history it kept.
     Resume(String),
-    /// Kill this box's PID 1; its own `wormhole box` cleans up.
-    Stop(u32),
     /// Leave the TUI and start another box in the current workspace.
     New,
     Quit,
+    /// Do this without leaving the panel, then report through
+    /// [`Tui::acted`].
+    Do(Act),
 }
 
 impl Tui {
@@ -88,6 +172,15 @@ impl Tui {
         // A refusal answers one key press. Cleared here, so it can never
         // go on describing a key the user has already moved past.
         self.note = None;
+        // A question owns the whole keyboard until it is answered: `y`
+        // does it, everything else — `q` included — takes it back. Taken
+        // rather than read, so no key can leave the question standing.
+        if let Some(act) = self.pending.take() {
+            return match key {
+                Key::Yes => Action::Do(act),
+                _ => Action::Redraw,
+            };
+        }
         match key {
             Key::Quit => Action::Quit,
             Key::New => Action::New,
@@ -103,7 +196,7 @@ impl Tui {
                 None => Action::Redraw,
             },
             Key::Stop => match self.boxes.get(self.selected).map(|entry| entry.running) {
-                Some(Some(pid)) => Action::Stop(pid),
+                Some(Some(pid)) => Action::Do(Act::Stop(pid)),
                 // Stopping an idle box would mean killing nothing — which
                 // is said, not silently done.
                 Some(None) => {
@@ -112,19 +205,51 @@ impl Tui {
                 }
                 None => Action::Redraw,
             },
+            Key::Remove => self.ask(Act::Remove),
+            Key::Reset => self.ask(Act::Reset),
+            // Only ever an answer, and there was no question: the same
+            // nothing any key the panel does not know already does.
+            Key::Yes => Action::Redraw,
+        }
+    }
+
+    /// Puts a question about the selected box on the screen, or says why
+    /// there is nothing to ask.
+    ///
+    /// Both acts need the box idle for the same reason: its home is what
+    /// they touch, and a running agent is writing to it. The claim the
+    /// binary takes is what actually proves that — this only spares the
+    /// user a question whose answer was always going to be refused.
+    fn ask(&mut self, make: fn(String) -> Act) -> Action {
+        match self.boxes.get(self.selected) {
+            None => Action::Redraw,
+            Some(entry) if entry.running.is_some() => {
+                self.note = Some("that box is running; d stops it first".to_owned());
+                Action::Redraw
+            }
+            Some(entry) => {
+                let act = make(entry.record.id.clone());
+                // A question is a note like any other. `update` clears the
+                // note on every key, which is exactly when a question has
+                // to go — so one field holds both and they cannot both be
+                // up by construction rather than by comment.
+                self.note = act.question();
+                self.pending = Some(act);
+                Action::Redraw
+            }
         }
     }
 
     /// What the stop the panel asked for came to.
     ///
-    /// Stopping is the one action that leaves the user sitting on this
-    /// screen, so it is the one that has to report itself — a signal
-    /// lands when the kernel gets to it, and until then the row still
-    /// reads `running`. The words stay here rather than in the binary:
-    /// what the screen says is this module's decision.
-    pub fn stopped(&mut self, outcome: Result<(), String>) {
+    /// These are the acts that leave the user sitting on this screen, so
+    /// they are the ones that have to report themselves — a signal lands
+    /// when the kernel gets to it, and until then the row still reads
+    /// `running`. The words stay here rather than in the binary: what the
+    /// screen says is this module's decision.
+    pub fn acted(&mut self, act: &Act, outcome: Result<(), String>) {
         self.note = Some(match outcome {
-            Ok(()) => "stopping that box".to_owned(),
+            Ok(()) => act.done(),
             Err(why) => why,
         });
     }
@@ -148,8 +273,9 @@ impl Tui {
                 screen.push_str(&format!("  ... and {hidden} more\n"));
             }
         }
-        screen.push_str("\nenter attach or resume   n new   d stop   q quit\n");
-        // Last, so a refusal appearing and going never moves the hints.
+        screen
+            .push_str("\nenter attach or resume   n new   d stop   x remove   r reset   q quit\n");
+        // Last, so a line appearing and going never moves the hints.
         if let Some(note) = &self.note {
             screen.push_str(note);
             screen.push('\n');
@@ -188,7 +314,9 @@ impl Picker {
             }
             Key::Enter => PickAction::Chosen(self.selected),
             Key::Quit => PickAction::Back,
-            Key::Stop | Key::New => PickAction::Redraw,
+            // This screen picks what a new box starts from. Nothing is
+            // selected that could be stopped, removed or reset.
+            Key::Stop | Key::New | Key::Remove | Key::Reset | Key::Yes => PickAction::Redraw,
         }
     }
 
@@ -528,7 +656,7 @@ mod tests {
             tui.update(Key::Enter),
             Action::Attach("000000000001".to_owned())
         );
-        assert_eq!(tui.update(Key::Stop), Action::Stop(20));
+        assert_eq!(tui.update(Key::Stop), Action::Do(Act::Stop(20)));
     }
 
     /// Enter does the one thing the row allows. On an idle box that is
@@ -568,10 +696,133 @@ mod tests {
     #[test]
     fn a_stop_says_what_it_came_to() {
         let mut tui = boxes(&[Some(7)]);
-        tui.stopped(Ok(()));
+        tui.acted(&Act::Stop(7), Ok(()));
         assert!(tui.view(0).contains("stopping"), "{}", tui.view(0));
-        tui.stopped(Err("cannot stop the box's init 7: EPERM".to_owned()));
+        tui.acted(
+            &Act::Stop(7),
+            Err("cannot stop the box's init 7: EPERM".to_owned()),
+        );
         assert!(tui.view(0).contains("EPERM"), "{}", tui.view(0));
+    }
+
+    /// The gap this closes: the panel listed every box on this host and
+    /// was the one surface from which none of them could be cleared up.
+    #[test]
+    fn x_asks_before_it_removes_and_y_is_what_answers() {
+        let mut tui = boxes(&[None]);
+        assert_eq!(tui.update(Key::Remove), Action::Redraw);
+        let asked = tui.view(0);
+        assert!(asked.contains("remove box 000000000000"), "{asked}");
+        assert!(asked.contains("y confirm"), "{asked}");
+        assert_eq!(
+            tui.update(Key::Yes),
+            Action::Do(Act::Remove("000000000000".to_owned()))
+        );
+    }
+
+    #[test]
+    fn r_asks_before_it_empties_a_box_and_says_what_it_keeps() {
+        let mut tui = boxes(&[None]);
+        assert_eq!(tui.update(Key::Reset), Action::Redraw);
+        let asked = tui.view(0);
+        assert!(asked.contains("reset box 000000000000"), "{asked}");
+        assert!(asked.contains("keeps its id"), "{asked}");
+        assert_eq!(
+            tui.update(Key::Yes),
+            Action::Do(Act::Reset("000000000000".to_owned()))
+        );
+    }
+
+    /// A question about deleting an agent's whole history must not be
+    /// answerable by a stray keystroke.
+    #[test]
+    fn any_key_but_y_cancels_the_question_and_leaves_the_box_alone() {
+        let mut tui = boxes(&[None]);
+        tui.update(Key::Remove);
+        assert_eq!(tui.update(Key::Down), Action::Redraw);
+        assert!(!tui.view(0).contains("remove box"), "{}", tui.view(0));
+        // The question is gone, so `y` is now a key with nothing to answer.
+        assert_eq!(tui.update(Key::Yes), Action::Redraw);
+    }
+
+    /// `q` is the reflex for "no". Taking the whole panel down on it
+    /// would be the one answer nobody meant.
+    #[test]
+    fn q_answers_the_question_rather_than_leaving_the_panel() {
+        let mut tui = boxes(&[None]);
+        tui.update(Key::Remove);
+        assert_eq!(tui.update(Key::Quit), Action::Redraw);
+        assert_eq!(tui.update(Key::Quit), Action::Quit);
+    }
+
+    /// Both acts touch the home a running agent is writing to. The claim
+    /// the binary takes is the real proof; refusing here is what spares
+    /// the user a question that was always going to be refused.
+    #[test]
+    fn a_running_box_is_neither_removed_nor_reset_and_the_screen_says_why() {
+        for key in [Key::Remove, Key::Reset] {
+            let mut tui = boxes(&[Some(7)]);
+            assert_eq!(tui.update(key), Action::Redraw);
+            let screen = tui.view(0);
+            assert!(screen.contains("running"), "{screen}");
+            assert!(screen.contains("d stops it first"), "{screen}");
+            // Nothing was asked, so nothing can be confirmed.
+            assert_eq!(tui.update(Key::Yes), Action::Redraw);
+        }
+    }
+
+    #[test]
+    fn an_empty_list_has_nothing_to_remove_or_reset() {
+        let mut tui = running(&[]);
+        assert_eq!(tui.update(Key::Remove), Action::Redraw);
+        assert_eq!(tui.update(Key::Reset), Action::Redraw);
+        assert!(!tui.view(0).contains("remove box"), "{}", tui.view(0));
+    }
+
+    #[test]
+    fn a_removal_and_a_reset_say_what_they_came_to() {
+        let mut tui = boxes(&[None]);
+        tui.acted(&Act::Remove("000000000000".to_owned()), Ok(()));
+        assert!(tui.view(0).contains("removed"), "{}", tui.view(0));
+        tui.acted(&Act::Reset("000000000000".to_owned()), Ok(()));
+        assert!(tui.view(0).contains("reset"), "{}", tui.view(0));
+        tui.acted(
+            &Act::Remove("000000000000".to_owned()),
+            Err("box 000000000000 is running".to_owned()),
+        );
+        assert!(tui.view(0).contains("is running"), "{}", tui.view(0));
+    }
+
+    /// A key that is not on the screen is a key nobody presses — and a
+    /// keycap on the screen that decodes to nothing is a screen that
+    /// lies. Both halves are asserted against the same binding table.
+    #[test]
+    fn every_keycap_the_hints_show_is_a_key_the_panel_decodes() {
+        let screen = boxes(&[None]).view(0);
+        for (cap, key) in [
+            ('n', Key::New),
+            ('d', Key::Stop),
+            ('x', Key::Remove),
+            ('r', Key::Reset),
+            ('q', Key::Quit),
+        ] {
+            assert!(screen.contains(cap), "no {cap:?} in the hints:\n{screen}");
+            assert_eq!(Key::from_char(cap), Some(key), "{cap:?}");
+        }
+        assert!(screen.contains("enter"), "{screen}");
+        // The confirm keycap is named on the question, not in the hints.
+        let mut asking = boxes(&[None]);
+        asking.update(Key::Remove);
+        assert!(asking.view(0).contains("y confirm"), "{}", asking.view(0));
+        assert_eq!(Key::from_char('y'), Some(Key::Yes));
+    }
+
+    /// A character the panel does not bind must stay unbound, or a stray
+    /// keystroke starts meaning something.
+    #[test]
+    fn a_character_the_panel_does_not_bind_decodes_to_nothing() {
+        assert_eq!(Key::from_char('z'), None);
+        assert_eq!(Key::from_char('Y'), None);
     }
 
     /// A refusal answers one key press. Left on the screen it would go on

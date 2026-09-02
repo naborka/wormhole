@@ -60,6 +60,45 @@ _Avoid_: layer, snapshot, container image
 The per-box directory mounted as the box's `$HOME`. The only box state that outlives the box: logins, history, and whatever the agent installed there.
 _Avoid_: home volume, state dir
 
+### A box's life
+
+**Key**:
+What a box's store entries are named by: its workspace's basename and its id, `proj-a3f9c1e40b2d`. One string behind the home, the lock and the snapshot, so those three can never disagree about which box they are. A key carries the id, which is why a box whose record cannot be read can still be named by one.
+_Avoid_: slug, path, dirname
+
+**Claim**:
+The `flock` a box holds for as long as something is using it. The only honest answer to "is this box running": a list can go stale between the reading and the acting, and taking the lock cannot. Every command that touches a home takes it first.
+_Avoid_: lock (that is the file; the claim is the hold on it), pidfile, mutex
+
+**Stop**:
+Ending a box's process. The box survives — its home is untouched and the next start picks it up where it was.
+_Avoid_: kill, close, delete
+
+**Reset**:
+Emptying a box's home while keeping the box: same id, same alias, same workspace, same role. The difference between starting over and starting somewhere else, which is what a new box would be.
+_Avoid_: clear, wipe, reinit
+
+**Remove**:
+Taking a box away for good — its home and its snapshot. Never done on wormhole's own initiative: `gc` reclaims only what it can prove, and "finished with" is not something anything can prove.
+_Avoid_: delete, destroy, prune
+
+### What `gc` can prove
+
+Four verdicts, and the differences between them are the point. `gc` deletes only what it can prove, so each verdict says exactly what was proven.
+
+**Dead**:
+Proven finished with: a box directory whose process is gone, a home whose workspace no longer exists, a lock whose box is gone. What a bare `--delete` takes.
+
+**Live**:
+In use, or claimed by something still running. Never taken, however the flags are set.
+
+**Unreferenced**:
+Proven that no box on this host starts from it — a digest that no kept box's recipe names. A weaker claim than dead, because a recipe built but never started from references nothing that can be counted, so `--unreferenced` is what asks for it and `--delete` alone leaves it.
+_Avoid_: unused, orphaned, stale (each of those claims more than was proven)
+
+**Unproven**:
+A recipe could not be read, so nothing about what references it can be shown either way. Reported with its size and never taken. One unreadable manifest makes the whole answer unproven rather than deleting on a gap in the evidence.
+
 ### What a box can reach
 
 **Grant**:

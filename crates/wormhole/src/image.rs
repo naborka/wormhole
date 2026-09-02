@@ -114,8 +114,10 @@ pub fn finish(partial: &Path, final_dir: &Path) -> Result<PathBuf, String> {
     Ok(final_dir.to_owned())
 }
 
-pub fn discard(partial: &Path) {
-    let _ = fs::remove_dir_all(partial);
+/// Makes a path not exist, for the callers with nowhere to put a failure:
+/// a throwaway root copy nobody waits on, and the detached reap behind it.
+pub fn discard(path: &Path) {
+    let _ = remove(path);
 }
 
 fn fetch(url: &str, target: &Path) -> Result<(), String> {
@@ -181,11 +183,23 @@ pub fn create(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))
 }
 
-fn remove(dir: &Path) -> Result<(), String> {
-    match fs::remove_dir_all(dir) {
+/// Makes a path not exist. Absence is success — every caller wants the
+/// path gone, not the deleting.
+///
+/// Whatever the path is: `gc` hands this a directory holding a gigabyte
+/// and a lock file holding nothing, and a deleter that only knew about
+/// directories would leave one of them behind for no reason a caller
+/// could see.
+pub fn remove(path: &Path) -> Result<(), String> {
+    let gone = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match gone {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("cannot clear {}: {e}", dir.display())),
+        Err(e) => Err(format!("cannot clear {}: {e}", path.display())),
     }
 }
 

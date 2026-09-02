@@ -6,13 +6,14 @@ mod probes;
 mod terminfo;
 mod usage;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{Flock, FlockArg};
 
 use wormhole_core::{
     doctor, gc, home, launch, limits_cgroup, manifest, paths, receipt, registry, run, seed, source,
+    tui,
 };
 
 const MANIFEST: &str = "wormhole.toml";
@@ -51,6 +52,9 @@ fn main() {
         Some("role") => role_cmd(&args[1..]),
         Some("init") => init_cmd(&args[1..]),
         Some("stop") => stop_cmd(&args[1..]),
+        Some("remove") => remove_cmd(&args[1..]),
+        Some("reset") => reset_cmd(&args[1..]),
+        Some("rename") => rename_cmd(&args[1..]),
         Some("gc") => gc_cmd(&args[1..]),
         Some("ps") => ps(&args[1..]),
         Some("usage") => account_usage(),
@@ -301,7 +305,7 @@ fn role_show(name: &str) -> ! {
     if let source::Names::Repo(_) = source::names(name) {
         fail("a repository is shown by `wormhole role add`, which fetches it first");
     }
-    let at = role_source_dir(name).unwrap_or_else(|e| fail(&e));
+    let at = role_source_dir(name, Fetch::IfAsked).unwrap_or_else(|e| fail(&e));
     // The resolver's own line is the preview's header, so `show` prints
     // one `manifest:` line rather than two.
     print!("{}", preview_of(&at.dir, &at.label));
@@ -576,8 +580,7 @@ fn run_box(args: &[String]) -> ! {
     let parsed = run::parse_box_args(args).unwrap_or_else(|e| usage(&e.to_string()));
     let data_home = data_home();
 
-    let workspace = std::env::current_dir()
-        .unwrap_or_else(|e| fail(&format!("cannot read working directory: {e}")));
+    let workspace = here();
 
     // A box named outright is claimed before anything else, so a refusal
     // costs nothing: which box it is was already said, and resolving a
@@ -843,7 +846,7 @@ fn claim_named(data_home: &Path, workspace: &Path, wanted: &str) -> (String, Flo
         Some(lock) => (id, lock),
         None => fail(&format!(
             "box {id} is already running{}",
-            holder(data_home, workspace, &id)
+            holder(data_home, &paths::box_key(workspace, &id))
         )),
     }
 }
@@ -892,9 +895,11 @@ fn claim_id(data_home: &Path, workspace: &Path, id: &str) -> Option<Flock<std::f
 
 /// Who holds a box's claim, for a refusal that names them. Empty when the
 /// file says nothing — the lock is the claim, this is only the courtesy.
-fn holder(data_home: &Path, workspace: &Path, id: &str) -> String {
-    let file = paths::lock_file(data_home, &paths::box_key(workspace, id));
-    let pid = std::fs::read_to_string(&file).unwrap_or_default();
+///
+/// Takes the key rather than the workspace and the id, because a box
+/// whose record cannot be read has a key and nothing else.
+fn holder(data_home: &Path, key: &str) -> String {
+    let pid = std::fs::read_to_string(paths::lock_file(data_home, key)).unwrap_or_default();
     match pid.trim() {
         "" => String::new(),
         pid => format!(" (pid {pid})"),
@@ -1050,8 +1055,7 @@ fn write_record(
         created_unix: created,
         started_unix: now,
     };
-    let text = home::to_toml(&record).unwrap_or_else(|e| fail(&e));
-    seed_file(home, home::RECORD, &text);
+    write_box_record(home, &record).unwrap_or_else(|e| fail(&e));
 }
 
 /// Writes this box's registry entry beside its root copy. A failure here
@@ -1123,20 +1127,27 @@ fn replace(file: &Path, content: &[u8], mode: Option<u32>) -> Result<(), String>
 /// history and an image costs a rebuild, so removing either is something a
 /// person asks for rather than something a listing does.
 fn gc_cmd(args: &[String]) -> ! {
-    let deleting = match args {
-        [] => false,
-        [flag] if flag == "--delete" => true,
-        _ => usage("usage: wormhole gc [--delete]"),
-    };
+    let sweep = run::parse_gc_args(args).unwrap_or_else(|e| usage(&e.to_string()));
     let data_home = data_home();
     let mut items = Vec::new();
+    // What the store is keeping something alive for, gathered as the walks
+    // go: the digests running boxes are using, and the recipes kept ones
+    // start from.
+    let mut referenced = BTreeSet::new();
 
-    // A dead box's directory holds a whole root copy. `ps` and the panel
-    // reap these already; gc is what a person runs when neither has.
+    // A dead box's directory holds a whole root copy. Walked once and
+    // never reaped here: `ps` and the panel reap, and a reap in the middle
+    // of a scan renames the very tree this loop has just measured.
     for entry in read_dir(&paths::boxes_dir(&data_home)) {
         let path = entry.path();
         let verdict = match box_dir_pid(&path) {
-            Some(pid) if alive(pid) => gc::Verdict::Live(format!("pid {pid} is running")),
+            Some(pid) if alive(pid) => {
+                // A running box was copied from its image, and under
+                // `rootfs = "readonly"` it *is* the image. Its entry says
+                // which, so nothing can delete a box's root in flight.
+                referenced.extend(running_image(&path));
+                gc::Verdict::Live(format!("pid {pid} is running"))
+            }
             Some(pid) => gc::Verdict::Dead(format!("pid {pid} is gone")),
             None => gc::Verdict::Dead("a reap that never finished".to_owned()),
         };
@@ -1148,52 +1159,147 @@ fn gc_cmd(args: &[String]) -> ! {
     }
 
     // A kept home outlives the workspace it was kept for. It can be
-    // reclaimed because a box records which workspace it belongs to.
+    // reclaimed because a box records which workspace it belongs to — and
+    // the same read gives the recipes below, so the homes are walked once.
+    let mut records = Vec::new();
+    let mut keys = BTreeSet::new();
+    let mut unreadable = 0usize;
     for entry in read_dir(&paths::homes_dir(&data_home)) {
         let path = entry.path();
+        keys.extend(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+        );
         let record = read_record(&path).ok();
         let workspace = record
             .as_ref()
             .map(|record| record.workspace.display().to_string());
-        let workspace = workspace.as_deref();
         items.push(gc::Item {
             bytes: tree_bytes(&path),
-            verdict: gc::home_verdict(workspace, workspace.is_some_and(|w| Path::new(w).is_dir())),
+            verdict: gc::home_verdict(
+                workspace.as_deref(),
+                workspace.as_deref().is_some_and(|w| Path::new(w).is_dir()),
+            ),
+            path,
+        });
+        match record {
+            Some(record) => records.push(record),
+            None => unreadable += 1,
+        }
+    }
+
+    // A lock file is an empty claim token beside a home; the file's stem
+    // is exactly the key that home is named by, so the keys just gathered
+    // answer this without a stat each.
+    for entry in read_dir(&paths::locks_dir(&data_home)) {
+        let path = entry.path();
+        let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        items.push(gc::Item {
+            bytes: tree_bytes(&path),
+            verdict: gc::lock_verdict(keys.contains(key)),
             path,
         });
     }
 
-    // Images, bases and artifacts are reported and never removed: nothing
-    // records which manifest or role a built image belongs to, so nothing
-    // can prove one is unreferenced. Saying so beside the size is the
-    // honest answer; deleting on a guess costs a gigabyte-scale rebuild.
+    // Images, bases and artifacts are each named by a digest, and a recipe
+    // names every digest the store keeps on its behalf — so reading the
+    // recipe of every kept box is what turns "nothing records this" into a
+    // proof. A home that could not be read is a recipe that could not be
+    // asked, so it counts against completeness like an unreadable one.
+    let complete = extend_referenced(&records, &mut referenced) && unreadable == 0;
     for (dir, what) in [
-        ("wormhole/images", "image"),
-        ("wormhole/bases", "base"),
-        ("wormhole/artifacts", "artifact"),
+        (paths::images_dir(&data_home), "image"),
+        (paths::bases_dir(&data_home), "base"),
+        (paths::artifacts_dir(&data_home), "artifact"),
     ] {
-        for entry in read_dir(&data_home.join(dir)) {
+        for entry in read_dir(&dir) {
             let path = entry.path();
+            let digest = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
             items.push(gc::Item {
                 bytes: tree_bytes(&path),
+                verdict: gc::built_verdict(&digest, &referenced, complete, what),
                 path,
-                verdict: gc::Verdict::Unproven(format!(
-                    "nothing records which manifest this {what} belongs to"
-                )),
             });
         }
     }
 
     // Biggest first: what is worth deciding about is what is worth seeing.
     items.sort_by_key(|item| std::cmp::Reverse(item.bytes));
-    print!("{}", gc::report(&items, deleting));
-    if deleting {
-        for item in items.iter().filter(|item| item.verdict.reclaimable()) {
-            image::discard(&item.path);
-            println!("removed {}", item.path.display());
+    // Partitioned once, so what the report describes and what the loop
+    // removes are the same set rather than two answers that have to agree.
+    let plan = gc::plan(&items, sweep);
+    print!("{}", gc::report(&items, sweep, &plan));
+    let mut refused = 0usize;
+    if sweep.delete {
+        for item in &plan.take {
+            // The loud form: a person asked for this, so space that did
+            // not come back must never be reported as though it had.
+            match image::remove(&item.path) {
+                Ok(()) => println!("removed {}", item.path.display()),
+                Err(why) => {
+                    eprintln!("wormhole: {why}");
+                    refused += 1;
+                }
+            }
         }
     }
-    std::process::exit(0);
+    std::process::exit(i32::from(refused > 0));
+}
+
+/// The image a running box is using, from the entry it wrote at start.
+/// `None` when the entry cannot be read — a box mid-start has not written
+/// one yet, and a scan must not decide anything from that.
+fn running_image(box_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(box_dir.join("box.toml")).ok()?;
+    let entry = registry::parse(&text).ok()?;
+    Path::new(&entry.image)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+/// Adds every digest these boxes' recipes reference, and says whether all
+/// of them could be read.
+///
+/// A box's recipe is its workspace's own manifest, or the role it was
+/// started from. Reading one can fail — a role removed, a manifest since
+/// made invalid — and the one that failed may be the very one that
+/// references an image, so the answer says so rather than quietly
+/// proving something on a gap in the evidence.
+///
+/// Boxes commonly share a workspace and a role, so each distinct recipe is
+/// read once: `paths::box_id` derives an id from a workspace, which is to
+/// say a folder full of boxes is a folder with one recipe.
+///
+/// A box whose workspace is gone is skipped: it is already dead, and
+/// counting its recipe would keep a gigabyte alive for nobody.
+fn extend_referenced(records: &[home::Record], into: &mut BTreeSet<String>) -> bool {
+    let mut complete = true;
+    let mut seen = BTreeSet::new();
+    for record in records {
+        if !record.workspace.is_dir() {
+            continue;
+        }
+        if !seen.insert((record.workspace.clone(), record.role.clone())) {
+            continue;
+        }
+        // Never the launch resolver: that one may fetch a pinned commit
+        // and stop for a confirm, and a listing that reaches the network
+        // or seizes the terminal is not a listing. Reading is all this
+        // needs, so reading is all it is allowed.
+        match try_resolve_manifest_in(&record.workspace, record.role.as_deref(), Fetch::Never) {
+            Ok(resolved) => into.extend(manifest::referenced_digests(&resolved.manifest)),
+            Err(_) => complete = false,
+        }
+    }
+    complete
 }
 
 /// A directory's entries, or none when it is not there yet. Every gc scan
@@ -1370,7 +1476,8 @@ fn tui() -> ! {
                 problems: vec![e],
             })
         };
-        let picked = panel::run(scan, |id| stop_box(&data_home, id)).unwrap_or_else(|e| fail(&e));
+        let picked =
+            panel::run(scan, |what| panel_act(&data_home, what)).unwrap_or_else(|e| fail(&e));
         match picked {
             panel::Pick::Quit => std::process::exit(0),
             panel::Pick::Attach(id) => attach_box(&id, None),
@@ -1405,6 +1512,31 @@ fn box_listings(data_home: &Path) -> Result<home::Scan, String> {
             .collect(),
         problems,
     })
+}
+
+/// What the panel does to the box its cursor is on, without leaving its
+/// own screen.
+///
+/// Fallible where the commands' lookup exits: the panel owns the terminal
+/// and has a line of its own to say this on, and the problems a scan
+/// reports are already drawn there rather than printed over it. The same
+/// bodies the commands use, so `x` in here and `wormhole remove` out
+/// there can never mean two different things.
+fn panel_act(data_home: &Path, what: &tui::Act) -> Result<(), String> {
+    let id = match what {
+        tui::Act::Stop(pid) => return stop_box(data_home, *pid),
+        tui::Act::Remove(id) | tui::Act::Reset(id) => id,
+    };
+    // The panel always hands an id, and an id names its box from
+    // anywhere, so the workspace decides nothing here.
+    let (found, _, _) = find_targets(data_home, Path::new(""), std::slice::from_ref(id))?;
+    let target = found.first().ok_or_else(|| home::no_box_found(id))?;
+    let claimed = Claimed::take(data_home, target)?;
+    match what {
+        tui::Act::Remove(_) => claimed.remove(data_home),
+        tui::Act::Reset(_) => claimed.reset(data_home),
+        tui::Act::Stop(_) => unreachable!("returned above"),
+    }
 }
 
 /// Enter on an idle box: start it again with the home, history and
@@ -1560,12 +1692,211 @@ fn stop_cmd(args: &[String]) -> ! {
     std::process::exit(0);
 }
 
-/// What this box answers to besides its id.
+/// The workspace a command was typed in. A box belongs to one tree, and
+/// this is what says which tree the person asking is standing in.
+fn here() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|e| fail(&format!("cannot read the working directory: {e}")))
+}
+
+/// Every home directory the store holds, by the key each is named by.
 ///
-/// `--as` renames; without one the box keeps whatever name it already had,
-/// so a bare `wormhole box` never quietly drops it. A name already on
-/// another box here is refused: wormhole sets one name per box, and two
-/// would leave `attach` guessing which was meant.
+/// `home::target` needs these to name a box whose record cannot be read,
+/// and the walk is done once for a whole command line rather than once per
+/// name that missed.
+fn home_keys(data_home: &Path) -> Vec<String> {
+    read_dir(&paths::homes_dir(data_home))
+        .into_iter()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
+}
+
+/// The boxes named on a command line, and what the scan could not read.
+///
+/// Every name becomes a box before any of them is touched: half a list
+/// removed and the rest refused over a typo at the end is the worst
+/// outcome a removal can have, and this is what makes it impossible.
+///
+/// Fallible, because the panel owns its terminal and has a line of its own
+/// to say this on. `targets` is the same answer for a command, which has
+/// nothing else to do with a refusal.
+/// What one lookup found: the boxes asked for, every record it read on the
+/// way — the commands that follow need them — and what it could not read.
+type Found = (Vec<home::Target>, Vec<home::Record>, Vec<String>);
+
+fn find_targets(data_home: &Path, workspace: &Path, wanted: &[String]) -> Result<Found, String> {
+    let (kept, problems) = kept_boxes(data_home)?;
+    let keys = home_keys(data_home);
+    let found = wanted
+        .iter()
+        .map(|name| {
+            home::target(&kept, &keys, workspace, name).ok_or_else(|| home::no_box_found(name))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((found, kept, problems))
+}
+
+/// The same, for a command: what the scan could not read is said on
+/// stderr, and a name nothing answers to ends the process.
+///
+/// The kept records come back with the targets because the commands that
+/// follow need them — renaming asks whether a name is free — and reading
+/// every home twice for one command is reading it once too often.
+fn targets(data_home: &Path, wanted: &[String]) -> (Vec<home::Target>, Vec<home::Record>) {
+    let (found, kept, problems) =
+        find_targets(data_home, &here(), wanted).unwrap_or_else(|e| fail(&e));
+    // A home we could not read may be the very box being asked for, so
+    // the reason is said before the refusal rather than swallowed by it.
+    report_problems(&problems);
+    (found, kept)
+}
+
+/// The one box a command names. [`targets`] for the commands that take
+/// several, this for the ones that take exactly one.
+fn one_target(data_home: &Path, wanted: &str) -> (home::Target, Vec<home::Record>) {
+    let (mut found, kept) = targets(data_home, &[wanted.to_owned()]);
+    (found.remove(0), kept)
+}
+
+/// A box whose claim this process holds, and the only thing the lifecycle
+/// verbs will act on.
+///
+/// The claim is the only honest answer to "is this box running": reading a
+/// list can go stale between the reading and the removal, and taking the
+/// lock cannot. Making it the *type* rather than a line at the top of
+/// three functions is what stops the fourth verb from forgetting it — a
+/// verb that never sees a `Claimed` cannot touch a home an agent is
+/// writing to.
+struct Claimed<'a> {
+    target: &'a home::Target,
+    _claim: Flock<std::fs::File>,
+}
+
+impl<'a> Claimed<'a> {
+    fn take(data_home: &Path, target: &'a home::Target) -> Result<Self, String> {
+        let claim = try_lock(&paths::lock_file(data_home, &target.key))?.ok_or_else(|| {
+            format!(
+                "box {id} is running{held}; `wormhole stop {id}` first",
+                id = target.id,
+                held = holder(data_home, &target.key)
+            )
+        })?;
+        Ok(Claimed {
+            target,
+            _claim: claim,
+        })
+    }
+
+    /// Takes the box away: the home it kept and the snapshot beside it.
+    ///
+    /// The lock file stays. It is the claim being held right now, and
+    /// unlinking it would let another start take a second, different lock
+    /// on the same box while this one is still deleting. It costs nothing,
+    /// it is reused when the ordinal is, and `gc` reclaims the rest.
+    fn remove(&self, data_home: &Path) -> Result<(), String> {
+        image::remove(&paths::home_dir(data_home, &self.target.key))?;
+        image::remove(&paths::snapshot_dir(data_home, &self.target.key))
+    }
+
+    /// Empties the home and gives the box back its own record.
+    ///
+    /// The box survives: same id, same name, same workspace, same role.
+    /// Only what the agent put there is gone — which is the difference
+    /// between starting over and starting somewhere else, and the reason
+    /// this is not `remove` followed by `box --new`.
+    fn reset(&self, data_home: &Path) -> Result<(), String> {
+        let home = paths::home_dir(data_home, &self.target.key);
+        self.remove(data_home)?;
+        std::fs::create_dir_all(&home)
+            .map_err(|e| format!("cannot create box home {}: {e}", home.display()))?;
+        // A box with no record to put back is left empty, which is what it
+        // already was: the next start writes one.
+        self.target
+            .record
+            .as_ref()
+            .map_or(Ok(()), |record| write_box_record(&home, record))
+    }
+
+    /// Sets what the box answers to besides its id.
+    ///
+    /// Refused while it runs, which the claim has already proved: a
+    /// running box's registry entry carries the name it started under,
+    /// nothing rewrites that entry in flight, and a rename `attach` could
+    /// not follow would be a rename in name only.
+    fn rename(&self, data_home: &Path, kept: &[home::Record], alias: &str) -> Result<(), String> {
+        // A name lives in the record, so a box with none has nothing to
+        // rename — and nothing that says which workspace the name would
+        // belong to. Starting it once writes the record this needs.
+        let record = self.target.record.as_ref().ok_or_else(|| {
+            format!(
+                "box {id} has no readable record, so it has nothing to name; \
+                 start it once, or `wormhole remove {id}`",
+                id = self.target.id
+            )
+        })?;
+        if let Some(taken) = home::alias_conflict(kept, &record.workspace, alias, &record.id) {
+            return Err(home::alias_taken(alias, &taken.id));
+        }
+        let renamed = home::Record {
+            alias: Some(alias.to_owned()),
+            ..record.clone()
+        };
+        write_box_record(&paths::home_dir(data_home, &self.target.key), &renamed)
+    }
+}
+
+/// Writes a box's record into its home. The one writer, so a start, a
+/// reset and a rename cannot disagree about what a record on disk is.
+///
+/// Atomically, because the panel reads this file once a second while it
+/// draws: a reader must never see half of one.
+fn write_box_record(home: &Path, record: &home::Record) -> Result<(), String> {
+    replace_file(&home.join(home::RECORD), home::to_toml(record)?)
+}
+
+/// `wormhole remove <id|name>...`: take boxes away.
+///
+/// `gc` reclaims what it can *prove* is dead. This removes a box that is
+/// merely finished with, which nothing else could ever prove.
+fn remove_cmd(args: &[String]) -> ! {
+    let parsed = run::parse_remove_args(args).unwrap_or_else(|e| usage(&e.to_string()));
+    let data_home = data_home();
+    let (found, _) = targets(&data_home, &parsed.ids);
+    for target in &found {
+        let claimed = Claimed::take(&data_home, target).unwrap_or_else(|e| fail(&e));
+        claimed.remove(&data_home).unwrap_or_else(|e| fail(&e));
+        // The panel's sentence, said here too: one act, one thing it is
+        // reported as, whichever surface asked for it.
+        println!("{}", tui::Act::Remove(target.id.clone()).done());
+    }
+    std::process::exit(0);
+}
+
+/// `wormhole reset <id|name>`: keep the box, throw away what is in it.
+fn reset_cmd(args: &[String]) -> ! {
+    let parsed = run::parse_reset_args(args).unwrap_or_else(|e| usage(&e.to_string()));
+    let data_home = data_home();
+    let (target, _) = one_target(&data_home, &parsed.id);
+    let claimed = Claimed::take(&data_home, &target).unwrap_or_else(|e| fail(&e));
+    claimed.reset(&data_home).unwrap_or_else(|e| fail(&e));
+    println!("{}", tui::Act::Reset(target.id).done());
+    std::process::exit(0);
+}
+
+/// `wormhole rename <id|name> <new name>`: the name you type instead of
+/// twelve hex characters, settable without starting the box.
+fn rename_cmd(args: &[String]) -> ! {
+    let parsed = run::parse_rename_args(args).unwrap_or_else(|e| usage(&e.to_string()));
+    let data_home = data_home();
+    let (target, kept) = one_target(&data_home, &parsed.id);
+    let claimed = Claimed::take(&data_home, &target).unwrap_or_else(|e| fail(&e));
+    claimed
+        .rename(&data_home, &kept, &parsed.alias)
+        .unwrap_or_else(|e| fail(&e));
+    println!("box {} is now {}", target.id, parsed.alias);
+    std::process::exit(0);
+}
+
 fn box_alias(
     data_home: &Path,
     box_home: &Path,
@@ -1581,14 +1912,10 @@ fn box_alias(
     };
     let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
     report_problems(&problems);
-    if let Some(taken) = home::by_name(&kept, workspace, wanted)
-        && taken.id != box_id
-    {
-        fail(&format!(
-            "{wanted} already names box {} in this workspace; \
-             `wormhole box --id {} --as <other>` renames that one",
-            taken.id, taken.id
-        ));
+    // The rule and the sentence both live beside `is_usable_alias`, so a
+    // start, a rename and the panel give one answer to one question.
+    if let Some(taken) = home::alias_conflict(&kept, workspace, wanted, box_id) {
+        fail(&home::alias_taken(wanted, &taken.id));
     }
     Some(wanted.to_owned())
 }
@@ -1847,7 +2174,36 @@ fn resolve_manifest(role: Option<&str>) -> Resolved {
 /// the panel, which draws on its own screen and has other rows to offer.
 /// Every other caller is a command that has nothing else to do.
 fn try_resolve_manifest(role: Option<&str>) -> Result<Resolved, String> {
-    let workspace_manifest = PathBuf::from(MANIFEST);
+    try_resolve_manifest_in(Path::new("."), role, Fetch::IfAsked)
+}
+
+/// Whether resolving a role may reach the network and ask a question.
+///
+/// A launch may: typing a pinned ref is a person asking for that commit
+/// right now. A scan may not — `wormhole gc` reports what is already on
+/// this machine, and a report that fetched a repository, took the whole
+/// terminal for a confirm, and exited before printing a line would not be
+/// a report. Asked here, at the edge, rather than inferred further down
+/// from whether anyone happens to be watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fetch {
+    /// Fetch a pin this host does not have, when there is somebody to
+    /// approve it.
+    IfAsked,
+    /// Read what is here and nothing else.
+    Never,
+}
+
+/// The same answer for a workspace that is not the one we are standing
+/// in. `gc` needs it: proving an image unreferenced means reading the
+/// recipe of every box on this host, and those boxes belong to other
+/// trees.
+fn try_resolve_manifest_in(
+    workspace: &Path,
+    role: Option<&str>,
+    fetch: Fetch,
+) -> Result<Resolved, String> {
+    let workspace_manifest = workspace.join(MANIFEST);
     // The flag is the user speaking; the file is a default. So a `--role`
     // wins outright, and only without one is the workspace's manifest
     // asked whether it hands its box to a role of its own.
@@ -1856,12 +2212,12 @@ fn try_resolve_manifest(role: Option<&str>) -> Result<Resolved, String> {
         None => workspace_role(&workspace_manifest)?,
     };
     let (path, dir, source, label) = if let Some(role) = &named {
-        let at = role_source_dir(role)?;
+        let at = role_source_dir(role, fetch)?;
         (at.dir.join(MANIFEST), at.dir, Some(at.source), at.label)
     } else if workspace_manifest.is_file() {
         (
             workspace_manifest,
-            PathBuf::from("."),
+            workspace.to_path_buf(),
             None,
             WORKSPACE_LABEL.to_owned(),
         )
@@ -1905,16 +2261,16 @@ fn workspace_role(manifest: &Path) -> Result<Option<String>, String> {
 /// (the recipe digest, the preview, the seeds) can therefore treat a role
 /// as a directory, exactly as it did before roles could live anywhere but
 /// this machine.
-fn role_source_dir(role: &str) -> Result<RoleAt, String> {
+fn role_source_dir(role: &str, fetch: Fetch) -> Result<RoleAt, String> {
     match source::names(role) {
         source::Names::Repo(_) => {
             let pinned = source::parse_ref(role).map_err(|e| e.to_string())?;
             let name = source::default_name(&pinned.url).map_err(|e| e.to_string())?;
-            // Typing a ref is a person asking for it right now, so this is
-            // the one launch that may fetch and ask — when there is
-            // somebody there to ask. `fetch_and_approve` is idempotent, so
-            // an already-ready pin passes straight through it.
-            if someone_is_present() {
+            // Typing a ref is a person asking for it right now, so a
+            // launch may fetch and ask — when it was asked to, and when
+            // there is somebody there to ask. `fetch_and_approve` is
+            // idempotent, so an already-ready pin passes straight through.
+            if fetch == Fetch::IfAsked && someone_is_present() {
                 fetch_and_approve(&data_home(), &pinned);
             }
             Ok(pinned_at(&name, &pinned, checkout_for(&name, &pinned)?))
@@ -2044,7 +2400,7 @@ fn fail(error: &str) -> ! {
 fn usage(error: &str) -> ! {
     eprintln!("wormhole: {error}");
     eprintln!(
-        "usage: wormhole init | wormhole doctor | wormhole build [--role <name|dir|ref>] | wormhole box [--role <name|dir|ref>] [-- <command>] | wormhole role add <dir|ref> [--as <name>] | wormhole role list|show|remove | wormhole stop <id> | wormhole gc [--delete] | wormhole ps | wormhole usage | wormhole attach <id> [-- <command>] | wormhole run [--grant <path>]... [--dns <address>] [--image <dir>] -- <command> [args...]"
+        "usage: wormhole init | wormhole doctor | wormhole build [--role <name|dir|ref>] | wormhole box [--role <name|dir|ref>] [--new | --id <id|name>] [--as <name>] [-- <command>] | wormhole ps [--all] | wormhole attach <id|name> [-- <command>] | wormhole stop <id|name> | wormhole rename <id|name> <new name> | wormhole reset <id|name> | wormhole remove <id|name>... | wormhole role add <dir|ref> [--as <name>] | wormhole role list|show|remove | wormhole gc [--delete [--unreferenced]] | wormhole usage | wormhole run [--grant <path>]... [--dns <address>] [--image <dir>] -- <command> [args...]"
     );
     std::process::exit(2);
 }

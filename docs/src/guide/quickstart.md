@@ -60,6 +60,9 @@ wormhole usage            # the account's usage windows, with resets
 wormhole attach <id|name> # second terminal into a running box (its agent)
 wormhole attach <id> -- sh
 wormhole stop <id|name>   # end a running box from anywhere
+wormhole rename <id|name> <new>  # call it something else
+wormhole reset <id|name>  # keep the box, empty its home
+wormhole remove <id|name>...  # take boxes away for good
 wormhole gc               # what the data home holds, and what can go
 ```
 
@@ -93,26 +96,36 @@ and says so under the hints; on a box that is not running it says that
 instead of doing nothing. `n` makes another box here: it lists every
 launchable source (the workspace's manifest and each installed
 [role](roles.md)) and shows a full preview of what the box will see before
-anything starts. `q` quits.
+anything starts. `x` removes a box and `r` resets one — both ask first,
+and `y` is the only key that answers. `q` quits, or takes back a question.
 
-The same stop, from anywhere and without the panel:
+The same things, from anywhere and without the panel:
 
 ```sh
 wormhole stop <id|name>
+wormhole reset <id|name>
+wormhole remove <id|name>
 ```
 
 ## 5. Reclaiming disk
 
 ```sh
-wormhole gc              # report only
-wormhole gc --delete     # remove what is proven dead
+wormhole gc                            # report only
+wormhole gc --delete                   # remove what is proven dead
+wormhole gc --delete --unreferenced    # and what no box here starts from
 ```
 
-Wormhole deletes only what it can **prove** is dead: a box directory whose
-process is gone, a kept home whose workspace no longer exists. Images and
-bases are reported with their size and never removed, because nothing
-records which manifest or role built an image, so nothing can prove one is
-unreferenced. Guessing wrong there costs a gigabyte-scale rebuild.
+Wormhole deletes only what it can **prove**. A box directory whose process
+is gone, a kept home whose workspace no longer exists and a lock whose box
+is gone are all proven *dead*, and `--delete` takes them.
+
+An image, a base or a fetched artifact that no box on this host starts
+from is proven *unreferenced* — a weaker claim, because a recipe you have
+built but never run a box from references nothing that can be counted. So
+`--delete` leaves those and `--unreferenced` is what asks for them; the
+report says how much more that flag would give back. One recipe that
+cannot be read makes the whole answer *unproven* rather than deleting a
+gigabyte on a gap in the evidence.
 
 ## Where to next
 

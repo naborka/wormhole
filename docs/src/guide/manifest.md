@@ -332,6 +332,8 @@ Each is keyed by what it holds, so nothing shares a key with anything
 else: a changed package list never refetches the base, and two recipes
 naming the same artifact at two addresses share one copy.
 
-Editing `[image]` builds a *new* image beside the old one; the old one is
-not reclaimed, because nothing records which manifest built it.
-`wormhole gc` reports both with their size and says so.
+Editing `[image]` builds a *new* image beside the old one. The old one
+stays until you ask for it: `wormhole gc` reads the recipe of every box on
+this host, and an image, base or artifact no box starts from is reported
+`unreferenced`. `wormhole gc --delete --unreferenced` gives that space
+back — see [Reclaiming](boxes.md#reclaiming).

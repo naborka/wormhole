@@ -160,3 +160,58 @@ pub fn one_image(data_home: &Path) -> std::path::PathBuf {
     assert_eq!(images.len(), 1, "{images:?}");
     images.pop().expect("one image")
 }
+
+/// `wormhole <args>` in `cwd`, against a data home of its own.
+///
+/// The one spawner, so a variable every test needs — `XDG_DATA_HOME`
+/// today, and the config home the moment a test cares about roles — is
+/// added in one place rather than in each file that forgot.
+pub fn wormhole(data_home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_wormhole"))
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_DATA_HOME", data_home)
+        .output()
+        .expect("wormhole binary should spawn")
+}
+
+/// Everything a run wrote, in the order a person would read it.
+pub fn said(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// A box record built through the real type, so a field that changes is a
+/// compile error in the fixture rather than a test that quietly stops
+/// covering it.
+pub fn a_record(workspace: &Path, id: &str, alias: Option<&str>) -> wormhole_core::home::Record {
+    wormhole_core::home::Record {
+        id: id.to_owned(),
+        workspace: workspace.to_owned(),
+        role: None,
+        source: None,
+        alias: alias.map(str::to_owned),
+        name: Some("architect".to_owned()),
+        agent: Some("claude".to_owned()),
+        created_unix: 1,
+        started_unix: 2,
+    }
+}
+
+/// A kept box on disk: its home, its record, and one file standing in for
+/// everything an agent leaves behind. Returns the home.
+pub fn keep_box(data_home: &Path, record: &wormhole_core::home::Record) -> std::path::PathBuf {
+    let key = wormhole_core::paths::box_key(&record.workspace, &record.id);
+    let home = wormhole_core::paths::home_dir(data_home, &key);
+    std::fs::create_dir_all(home.join(".wormhole")).expect("home");
+    std::fs::write(
+        home.join(wormhole_core::home::RECORD),
+        wormhole_core::home::to_toml(record).expect("toml"),
+    )
+    .expect("record");
+    std::fs::write(home.join("history.jsonl"), "what the agent knew\n").expect("history");
+    home
+}

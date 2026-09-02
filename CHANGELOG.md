@@ -9,6 +9,108 @@ true.
 
 ## Unreleased
 
+### A box can be renamed, emptied, or taken away
+
+Wormhole could make a box and stop one. It could not get rid of one. A
+folder that had collected six boxes over a week stayed at six forever, and
+the only way out was `rm -rf` on a directory under
+`~/.local/share/wormhole/` that you had to work out the name of yourself.
+
+Three commands close that:
+
+```sh
+wormhole rename api web    # call it something else, without starting it
+wormhole reset api         # keep the box, throw away what is in it
+wormhole remove api web    # take them away for good
+```
+
+`remove`, not `rm`: `wormhole role remove` already spells it that way, and
+a CLI whose verb changes with its noun is the thing consistency is for.
+
+`rename` sets the name you type instead of twelve hex characters. `--as`
+already did that at start; this does it without starting anything, so a
+box you named badly in a hurry is not a box you have to boot to fix.
+
+`reset` is the one that is easy to miss. It empties the home and keeps the
+*box* — same id, same name, same workspace, same role. That is the
+difference between starting over and starting somewhere else: `--new`
+gives you a second box beside the first, `reset` gives you the first one
+back, empty.
+
+`remove` takes the home and the snapshot beside it. Several at once, because
+clearing up after a day's work is what it is for, and every name is
+resolved before any box goes — a typo at the end of the line refuses the
+whole line rather than leaving half of it done.
+
+All three need the box idle, and none of them asks a list. They take the
+box's own claim first, the same lock a start takes, so the kernel is what
+answers "is this running" and no removal can ever delete a home an agent
+is writing to. A running box is refused, with the `wormhole stop` line
+that comes first.
+
+A home whose record cannot be read is still a box here. Its directory name
+carries the id — which is why `--id` could always start one — so `remove` now
+takes one too. A box you can see and cannot get rid of was the one state
+this store should never have had.
+
+### The panel can do all of it too
+
+`x` removes the box the cursor is on, `r` resets it. Both ask first, and
+`y` is the only key that answers; every other key cancels, `q` included,
+because `q` is the reflex for "no" and taking the whole panel down on it
+would be the one answer nobody meant.
+
+They call the same bodies the commands do, so what `x` does in the panel
+and what `wormhole remove` does outside it cannot drift apart.
+
+### `wormhole gc` can finally prove an image is unreferenced
+
+Every time you bumped a pinned version, the old image stayed on disk — a
+gigabyte at a time — and nothing could ever say it was safe to take.
+Wormhole deletes only what it can prove, and nothing recorded what
+referenced an image.
+
+Something does now, and it was already there. An image, a base rootfs and
+a fetched artifact are each named by a digest, and a recipe names every
+digest the store keeps for it. So reading the recipe of every box on this
+host is a proof, not a guess:
+
+```sh
+wormhole gc                            # report only
+wormhole gc --delete                   # remove what is proven dead
+wormhole gc --delete --unreferenced    # and what no box here starts from
+```
+
+The two flags are two different claims, and keeping them apart is the
+point. *Dead* means finished with. *Unreferenced* means no box on this
+host starts from it — weaker, because a recipe you have built but never
+run a box from references nothing that can be counted. So a bare
+`--delete` leaves those, and the report says how much more the second flag
+would give back, rather than letting a gigabyte go missing from both
+columns.
+
+One recipe that cannot be read may be the very one that references an
+image, so a single unreadable manifest makes the whole answer *unproven*
+and nothing is taken. The image a running box is using is always kept —
+under `rootfs = "readonly"` that image is the box's live root.
+
+Lock files are reclaimed too. `wormhole remove` leaves one behind on purpose:
+unlinking a lock while holding it would let another start take a second,
+different lock on the same box.
+
+### `gc` reads what is here, and nothing else
+
+Reading every box's recipe meant reaching for the resolver a *launch*
+uses — and that one may fetch a pinned commit and stop the whole terminal
+for an approval. A bare `wormhole gc` could therefore hit the network, take
+the screen, and exit before printing a line. Worse, its answer depended on
+whether anyone was watching: at a terminal it fetched and could prove an
+image referenced, from cron it could prove nothing.
+
+Whether a resolve may fetch is now something a command says rather than
+something inferred further down from whether stdin is a terminal. A launch
+may; a listing may not. Same store, same answer, whoever is looking.
+
 ### A recipe can name a file by its digest, and wormhole fetches it for you
 
 A build used to fetch its own tools. Every one of those fetches was a TLS

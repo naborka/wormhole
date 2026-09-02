@@ -15,7 +15,13 @@ wormhole ps --all            # every box this host keeps
 wormhole box --new --as api      # another box, called `api`
 wormhole box --id a3f9c1e40b2d   # that exact box, whenever (or `--id api`)
 wormhole stop a3f9c1e40b2d       # end a running box, from anywhere
+wormhole rename api web          # call it something else
+wormhole reset api               # keep the box, empty its home
+wormhole remove api                  # take it away for good
 ```
+
+Every command that takes a box takes either form: the id `ps` prints, or
+the name you gave it. Which one you typed is decided by the string itself.
 
 ## Ids
 
@@ -99,6 +105,66 @@ Ends the box's PID 1; its own `wormhole box` sees that and cleans up. `d`
 in the [panel](#from-the-panel) does the same to the row the cursor is on, and
 says so — on a box that is not running it says that instead, rather than
 redrawing an unchanged screen.
+
+## Renaming one
+
+```sh
+wormhole rename <id|name> <new name>
+```
+
+Sets what a box answers to instead of twelve hex characters. `--as` does
+the same at start; this does it without starting anything, so a box you
+named badly in a hurry is not a box you have to boot to fix.
+
+The name belongs to the box's own workspace, and no two boxes there may
+share one — a name that already answers for another box is refused, with
+that box's id in the message. A name may never be spellable as an id.
+
+Refused while the box is running: the running box's registry entry carries
+the name it started under, nothing rewrites that entry in flight, and a
+rename that `attach` could not follow would be a rename in name only.
+
+## Resetting one
+
+```sh
+wormhole reset <id|name>
+```
+
+Empties the box's home and keeps the box. Same id, same name, same
+workspace, same role — nothing the agent put there. The next start seeds
+the instructions, the first-run answers and the status line again, and the
+agent logs in again.
+
+This is the difference between starting over and starting *somewhere
+else*. `wormhole box --new` gives you a second box beside the first;
+`reset` gives you the first one back, empty.
+
+## Removing one
+
+```sh
+wormhole remove <id|name> [<id|name>...]
+```
+
+Takes the box away: its home, and with it the history, the logins and
+whatever the agent installed. Its snapshot goes too. This cannot be
+undone, so it is the one thing wormhole never does on its own — `gc`
+removes only what it can *prove* is dead, and a box you are simply
+finished with is not something anything can prove.
+
+Several at once, because clearing up after a day's work is what the
+command is for. Every name is resolved before any box is removed: a typo
+at the end of the list refuses the whole line rather than leaving half of
+it done.
+
+Removing and resetting both need the box idle, and both ask the kernel
+rather than a list: they take the box's own claim first, so neither can
+ever delete a home an agent is writing to. A running box is refused, with
+the `wormhole stop` line that comes first.
+
+A home whose record cannot be read is still a box here. Its directory name
+carries the id, which is why `--id` can start one — so `remove` takes one too.
+A box you can see and cannot get rid of is a state this store does not
+have.
 
 ## What each box keeps to itself
 
@@ -192,8 +258,26 @@ wormhole
 
 The panel lists every box, running and idle, most recently used first.
 Enter does the one thing that row allows — join a box that is running,
-start one that is not. `n` makes another box here, `d` stops a running
-one, `q` quits.
+start one that is not.
+
+| Key | What it does |
+|---|---|
+| `enter` | join a running box, or start an idle one |
+| `n` | another box here, from a manifest or role you pick |
+| `d` | stop the running box on this row |
+| `x` | remove this box — asks first |
+| `r` | reset this box, keeping the box — asks first |
+| `y` | the one key that answers a question |
+| `q` | quit, or take back a question |
+
+`x` and `r` both take an agent's history, so both ask before they act, and
+`y` is the only key that answers. **Every** other key cancels — `q`
+included, because `q` is the reflex for "no" and taking the whole panel
+down on it would be the one answer nobody meant.
+
+They are the same bodies `wormhole remove` and `wormhole reset` use, so what
+`x` does in here and what `remove` does out there can never drift apart.
+Neither offers itself on a running box: the row says `d` stops it first.
 
 A key the panel understands but cannot act on where the cursor is says so
 under the hints, and the next key clears it. `d` on a box that is not
@@ -205,8 +289,10 @@ wherever the panel was opened.
 
 A home the panel cannot read is named under `could not read:`, on the
 panel's own screen — nothing prints over the box list while the panel is
-up. Such a home is a box nothing can list or resume; `wormhole gc` reports
-what it is holding.
+up. Such a home has no row to put a cursor on, so it is reached by id from
+the command line: `wormhole box --id <id>` starts it and `wormhole remove
+<id>` takes it away, both by its directory rather than by a record neither
+can read.
 
 ## Upgrading
 
@@ -222,15 +308,44 @@ the identity into it and it behaves like any other from then on.
 
 ## Reclaiming
 
-`wormhole gc` reads each home's own record to decide. A home whose
-workspace no longer exists is proven dead and can go; one whose workspace
-is still there is kept, however long it has been idle.
+`wormhole gc` deletes only what it can prove. It reads each home's own
+record to decide: a home whose workspace no longer exists is proven dead
+and can go; one whose workspace is still there is kept, however long it
+has been idle. A lock file whose box is gone is dead too — `remove` leaves
+those behind on purpose, because unlinking a lock while holding it would
+let another start take a second, different one for the same box.
 
 ```sh
-wormhole gc              # report only
-wormhole gc --delete     # remove what is proven dead
+wormhole gc                            # report only
+wormhole gc --delete                   # remove what is proven dead
+wormhole gc --delete --unreferenced    # and what no box here starts from
 ```
 
-A box you are finished with is removed by removing its home. There is no
-`wormhole rm` yet, and inventing one that guesses would be worse than
-saying so.
+### Images, bases and artifacts
+
+Each of these is named by a digest, and a recipe names every digest the
+store keeps on its behalf: the image it builds to, the base rootfs it
+starts from, and every artifact it pins. So reading the recipe of every
+box on this host turns *"nothing records what this belongs to"* into a
+proof, and a version bump no longer leaves a gigabyte behind for good.
+
+Three verdicts, and the difference between them is the whole point:
+
+| Verdict | Means | Taken by |
+|---|---|---|
+| `dead` | proven finished with | `--delete` |
+| `unreferenced` | proven that no box here starts from it | `--delete --unreferenced` |
+| `unproven` | a recipe could not be read, so nothing can be proven | nothing |
+
+`unreferenced` is not the same claim as `dead`. A recipe you have built
+but never started a box from references nothing that can be counted, so it
+reads unreferenced and is correct to keep — which is why a bare `--delete`
+leaves it and you have to ask for it by name. The report says how much
+more the flag would give back, so the number is never silently missing
+from both columns.
+
+One recipe that cannot be read may be the very one that references an
+image, so a single unreadable manifest makes the whole answer `unproven`
+rather than quietly deleting on a gap in the evidence. The image a
+*running* box is using is always kept: with `rootfs = "readonly"` that
+image is the box's live root.

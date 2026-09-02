@@ -43,6 +43,9 @@ The rest of the commands:
 | `wormhole ps [--all]` / `attach <id\|name>` | what is running or kept, and a second terminal into it |
 | `wormhole usage` | what is left of the account's usage windows |
 | `wormhole stop <id\|name>` | end a running box, from anywhere |
+| `wormhole rename <id\|name> <new>` | call a box something else, without starting it |
+| `wormhole reset <id\|name>` | keep the box, empty its home |
+| `wormhole remove <id\|name>...` | take boxes away for good |
 | `wormhole role add <dir\|url@sha>` | install a role from a directory or a pinned commit |
 | `wormhole role list\|show\|remove` | what is installed, the whole recipe, and taking a name back |
 | `wormhole box --as <name>` | give a box a name to type instead of its id |

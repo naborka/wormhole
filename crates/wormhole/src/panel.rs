@@ -9,7 +9,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute};
 use wormhole_core::home::Scan;
-use wormhole_core::tui::{Action, Key, Tui};
+use wormhole_core::tui::{Act, Action, Key, Tui};
 
 /// What the user chose in the panel. The terminal is already restored
 /// when this returns, so the caller can exec straight into it.
@@ -24,9 +24,13 @@ pub enum Pick {
 }
 
 /// Shows the panel until the user quits or picks something to do next.
+///
+/// `act` is everything the panel does without leaving the screen. One
+/// caller rather than one per verb, so a new act is a `tui::Act` variant
+/// and nothing here changes shape.
 pub fn run(
     mut boxes: impl FnMut() -> Scan,
-    mut stop: impl FnMut(u32) -> Result<(), String>,
+    mut act: impl FnMut(&Act) -> Result<(), String>,
 ) -> Result<Pick, String> {
     let _restore = RawScreen::enter()?;
     let mut tui = Tui::default();
@@ -46,14 +50,14 @@ pub fn run(
             Action::Attach(id) => return Ok(Pick::Attach(id)),
             Action::Resume(id) => return Ok(Pick::Resume(id)),
             Action::New => return Ok(Pick::New),
-            // The panel owns this terminal, so a stop that failed has
+            // The panel owns this terminal, so an act that failed has
             // nowhere else to be said. Handed back to the TUI rather than
-            // swallowed, or a stop that could not happen looks exactly
+            // swallowed, or an act that could not happen looks exactly
             // like one that did.
-            Action::Stop(id) => {
-                let outcome = stop(id);
+            Action::Do(what) => {
+                let outcome = act(&what);
                 tui.refresh(boxes());
-                tui.stopped(outcome);
+                tui.acted(&what, outcome);
             }
             Action::Quit => return Ok(Pick::Quit),
         }
@@ -117,14 +121,15 @@ fn next_key() -> Result<Option<Key>, String> {
     Ok(decode(key.code))
 }
 
+/// Only what a terminal decides is decided here. Which *character* means
+/// which key lives in `wormhole_core::tui`, beside the hints that name it.
 fn decode(code: KeyCode) -> Option<Key> {
     match code {
-        KeyCode::Up | KeyCode::Char('k') => Some(Key::Up),
-        KeyCode::Down | KeyCode::Char('j') => Some(Key::Down),
+        KeyCode::Up => Some(Key::Up),
+        KeyCode::Down => Some(Key::Down),
         KeyCode::Enter => Some(Key::Enter),
-        KeyCode::Char('d') => Some(Key::Stop),
-        KeyCode::Char('n') => Some(Key::New),
-        KeyCode::Char('q') | KeyCode::Esc => Some(Key::Quit),
+        KeyCode::Esc => Some(Key::Quit),
+        KeyCode::Char(typed) => Key::from_char(typed),
         _ => None,
     }
 }
