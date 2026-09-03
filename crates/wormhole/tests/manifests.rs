@@ -5,10 +5,20 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use wormhole_core::manifest;
+use wormhole_core::boxenv;
+use wormhole_core::manifest::{self, Manifest};
 
 mod common;
 use common::repo_root;
+
+/// What a bare start (no `--env` flags) hands the box for this manifest.
+fn box_env(manifest: &Manifest, host: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    boxenv::to_env(&boxenv::resolve(
+        &manifest::declarations(manifest),
+        &[],
+        host,
+    ))
+}
 
 fn shipped_manifests() -> Vec<PathBuf> {
     let root = repo_root();
@@ -47,9 +57,7 @@ fn every_manifest_this_repo_ships_parses() {
 fn every_manifest_names_a_terminal_the_image_itself_carries() {
     for path in shipped_manifests() {
         let manifest = parsed(&path);
-        let told = |host: &BTreeMap<String, String>| {
-            manifest::box_env(&manifest, host).get("TERM").cloned()
-        };
+        let told = |host: &BTreeMap<String, String>| box_env(&manifest, host).get("TERM").cloned();
         assert_eq!(
             told(&BTreeMap::new()).as_deref(),
             Some("xterm-256color"),
@@ -70,10 +78,7 @@ fn a_host_terminal_reaches_the_box_only_with_its_description() {
         let manifest = parsed(&path);
         let carried = BTreeMap::from([("TERM".to_owned(), "xterm-ghostty".to_owned())]);
         assert_eq!(
-            manifest::box_env(&manifest, &carried)
-                .get("TERM")
-                .cloned()
-                .as_deref(),
+            box_env(&manifest, &carried).get("TERM").cloned().as_deref(),
             Some("xterm-ghostty"),
             "{} refuses the terminal the box was given a description of",
             path.display()

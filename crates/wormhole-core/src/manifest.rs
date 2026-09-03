@@ -197,6 +197,12 @@ pub struct EnvVar {
     /// `/usr/bin/zsh` does not exist in here.
     #[serde(default)]
     pub fixed: Option<String>,
+    /// The box refuses to start until the variable has a value.
+    #[serde(default)]
+    pub required: bool,
+    /// The value is masked wherever wormhole prints it.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// One agent wormhole knows how to launch.
@@ -235,6 +241,8 @@ pub enum ManifestError {
     /// An artifact in a recipe with no build line at all.
     ArtifactWithNoBuild(String),
     UnknownAgent(String),
+    /// A fixed variable that also carries `default` or `required`.
+    EnvFixedConflict(String),
     NoAgent,
     /// A manifest that both names a role and carries a recipe.
     RoleAndImage,
@@ -285,6 +293,11 @@ impl fmt::Display for ManifestError {
                     .map(|agent| agent.name)
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            ManifestError::EnvFixedConflict(name) => write!(
+                f,
+                "[env.{name}] is fixed, so `default` and `required` \
+                 could never act; drop them or drop `fixed`"
             ),
             ManifestError::NoAgent => write!(f, "no agent named, so there is nothing to run"),
         }
@@ -388,6 +401,11 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         && known(name).is_none()
     {
         return Err(ManifestError::UnknownAgent(name.clone()));
+    }
+    for (name, var) in &manifest.env {
+        if var.fixed.is_some() && (var.required || !var.default.is_empty()) {
+            return Err(ManifestError::EnvFixedConflict(name.clone()));
+        }
     }
     Ok(manifest)
 }
@@ -527,21 +545,19 @@ fn shell_quote(word: &str) -> String {
 /// host's value when it has one and the default when it does not. Anything
 /// the manifest does not name never reaches the box.
 ///
-pub fn box_env(manifest: &Manifest, host: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = manifest
-        .env
-        .iter()
-        .map(|(name, declared)| {
-            let value = match (&declared.fixed, host.get(name)) {
-                (Some(fixed), _) => fixed.clone(),
-                (None, Some(from_host)) if !from_host.is_empty() => from_host.clone(),
-                (None, _) => declared.default.clone(),
-            };
-            (name.clone(), value)
-        })
-        .collect();
+/// Everything the manifest declares plus what the recipe implies —
+/// `[env]` as written, with the model, the CA pointers and the broker's
+/// two variables folded in as fixed ones. The single input every env
+/// screen and every resolution starts from.
+#[must_use]
+pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
+    let fixed = |value: String| EnvVar {
+        fixed: Some(value),
+        ..EnvVar::default()
+    };
+    let mut declared = manifest.env.clone();
     if let Some(model) = manifest.agent.model.as_deref() {
-        env.insert("ANTHROPIC_MODEL".to_owned(), model.to_owned());
+        declared.insert("ANTHROPIC_MODEL".to_owned(), fixed(model.to_owned()));
     }
     // Mounting the host's bundle is not enough on its own: the clients in
     // the box mostly do not read that path unless they are told to, and
@@ -549,23 +565,25 @@ pub fn box_env(manifest: &Manifest, host: &BTreeMap<String, String>) -> BTreeMap
     // defaults, so a manifest that declares one of these means it and wins.
     if manifest.access.host_ca {
         for (name, bundle) in crate::ca::readers_pointing_at(crate::ca::CA_BUNDLE_IN_BOX) {
-            env.entry(name.to_owned()).or_insert(bundle);
+            declared
+                .entry(name.to_owned())
+                .or_insert_with(|| fixed(bundle));
         }
     }
     if manifest.access.broker {
         // The agent talks to the forwarder and nothing else. The dummy key
         // exists only so its client starts at all; the broker strips it and
         // puts the real credential on, host-side.
-        env.insert(
+        declared.insert(
             "ANTHROPIC_BASE_URL".to_owned(),
-            crate::broker::base_url_in_box(),
+            fixed(crate::broker::base_url_in_box()),
         );
-        env.insert(
+        declared.insert(
             "ANTHROPIC_API_KEY".to_owned(),
-            "sk-wormhole-dummy".to_owned(),
+            fixed("sk-wormhole-dummy".to_owned()),
         );
     }
-    env
+    declared
 }
 
 /// Everything that changes what a built image contains, and nothing that
@@ -700,6 +718,13 @@ mod tests {
     /// its header, not above it where `text` puts things.
     fn image(extra: &str) -> String {
         format!("{}{extra}", text(""))
+    }
+
+    /// `declarations` resolved as a bare start would: no `--env` flags.
+    /// What these tests pin is the fold above, not the resolver, which
+    /// `boxenv` proves for itself.
+    fn box_env(manifest: &Manifest, host: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        crate::boxenv::to_env(&crate::boxenv::resolve(&declarations(manifest), &[], host))
     }
 
     fn host(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -871,6 +896,29 @@ mod tests {
         let manifest = full("[env.SHELL]\nfixed = \"/bin/bash\"\n");
         let env = box_env(&manifest, &host(&[("SHELL", "/usr/bin/zsh")]));
         assert_eq!(env.get("SHELL").map(String::as_str), Some("/bin/bash"));
+    }
+
+    #[test]
+    fn a_variable_can_be_required_and_secret() {
+        let manifest = full("[env.SENTRY_TOKEN]\nrequired = true\nsecret = true\n");
+        let var = &manifest.env["SENTRY_TOKEN"];
+        assert!(var.required);
+        assert!(var.secret);
+    }
+
+    /// A fixed value already answers every question the other fields ask,
+    /// so a manifest combining them is confused, not flexible.
+    #[test]
+    fn a_fixed_variable_takes_no_default_and_no_required() {
+        for extra in [
+            "[env.SHELL]\nfixed = \"/bin/bash\"\nrequired = true\n",
+            "[env.SHELL]\nfixed = \"/bin/bash\"\ndefault = \"/bin/sh\"\n",
+        ] {
+            assert!(
+                matches!(parse(&text(extra)), Err(ManifestError::EnvFixedConflict(_))),
+                "{extra}"
+            );
+        }
     }
 
     #[test]

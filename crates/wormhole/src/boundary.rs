@@ -143,10 +143,15 @@ pub fn build_in(
 }
 
 /// Joins a running box through its PID 1's namespaces and runs a command
-/// inside — a second terminal into the same box. The environment is the
-/// attacher's own apart from `HOME`, `HOSTNAME` and `PATH`; the box's
-/// declared environment lives in its PID 1, which nothing can read back.
-pub fn attach(init: u32, workspace: &Path, command: &[String]) -> ! {
+/// inside — a second terminal into the same box. `env` replaces the
+/// session's environment entirely, the same discipline a start applies;
+/// `None` (a box with no baked env on disk) inherits the attacher's own.
+pub fn attach(
+    init: u32,
+    workspace: &Path,
+    command: &[String],
+    env: Option<&BTreeMap<String, String>>,
+) -> ! {
     let user = match current_user() {
         Ok(user) => user,
         Err(e) => fail(&e),
@@ -191,6 +196,15 @@ pub fn attach(init: u32, workspace: &Path, command: &[String]) -> ! {
         Ok(ForkResult::Child) => {
             if let Err(e) = std::env::set_current_dir(workspace) {
                 fail(&format!("cannot enter {}: {e}", workspace.display()));
+            }
+            if let Some(env) = env {
+                clear_host_environment();
+                for (name, value) in env {
+                    #[expect(unsafe_code, reason = "single-threaded, and the next call is execvp")]
+                    unsafe {
+                        std::env::set_var(name, value);
+                    }
+                }
             }
             exec(command, &home_in_box(&user))
         }

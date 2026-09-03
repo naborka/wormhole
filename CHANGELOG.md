@@ -9,6 +9,30 @@ true.
 
 ## Unreleased
 
+### A box's environment is now visible, updatable, and honest on attach
+
+Starting a box with variables in front of the command looked like it
+worked, then a later `attach` quietly ran without them: attach used to
+carry the attacher's whole shell environment instead of the box's own.
+Now the environment a start computes is written down as the box's baked
+env, and every attach session gets exactly that — refreshed from your
+shell, so exporting a rotated token before attaching is enough. Your
+exported value wins, the box's own survives, `fixed` never moves.
+
+New on the command line: `--env NAME[=VALUE]` on `box` and `attach`
+declares or updates a variable (bare `NAME` carries the host's value, so
+a secret stays out of shell history), and `wormhole env <id>` shows every
+variable with its value, source and refresh rule. Every start prints one
+line counting what is set and unset; an attach prints only what changed.
+
+New in the manifest: `[env.NAME]` takes `required = true` — the box
+refuses to start until the variable has a value, naming the fix — and
+`secret = true`, which masks the value on every screen wormhole prints.
+
+An attach no longer leaks the attacher's whole environment into the box:
+a session's environment is the baked env and nothing else, the same
+whitelist discipline a start already had.
+
 ### `wormhole help` is the whole tool on one page
 
 There was no help. A wrong command printed one unbroken line naming every

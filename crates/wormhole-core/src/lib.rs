@@ -1,5 +1,6 @@
 //! Pure core: every decision, no syscalls, no I/O.
 
+pub mod boxenv;
 pub mod broker;
 pub mod ca;
 pub mod doctor;

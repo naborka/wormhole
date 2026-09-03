@@ -53,6 +53,15 @@ dns = "1.1.1.1"
 # recipe can pin belongs in `[[image.artifact]]`, which needs no trust.
 host_ca = true
 
+# The box's whole environment: a variable reaches it only when declared
+# here or by `--env` on `box`/`attach`. Every attach refreshes the
+# declared ones from your shell — your exported value wins, the box's own
+# survives, `fixed` never moves. `wormhole env <id>` shows what is set.
+#
+# Per variable: bare = carry the host's value · `default` = fallback when
+# the host has none · `fixed` = the manifest's word, never overridden ·
+# `required = true` = refuse to start without a value · `secret = true` =
+# masked wherever wormhole prints it.
 [env.TERM]
 default = "xterm-256color"
 

@@ -114,6 +114,8 @@ pub enum ParseError {
     NewAndId,
     AliasWithoutName,
     UnusableAlias(String),
+    EnvWithoutName,
+    UnusableEnvName(String),
     BoxUsage,
     PsUsage,
     RemoveUsage,
@@ -160,6 +162,12 @@ impl fmt::Display for ParseError {
             }
             ParseError::RoleWithoutName => write!(f, "--role needs a name"),
             ParseError::AliasWithoutName => write!(f, "--as needs a name"),
+            ParseError::EnvWithoutName => write!(f, "--env needs NAME or NAME=VALUE"),
+            ParseError::UnusableEnvName(name) => write!(
+                f,
+                "{name:?} cannot name a variable; letters, digits and _ only, \
+                 not starting with a digit"
+            ),
             ParseError::UnusableAlias(value) => write!(
                 f,
                 "{value:?} cannot name a box; names are letters, digits, - and _, \
@@ -336,6 +344,35 @@ pub struct BoxArgs {
     pub alias: Option<String>,
     /// A command that replaces the agent. `None` runs the agent.
     pub command: Option<Vec<String>>,
+    /// Variables declared on the command line, on top of the manifest's.
+    pub env: Vec<EnvArg>,
+}
+
+/// One `--env` flag: a variable named with the host's value (`NAME`) or
+/// with a spelled one (`NAME=VALUE`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvArg {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+fn parse_env_arg(text: &str) -> Result<EnvArg, ParseError> {
+    let (name, value) = match text.split_once('=') {
+        Some((name, value)) => (name, Some(value.to_owned())),
+        None => (text, None),
+    };
+    let mut chars = name.chars();
+    let named_like_one = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !named_like_one {
+        return Err(ParseError::UnusableEnvName(name.to_owned()));
+    }
+    Ok(EnvArg {
+        name: name.to_owned(),
+        value,
+    })
 }
 
 pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
@@ -350,9 +387,13 @@ pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
     let mut id = None;
     let mut new = false;
     let mut alias = None;
+    let mut env = Vec::new();
     let mut flags = before.iter();
     while let Some(flag) = flags.next() {
         match flag.as_str() {
+            "--env" => env.push(parse_env_arg(
+                flags.next().ok_or(ParseError::EnvWithoutName)?,
+            )?),
             "--role" => role = Some(flags.next().ok_or(ParseError::RoleWithoutName)?.clone()),
             "--as" => {
                 let wanted = flags.next().ok_or(ParseError::AliasWithoutName)?;
@@ -382,11 +423,12 @@ pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
         new,
         alias,
         command,
+        env,
     })
 }
 
 /// Command line after the `attach` subcommand:
-/// `<id> [-- <command> [args...]]`.
+/// `<id> [--env NAME[=VALUE]]... [-- <command> [args...]]`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AttachArgs {
     /// The box to join: the id `wormhole ps` shows. The same id `--id`
@@ -395,19 +437,38 @@ pub struct AttachArgs {
     /// A command that replaces the default. `None` means the box's own
     /// agent, or a shell when it has none (`manifest::attach_command`).
     pub command: Option<Vec<String>>,
+    /// Variables set or refreshed for the box from here on.
+    pub env: Vec<EnvArg>,
 }
 
 pub fn parse_attach_args(args: &[String]) -> Result<AttachArgs, ParseError> {
-    let (id, command) = match args {
-        [id] => (id, None),
-        [id, separator, rest @ ..] if separator == "--" && !rest.is_empty() => {
-            (id, Some(rest.to_vec()))
-        }
-        _ => return Err(ParseError::AttachUsage),
+    let mut parts = args.splitn(2, |a| a == "--");
+    let before = parts.next().unwrap_or_default();
+    let command = match parts.next() {
+        None => None,
+        Some([]) => return Err(ParseError::AttachUsage),
+        Some(command) => Some(command.to_vec()),
     };
+    let [id, rest @ ..] = before else {
+        return Err(ParseError::AttachUsage);
+    };
+    if id.starts_with('-') {
+        return Err(ParseError::AttachUsage);
+    }
+    let mut env = Vec::new();
+    let mut flags = rest.iter();
+    while let Some(flag) = flags.next() {
+        match flag.as_str() {
+            "--env" => env.push(parse_env_arg(
+                flags.next().ok_or(ParseError::EnvWithoutName)?,
+            )?),
+            _ => return Err(ParseError::AttachUsage),
+        }
+    }
     Ok(AttachArgs {
         id: id.clone(),
         command,
+        env,
     })
 }
 
@@ -811,7 +872,8 @@ mod tests {
                 id: None,
                 new: false,
                 alias: None,
-                command: None
+                command: None,
+                env: Vec::new()
             })
         );
     }
@@ -825,7 +887,8 @@ mod tests {
                 id: None,
                 new: false,
                 alias: None,
-                command: Some(strings(&["sh"]))
+                command: Some(strings(&["sh"])),
+                env: Vec::new()
             })
         );
         assert_eq!(
@@ -835,7 +898,8 @@ mod tests {
                 id: None,
                 new: false,
                 alias: None,
-                command: None
+                command: None,
+                env: Vec::new()
             })
         );
     }
@@ -914,6 +978,55 @@ mod tests {
         );
     }
 
+    /// `--env NAME` carries the host's value without spelling it, so a
+    /// secret stays out of shell history; `--env NAME=VALUE` spells it.
+    #[test]
+    fn box_and_attach_declare_variables_by_name_or_by_value() {
+        assert_eq!(
+            parse_box_args(&strings(&[
+                "--env",
+                "SENTRY_TOKEN",
+                "--env",
+                "PGDATABASE=geohod"
+            ]))
+            .map(|args| args.env),
+            Ok(vec![
+                EnvArg {
+                    name: "SENTRY_TOKEN".to_owned(),
+                    value: None
+                },
+                EnvArg {
+                    name: "PGDATABASE".to_owned(),
+                    value: Some("geohod".to_owned())
+                },
+            ])
+        );
+        assert_eq!(
+            parse_attach_args(&strings(&["api", "--env", "PGUSER=root"])).map(|args| args.env),
+            Ok(vec![EnvArg {
+                name: "PGUSER".to_owned(),
+                value: Some("root".to_owned())
+            }])
+        );
+    }
+
+    #[test]
+    fn a_variable_must_be_named_and_named_like_one() {
+        assert_eq!(
+            parse_box_args(&strings(&["--env"])),
+            Err(ParseError::EnvWithoutName)
+        );
+        for wrong in ["=x", "1BAD=x", "A-B", ""] {
+            assert_eq!(
+                parse_box_args(&strings(&["--env", wrong])),
+                Err(ParseError::UnusableEnvName(
+                    wrong.split('=').next().unwrap_or_default().to_owned()
+                )),
+                "{wrong}"
+            );
+        }
+    }
+
     #[test]
     fn ps_lists_the_running_boxes_and_with_all_every_kept_one() {
         assert_eq!(parse_ps_args(&[]), Ok(PsArgs { all: false }));
@@ -934,7 +1047,8 @@ mod tests {
             parse_attach_args(&strings(&["0123456789ab"])),
             Ok(AttachArgs {
                 id: "0123456789ab".to_owned(),
-                command: None
+                command: None,
+                env: Vec::new()
             })
         );
     }
@@ -945,7 +1059,8 @@ mod tests {
             parse_attach_args(&strings(&["0123456789ab", "--", "claude", "-r"])),
             Ok(AttachArgs {
                 id: "0123456789ab".to_owned(),
-                command: Some(strings(&["claude", "-r"]))
+                command: Some(strings(&["claude", "-r"])),
+                env: Vec::new()
             })
         );
     }

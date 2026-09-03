@@ -181,10 +181,17 @@ pub fn boxes_dir(data_home: &Path) -> PathBuf {
 }
 
 /// Everything one running box owns on the host: `box.toml` (the registry
-/// entry) and `root` (the throwaway copy of the image). Named by the pid
-/// of the `wormhole box` that runs it, and removed when it exits.
+/// entry), `env.toml` (the baked env) and `root` (the throwaway copy of
+/// the image). Named by the pid of the `wormhole box` that runs it, and
+/// removed when it exits.
 pub fn box_dir(data_home: &Path, pid: u32) -> PathBuf {
     boxes_dir(data_home).join(pid.to_string())
+}
+
+/// The baked env a start writes beside the box's pid; what `attach`
+/// refreshes and `wormhole env` shows.
+pub fn baked_env(box_dir: &Path) -> PathBuf {
+    box_dir.join("env.toml")
 }
 
 /// The last usage reading, shared by every box on this host: the limits

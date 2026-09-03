@@ -113,6 +113,18 @@ _Avoid_: proxy (say which: reverse proxy or CONNECT proxy), gateway
 A secret that belongs to the host. Either granted as a file the box may read, or held by the broker and never entering the box at all.
 _Avoid_: token, key, secret (except when quoting a protocol field)
 
+**Declared variable**:
+An environment variable named in the manifest's `[env]` or by `--env`. The only kind that reaches a box; an undeclared host variable never crosses. Per variable: `fixed` is the manifest's own value and never moves, `default` fills in when the host has none, `required` refuses a start without a value, `secret` masks the value on every screen.
+_Avoid_: passed variable, env override
+
+**Baked env**:
+The environment a start computes and writes beside the box's pid — the box's own, for its whole life. What `wormhole env` shows and what every session starts from.
+_Avoid_: snapshot (that word is the workspace copy), cached env
+
+**Refresh**:
+What every attach does to the baked env: a value the attaching shell exports wins, the baked one survives where it exports none, `fixed` never moves. Reaches new sessions only — Linux writes no other process's environment, so PID 1's tree keeps its start values.
+_Avoid_: sync, reload
+
 ### A role from a repository
 
 **Pin**:

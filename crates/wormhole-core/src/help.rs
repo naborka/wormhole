@@ -60,6 +60,11 @@ const BOXES: &[Line] = &[
         blurb: "your command in the box instead of the agent",
     },
     Line {
+        name: "env",
+        args: "ID|NAME",
+        blurb: "what the box runs under; secrets masked",
+    },
+    Line {
         name: "ps",
         args: "[--all]",
         blurb: "what is running; --all adds every idle box too",
@@ -189,11 +194,10 @@ FIRST RUN
 
 const WHAT_A_BOX_IS: &str = r#"
 A BOX
-  Its own $HOME, kept between runs: history, logins, whatever the agent
-  installed. Its root filesystem is a fresh copy of the image and is
-  deleted when the box exits, so nothing outside $HOME survives.
-  One folder holds as many boxes as you make. Name one with `--as`; after
-  that its 12-hex id and that name both work, everywhere a box is taken.
+  Its own $HOME, kept between runs: history, logins, installed tools. The
+  root is a fresh copy of the image, deleted on exit — nothing outside
+  $HOME survives. One folder holds as many boxes as you make; `--as`
+  names one, and id or name work everywhere a box is taken.
 
 "#;
 
@@ -201,14 +205,17 @@ const AFTER_BOXES: &str = r#"
   reset keeps the box and empties it. remove takes it away. Both need the
   box stopped, and both are refused while it runs.
 
+  A variable reaches a box only when declared: [env] in the manifest, or
+  --env NAME[=VALUE] on box or attach; bare NAME carries the host's value.
+  Attach refreshes declared ones — your export wins, fixed never moves.
+
 PANEL   (bare `wormhole`)
   enter join or start · n new · d stop · x remove · r reset · q quit
   x and r ask first. y is the only key that answers; anything else cancels.
 
 MANIFEST
-  ./wormhole.toml is the whole recipe. Nothing reaches the box unless this
-  file names it. Change any [image] key and the next start builds a new
-  image; change anything else and it does not.
+  ./wormhole.toml is the whole recipe; nothing reaches the box unless it
+  names it. Only changing an [image] key makes the next start rebuild.
 
   version = 1
 
@@ -234,12 +241,12 @@ MANIFEST
   dns = "1.1.1.1"                   # without it the box has no resolver
   host_ca = true                    # trust what the host trusts
   network = "none"                  # no route off the machine at all
-  broker = true                     # reach the API via the host, so the
-                                    # box holds no credential of its own
+  broker = true                     # API via the host; no credential in box
 
   [env.SOME_VAR]
   fixed = "1"                       # the box cannot override this
   # default = ""                    # host's value wins when it has one
+  # required = true                 # secret = true masks it when printed
 
   [runtime]
   rootfs = "copy"                   # or "readonly": no copy, faster, and
@@ -247,8 +254,7 @@ MANIFEST
   snapshot = true                   # say what the agent changed, on exit
 
 MAKE A ROLE
-  A role is the same manifest, kept somewhere that is not the tree you are
-  standing in, so one recipe serves any folder.
+  The same manifest, kept outside the tree, so one recipe serves any folder.
 
   mkdir -p myrole/hooks
   # myrole/wormhole.toml    the manifest above
@@ -257,7 +263,7 @@ MAKE A ROLE
   wormhole role add ./myrole --as mine
   wormhole box --role mine
 
-  A role is identified by where it comes from, never by what you typed, so
+  A role is identified by where it comes from, never by what you typed:
   every spelling of one role gets you the same box back.
 
 "#;
@@ -265,8 +271,7 @@ MAKE A ROLE
 const UPDATE: &str = r#"
 MOVE THE AGENT'S VERSION
   The version is pinned in the manifest, so moving it is an edit and a
-  rebuild. A box looks its image up on every start and keeps its home, so
-  nothing is lost and there is nothing to log into again.
+  rebuild. A box keeps its home, so there is nothing to log into again.
 
   1. edit the [[image.artifact]] url and sha256 to the new version
   2. wormhole build                        # or let the next start do it
@@ -274,9 +279,8 @@ MOVE THE AGENT'S VERSION
      wormhole box --id ID                  # this, which applies the change
   4. wormhole gc --delete --unreferenced   # give the old image back
 
-  An agent that updates itself inside the box writes into a filesystem
-  that is deleted on exit, so that update never survives a restart. Turn
-  it off — [env.DISABLE_UPDATES] with fixed = "1" — and let the pin decide.
+  An agent updating itself writes into a filesystem deleted on exit, so
+  turn that off — [env.DISABLE_UPDATES] fixed = "1" — and let the pin decide.
 
 MORE
 "#;

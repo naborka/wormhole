@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use nix::fcntl::{Flock, FlockArg};
 
 use wormhole_core::{
-    doctor, gc, help, home, launch, limits_cgroup, manifest, paths, receipt, registry, run, seed,
-    source, tui,
+    boxenv, doctor, gc, help, home, launch, limits_cgroup, manifest, paths, receipt, registry, run,
+    seed, source, tui,
 };
 
 const MANIFEST: &str = "wormhole.toml";
@@ -65,6 +65,7 @@ fn main() {
         Some("ps") => ps(&args[1..]),
         Some("usage") => account_usage(),
         Some("attach") => attach(&args[1..]),
+        Some("env") => env_cmd(&args[1..]),
         Some("tui") | None => tui(),
         // The banner is not `box`'s: §1 says every launch says which stage
         // its boundary is in, and a bare `run` is a launch.
@@ -107,7 +108,7 @@ fn main() {
 /// digest, the installed image under its recipe digest.
 fn build(args: &[String]) -> ! {
     let parsed = run::parse_box_args(args).unwrap_or_else(|e| usage(&e.to_string()));
-    if parsed.command.is_some() {
+    if parsed.command.is_some() || !parsed.env.is_empty() {
         usage("usage: wormhole build [--role <name|dir|ref>]");
     }
     let resolved = resolve_manifest(parsed.role.as_deref());
@@ -632,6 +633,22 @@ fn run_box(args: &[String]) -> ! {
         typed: role_typed,
         ..
     } = resolved;
+
+    let home = paths::home_dir(&data_home, &box_key);
+    std::fs::create_dir_all(&home)
+        .unwrap_or_else(|e| fail(&format!("cannot create box home {}: {e}", home.display())));
+    // The environment is settled — and refused — before anything is built
+    // or claimed: a start missing a value it was asked for costs nothing
+    // but the line that says so. The box is told which terminal it is in
+    // only once it can look that terminal up, hence `carried` after the
+    // home exists.
+    let host = terminfo::carried(host_env(), &home);
+    let baked = boxenv::resolve(&manifest::declarations(&manifest), &parsed.env, &host);
+    refuse_unfilled(&parsed.env, &baked);
+    if let Some(line) = boxenv::start_line(&baked) {
+        println!("{line}");
+    }
+
     let image = ensure_image(&manifest, &data_home);
 
     let command = match parsed.command {
@@ -657,9 +674,6 @@ fn run_box(args: &[String]) -> ! {
         box_alias.as_deref(),
     );
 
-    let home = paths::home_dir(&data_home, &box_key);
-    std::fs::create_dir_all(&home)
-        .unwrap_or_else(|e| fail(&format!("cannot create box home {}: {e}", home.display())));
     // The box's own record, in the home that outlives every process that
     // ran it. A home is named by a digest, and a digest cannot be
     // inverted: without this nothing could say which workspace a home
@@ -750,12 +764,10 @@ fn run_box(args: &[String]) -> ! {
     // stage it is in is a lie, so this is the last line before the agent
     // takes the terminal.
     println!("{}", launch::Banner::for_run(&run_args));
-    // The box is told which terminal it is in only once it can look that
-    // terminal up.
-    let host = terminfo::carried(host_env(), &home);
+    write_baked_env(&box_dir, &baked);
     let code = boundary::run(
         &run_args,
-        Some(&manifest::box_env(&manifest, &host)),
+        Some(&boxenv::to_env(&baked)),
         Some(&home),
         &manifest.limits,
     );
@@ -1486,7 +1498,7 @@ fn tui() -> ! {
             panel::run(scan, |what| panel_act(&data_home, what)).unwrap_or_else(|e| fail(&e));
         match picked {
             panel::Pick::Quit => std::process::exit(0),
-            panel::Pick::Attach(id) => attach_box(&id, None),
+            panel::Pick::Attach(id) => attach_box(&id, None, &[]),
             panel::Pick::Resume(id) => resume_from_panel(&data_home, &id),
             panel::Pick::New => new_box_from_panel(&data_home),
         }
@@ -1963,7 +1975,7 @@ fn init_pid(data_home: &Path, id: u32) -> Result<u32, String> {
 /// Joins a running box by its `wormhole ps` id.
 fn attach(args: &[String]) -> ! {
     let parsed = run::parse_attach_args(args).unwrap_or_else(|e| usage(&e.to_string()));
-    attach_box(&parsed.id, parsed.command)
+    attach_box(&parsed.id, parsed.command, &parsed.env)
 }
 
 /// Joins the box: its agent by default — attaching means getting back to
@@ -1971,19 +1983,94 @@ fn attach(args: &[String]) -> ! {
 ///
 /// Takes the same id everything else does. A box is named one way in this
 /// CLI, so what `ps` prints is what `attach` and `--id` accept.
-fn attach_box(id: &str, command: Option<Vec<String>>) -> ! {
+fn attach_box(id: &str, command: Option<Vec<String>>, env_args: &[run::EnvArg]) -> ! {
     let data_home = data_home();
     let entry = running_box(&data_home, id);
     let command = command.unwrap_or_else(|| manifest::attach_command(entry.agent.as_deref()));
+    // The baked env, refreshed: the attacher's host wins where it is set,
+    // the baked value survives where it is not, fixed never moves. A box
+    // started by an older wormhole left none; its attach keeps the old
+    // behavior, the attacher's own environment.
+    let host = host_env();
+    let box_dir = paths::box_dir(&data_home, entry.pid);
+    let env = read_baked_env(&box_dir).map(|baked| {
+        let (refreshed, changes) = boxenv::refresh(&baked, env_args, &host);
+        refuse_unfilled(env_args, &refreshed);
+        if let Some(line) = boxenv::diff_line(&changes) {
+            println!("{line}");
+        }
+        if !changes.is_empty() {
+            write_baked_env(&box_dir, &refreshed);
+        }
+        boxenv::to_env(&refreshed)
+    });
+    if env.is_none() && !env_args.is_empty() {
+        fail("this box predates env tracking; stop it and start it again to use --env");
+    }
     // Attaching brings a second terminal, and it is rarely the one the box
     // was started in. Its description is carried in before the join, or
     // this terminal would be named to the box without being resolvable in
     // it. A terminal the host itself cannot describe is left as it is:
     // there is nothing truer to say about it from here.
     let home = paths::home_dir(&data_home, &paths::box_key(&entry.workspace, &entry.box_id));
-    terminfo::carry(&host_env(), &home);
+    terminfo::carry(&host, &home);
     let init = init_pid(&data_home, entry.pid).unwrap_or_else(|e| fail(&e));
-    boundary::attach(init, &entry.workspace, &command)
+    boundary::attach(init, &entry.workspace, &command, env.as_ref())
+}
+
+/// `wormhole env <id>`: what the box runs under, secrets masked.
+fn env_cmd(args: &[String]) -> ! {
+    let [id] = args else {
+        usage("usage: wormhole env <id|name>");
+    };
+    let data_home = data_home();
+    let entry = running_box(&data_home, id);
+    match read_baked_env(&paths::box_dir(&data_home, entry.pid)) {
+        Some(baked) => {
+            print!("{}", boxenv::table(&baked));
+            std::process::exit(0);
+        }
+        None => fail("this box predates env tracking; stop it and start it again"),
+    }
+}
+
+/// Secrets live in this file, so it is born owner-only.
+fn write_baked_env(box_dir: &Path, baked: &boxenv::BakedEnv) {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let text = boxenv::to_toml(baked).unwrap_or_else(|e| fail(&e));
+    let file = paths::baked_env(box_dir);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&file)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", file.display())));
+}
+
+/// `None` when the box never wrote one — started by an older wormhole.
+fn read_baked_env(box_dir: &Path) -> Option<boxenv::BakedEnv> {
+    let text = std::fs::read_to_string(paths::baked_env(box_dir)).ok()?;
+    Some(boxenv::parse(&text).unwrap_or_else(|e| fail(&e)))
+}
+
+/// A start or attach that would quietly run without something asked for
+/// refuses instead, naming the fix.
+fn refuse_unfilled(cli: &[run::EnvArg], env: &boxenv::BakedEnv) {
+    if let Some(first) = boxenv::unfilled_cli(cli, env).first() {
+        fail(&format!(
+            "--env {first}: {first} has no value anywhere; export it or spell --env {first}=VALUE"
+        ));
+    }
+    let missing = boxenv::missing_required(env);
+    if let Some(first) = missing.first() {
+        fail(&format!(
+            "missing required {}; pass --env {first}=... or export {first}",
+            missing.join(", ")
+        ));
+    }
 }
 
 /// Writes the agent's instructions file into the kept home, freshly on
