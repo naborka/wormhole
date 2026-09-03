@@ -78,13 +78,13 @@ build = [
 # dependency over the network — and then `--offline` below would fail,
 # which is the point of passing it.
 [[image.artifact]]
-url = "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.246.tgz"
-sha256 = "8243db25322e7295953455aee463324bfa229f37184fcf2adf90446818803dce"
+url = "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.259.tgz"
+sha256 = "4f9e79e4c1de22cdb6e760c9974e54fc3af992a50052cec745e6430af82062bc"
 into = "/tmp/claude-code.tgz"
 
 [[image.artifact]]
-url = "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64-musl/-/claude-code-linux-x64-musl-2.1.246.tgz"
-sha256 = "d5214cfc4d4e8d0028bb9d754eb524391d1a4b54386365f36c2f29a8322fc780"
+url = "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64-musl/-/claude-code-linux-x64-musl-2.1.259.tgz"
+sha256 = "dbf82c363e3ee1fcc43962c257840fc65f3c3de921f8c23aa32cef2e0eee9694"
 into = "/tmp/claude-code-musl.tgz"
 
 # Rust from rustup, not from apk. Alpine pins one compiler per release
