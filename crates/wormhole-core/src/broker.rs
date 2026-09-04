@@ -308,6 +308,67 @@ pub fn redact(message: &str, credential: &Credential) -> String {
     safe
 }
 
+/// `PT_INTERP`: the program header that names a dynamic loader.
+const PT_INTERP: u32 = 3;
+
+/// Whether an ELF binary asks the image for a dynamic loader.
+///
+/// The bound-in binary runs inside whatever image the box uses. A
+/// dynamically linked wormhole names its build host's loader
+/// (`/lib64/ld-linux-*` or musl's), which a foreign image does not have,
+/// and the exec dies with a bare "not found" that blames the wrong thing.
+/// Static (including static-pie) has no `PT_INTERP` and runs anywhere,
+/// which is what the §12 "nothing to install" promise actually requires.
+pub fn requires_loader(elf: &[u8]) -> Result<bool, String> {
+    let bad = |what: &str| format!("wormhole's own binary is not a readable 64-bit ELF: {what}");
+    let u16_at = |at: usize| Some(u16::from_le_bytes([*elf.get(at)?, *elf.get(at + 1)?]));
+    if elf.get(..4) != Some(b"\x7fELF".as_slice()) {
+        return Err(bad("wrong magic"));
+    }
+    if elf.get(4) != Some(&2) {
+        return Err(bad("not 64-bit"));
+    }
+    if elf.get(5) != Some(&1) {
+        return Err(bad("not little-endian"));
+    }
+    let phoff = elf
+        .get(0x20..0x28)
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| bad("truncated header"))?;
+    let phentsize = u16_at(0x36).ok_or_else(|| bad("truncated header"))?;
+    let phnum = u16_at(0x38).ok_or_else(|| bad("truncated header"))?;
+    for i in 0..u64::from(phnum) {
+        let at = phoff
+            .checked_add(i * u64::from(phentsize))
+            .and_then(|at| usize::try_from(at).ok())
+            .ok_or_else(|| bad("program headers out of range"))?;
+        let p_type = at
+            .checked_add(4)
+            .and_then(|end| elf.get(at..end))
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| bad("truncated program headers"))?;
+        if p_type == PT_INTERP {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The refusal for a dynamically linked wormhole asked to broker into an
+/// image. Actionable: it names the rebuild that fixes it, because the
+/// alternative the user sees otherwise is the exec's bare "not found"
+/// inside the box.
+pub fn dynamic_binary_error() -> String {
+    "wormhole is dynamically linked, so its forwarder cannot run inside the image \
+     (the image lacks this host's loader); rebuild it static: \
+     rustup target add x86_64-unknown-linux-musl && \
+     cargo install --git https://github.com/naborka/wormhole --locked \
+     --target x86_64-unknown-linux-musl wormhole"
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +640,61 @@ mod tests {
         for path in [SOCKET_IN_BOX, WORMHOLE_IN_BOX] {
             assert!(path.starts_with("/run/"), "{path}");
         }
+    }
+
+    /// A minimal ELF64 whose program headers carry exactly `types`.
+    fn elf_with(types: &[u32]) -> Vec<u8> {
+        let mut elf = vec![0u8; 0x40];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2; // 64-bit
+        elf[5] = 1; // little-endian
+        elf[0x20..0x28].copy_from_slice(&0x40u64.to_le_bytes()); // e_phoff
+        elf[0x36..0x38].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        let n = u16::try_from(types.len()).expect("few headers");
+        elf[0x38..0x3a].copy_from_slice(&n.to_le_bytes()); // e_phnum
+        for t in types {
+            let mut phdr = [0u8; 56];
+            phdr[..4].copy_from_slice(&t.to_le_bytes());
+            elf.extend_from_slice(&phdr);
+        }
+        elf
+    }
+
+    /// `PT_INTERP` is the loader request; its absence — even with a
+    /// `PT_DYNAMIC`, which static-pie keeps — means the binary runs in
+    /// any image.
+    #[test]
+    fn a_binary_without_pt_interp_needs_no_loader_from_the_image() {
+        assert_eq!(requires_loader(&elf_with(&[1, 2, 6])), Ok(false));
+        assert_eq!(requires_loader(&elf_with(&[1, 3, 2])), Ok(true));
+        assert_eq!(requires_loader(&elf_with(&[])), Ok(false));
+    }
+
+    /// Garbage is an error naming the binary, never a silent "static".
+    /// Guessing "static" from unreadable bytes would wave a broken binary
+    /// into the box.
+    #[test]
+    fn an_unreadable_binary_is_an_error_and_never_passes_as_static() {
+        for bad in [
+            &b""[..],
+            &b"\x7fELF"[..],
+            &b"not an elf at all, just text"[..],
+        ] {
+            let err = requires_loader(bad).expect_err("must refuse");
+            assert!(err.contains("wormhole's own binary"), "{err}");
+        }
+        let mut truncated = elf_with(&[1, 3]);
+        truncated.truncate(0x7a); // second phdr promised, its p_type cut off
+        assert!(requires_loader(&truncated).is_err());
+    }
+
+    /// The refusal must hand the user the rebuild, because the failure it
+    /// replaces is a bare "not found" from exec inside the box.
+    #[test]
+    fn the_dynamic_binary_refusal_names_the_static_rebuild() {
+        let err = dynamic_binary_error();
+        assert!(err.contains("x86_64-unknown-linux-musl"), "{err}");
+        assert!(err.contains("cargo install"), "{err}");
     }
 
     /// A refresh failure must say what went wrong. A blanket 401 gets

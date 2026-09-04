@@ -9,6 +9,16 @@ true.
 
 ## Unreleased
 
+### A dynamically linked wormhole is refused before it breaks a brokered box
+
+A brokered box runs wormhole's own binary inside the image, as the
+forwarder. If that binary was built against the host's glibc and the image
+is musl (Alpine), the exec inside the box died with a bare "not found"
+that named nothing. Now wormhole checks its own binary at launch: brokering
+into an image with a dynamically linked binary is refused up front, and the
+refusal hands you the exact musl rebuild command. The install guide gained
+the same recipe.
+
 ### A box's environment is now visible, updatable, and honest on attach
 
 Starting a box with variables in front of the command looked like it
