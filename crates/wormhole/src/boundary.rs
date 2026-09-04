@@ -626,6 +626,16 @@ fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result
             wormhole_core::broker::SOCKET_IN_BOX,
         ));
         let exe = std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
+        // A dynamically linked wormhole would exec inside the image against
+        // a loader the image does not have and die with a bare "not found".
+        // Refuse here, where the cause can still be named. Only an image
+        // root can lack the loader; the host's own /usr always has it.
+        if args.image.is_some() {
+            let elf = fs::read(&exe).map_err(|e| format!("cannot read own binary: {e}"))?;
+            if wormhole_core::broker::requires_loader(&elf)? {
+                return Err(wormhole_core::broker::dynamic_binary_error());
+            }
+        }
         grants.push(mount_plan::Grant::retargeted(
             fs::canonicalize(&exe).unwrap_or(exe),
             wormhole_core::broker::WORMHOLE_IN_BOX,
