@@ -38,6 +38,13 @@ The **broker** runs on the host. It reads `~/.claude/.credentials.json`,
 strips the box's headers, injects the real token, and streams the reply
 straight back.
 
+This injection leg is the **Anthropic adapter**: it speaks that one API
+and holds that one credential. Only an agent the registry marks as using
+a brokered API — `claude` — is pointed at it. An agent for another
+provider, like `codex`, reaches its API through the `CONNECT` leg below
+with its own credential file granted into the box; the injection leg
+never sees that traffic.
+
 What it strips on the way out: the dummy API key the agent was handed so
 its client would start, and any `authorization`, `proxy-authorization`,
 `connection` or `host` header the box tried to set. A caller inside the box
@@ -45,7 +52,18 @@ cannot choose its own identity upstream.
 
 It renews the token five minutes before expiry rather than after a
 rejection. Once reply headers are on the wire a retry is impossible, and
-the agent would burn its seven retries on a 401 silently.
+the agent would burn its seven retries on a 401 silently. The renewal is
+the same request Claude Code's own login makes, and the answer is merged
+into `~/.claude/.credentials.json` in the shape Claude Code reads — the
+host's login and the broker share that file, and both keep working.
+
+A renewal that fails is never hidden behind an expired token. Inside the
+five-minute margin the request still goes out on the current token and
+the failure is logged; past expiry the box gets a `403` that names the
+reason and the fix. The fix is on the host — `claude`, then `/login` —
+because the box holds no credential and its own `/login` has nowhere to
+go: the login site is not on the egress allowlist, and would be no use
+if it were.
 
 ## The `CONNECT` leg
 
@@ -90,10 +108,12 @@ agent — spawns its own broker: this manifest's `egress` list, a socket
 in the box's own directory, ended with the box. One box's broker never
 serves another, so revoking one box's reach never touches its neighbour.
 
-You do not declare `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or
-`HTTPS_PROXY`: wormhole sets them, pointing the agent and every proxy-
-aware tool at the forwarder and handing the agent the dummy key the
-broker later strips.
+You do not declare `HTTPS_PROXY`: wormhole sets it, pointing every
+proxy-aware tool at the forwarder. For an agent whose API leg is
+brokered — `claude` — wormhole also sets `ANTHROPIC_BASE_URL` and hands
+it the dummy `ANTHROPIC_API_KEY` the broker later strips. An agent that
+carries its own credential, like `codex`, gets neither: its API host
+goes in `egress` and it rides the `CONNECT` leg.
 
 The banner names what the box got:
 

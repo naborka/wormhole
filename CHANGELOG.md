@@ -9,6 +9,60 @@ true.
 
 ## Unreleased
 
+### Fixed: the broker could not renew the token
+
+The first time a box outlived its token, the agent got `401 OAuth access
+token has expired` and nothing it did helped — `/login` inside the box
+answered `proxy refused the connection`, which is correct (the box holds
+no credential; the login site is not on its allowlist) but no help.
+
+Three things were wrong at once. The renewal request was missing the
+client id and scopes Claude Code sends, so the endpoint refused it as
+`Invalid request format`. The broker then treated that refusal as "keep
+the old token" and forwarded one already expired. And had the request
+been accepted, the reply would have been written over the credential
+file verbatim, in the endpoint's shape rather than Claude Code's, which
+would have logged the host out.
+
+Now the renewal asks the way Claude Code does, the answer is merged into
+the file in the shape Claude Code reads, and a renewal that fails is
+never hidden: inside the margin the current token is used and the
+failure logged; past expiry the box gets a `403` naming the reason and
+the fix, which is `/login` on the host.
+
+### A second agent: codex
+
+`run = "codex"` now launches OpenAI's Codex CLI, with its approvals and
+sandbox bypassed the same way claude's prompts are — the box holds the
+line, not the prompt. Everything agent-specific moved into one registry
+table, so a call site can no longer ask "is this claude?"; it asks the
+table what this agent needs. Adding an agent is one table entry.
+
+What follows from that:
+
+- The composed instructions now live once, in `AGENTS.md` at the box
+  home root. Each agent's own path gets a pointer to it —
+  `.claude/CLAUDE.md` holds an import line, `.codex/AGENTS.md` is a
+  symlink, because codex has no import syntax.
+- `model` is handed the way each agent reads one: `ANTHROPIC_MODEL` in
+  the environment for claude, the `model` key in `.codex/config.toml`
+  for codex. Before this, every agent got `ANTHROPIC_MODEL` whether it
+  read the variable or not.
+- The broker's credential-injection leg is now named for what it always
+  was: the Anthropic adapter. Only claude is pointed at it. Codex
+  reaches its API through the `CONNECT` tunnel with its own credential
+  file, which you grant like any other path.
+- The usage feed and its status line read an Anthropic endpoint with the
+  host's claude credential, so they now run only for a claude box.
+  Before this, the feed thread started for every box, agent or not.
+
+A new `alphaca-codex` role in the repository carries the whole alphaca
+kit under codex: the Rust toolchain, `gh`, rtk (`rtk init -g --codex` —
+a rules file, since codex has no rewrite hook), and the caveman,
+mattpocock and rust skills installed into codex's own skills directory,
+with context7 as an MCP server in its config. The codex artifact digest
+must be pinned on the host before the first build.
+
 ### Fixed: the build box lost its network
 
 Making "no route" the default also took the route away from the build

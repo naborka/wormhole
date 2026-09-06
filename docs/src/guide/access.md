@@ -25,9 +25,11 @@ for one, a network namespace too. Inside:
 - **Home** — a kept directory per box under
   `~/.local/share/wormhole/homes/`, mounted as the box's `$HOME`. Logins
   and history survive between boxes. Wormhole also writes into it: the
-  agent's instructions and, once a minute, `.claude/wormhole-limits` —
-  the account's usage windows, rendered on the host so the box needs no
-  credential and no extra network reach to show them.
+  agent's instructions and, for a `claude` box, once a minute
+  `.claude/wormhole-limits` — the account's usage windows, rendered on
+  the host so the box needs no credential and no extra network reach to
+  show them. The feed reads an Anthropic endpoint, so other agents do
+  not get one.
 - **Environment** — only declared variables. An undeclared host variable
   never reaches the box.
 - **DNS** — the one named resolver, or none.
