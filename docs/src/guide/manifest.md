@@ -145,8 +145,8 @@ preflight = "hooks/preflight.sh"
 
 | Key | Meaning |
 |---|---|
-| `run` | Which agent wormhole launches. Only `claude` is known; it starts with permission prompts bypassed, because the box holds the line. Absent means a box with no agent |
-| `model` | Becomes `ANTHROPIC_MODEL` in the box |
+| `run` | Which agent wormhole launches. `claude` and `codex` are known; each starts with its own permission prompts and sandbox bypassed, because the box holds the line. Absent means a box with no agent |
+| `model` | Passed the way the agent reads a model: `ANTHROPIC_MODEL` in the box for `claude`, the `model` key in `.codex/config.toml` for `codex` |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
 | `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts; the agent then replaces the shell. A failing hook stops the box. Non-secret setup only — plugins, skills, tool init. It runs inside the box, so a credential it saved would sit where the agent reads; credentials belong to `ask` (host-side store) or the broker, never here |
 

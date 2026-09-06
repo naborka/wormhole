@@ -267,7 +267,10 @@ The role directory itself is never mounted into the box. Its two files
 travel by seeding into the box's kept home before start:
 
 - `[agent] instructions` is composed after the built-in instructions into
-  the agent's instructions file
+  one canonical `AGENTS.md` at the box home root; the path the agent
+  actually reads gets a pointer to it — `.claude/CLAUDE.md` holding
+  `@~/AGENTS.md`, or `.codex/AGENTS.md` as a symlink — so the text exists
+  once however many agents learn to read it
 - `[agent] preflight` is copied to `.wormhole/preflight` in the box home
   and run from there, fresh on every start — and removed when the manifest
   stops naming one, so nothing stale survives a recipe change

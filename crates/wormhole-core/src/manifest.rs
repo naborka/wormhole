@@ -240,7 +240,46 @@ pub struct EnvVar {
     pub ask: bool,
 }
 
-/// One agent wormhole knows how to launch.
+/// Where every agent's instructions live: one canonical file at the box
+/// home root. Each agent reads its own path, so the seeding writes this
+/// file once and a per-agent pointer at the path the agent actually reads
+/// — the text exists exactly once, whoever runs.
+pub const INSTRUCTIONS_SEED: &str = "AGENTS.md";
+
+/// How an agent's own instructions path delivers the canonical file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pointer {
+    /// A file whose whole content is an import line the agent follows.
+    Import(&'static str),
+    /// A symlink to the canonical file, for an agent with no import syntax.
+    Symlink,
+}
+
+/// Which config file a box start seeds first-run answers into. The
+/// formats differ structurally — JSON merged one way, TOML another — so
+/// the writer dispatches on this once, in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSeed {
+    /// Claude Code's `.claude.json`: onboarding, bypass warning, trust.
+    ClaudeJson,
+    /// Codex's `.codex/config.toml`: workspace trust, and the model —
+    /// codex reads no env var for one.
+    CodexToml,
+}
+
+/// The env pair a brokered box gets so its agent talks to the forwarder:
+/// the base-URL variable, and a key variable holding a dummy the broker
+/// strips host-side. Absent for an agent whose API leg goes through the
+/// `CONNECT` tunnel with its own credential instead.
+struct BrokeredApi {
+    base_url: &'static str,
+    key: &'static str,
+    dummy: &'static str,
+}
+
+/// One agent wormhole knows how to launch. Everything agent-specific
+/// lives here; a call site that compares `agent.run` to a string instead
+/// of asking this table is the bug this table exists to prevent.
 struct KnownAgent {
     name: &'static str,
     /// Permissions are bypassed because the box, not the prompt, is what
@@ -248,13 +287,53 @@ struct KnownAgent {
     command: &'static [&'static str],
     /// Where the agent reads its own instructions, relative to the box home.
     instructions: &'static str,
+    /// How that path delivers the canonical `AGENTS.md`.
+    pointer: Pointer,
+    /// The env var this agent reads its model from; `None` means the
+    /// model is seeded into the agent's config file instead.
+    model_env: Option<&'static str>,
+    /// How the broker redirects this agent's API leg, when it does.
+    brokered_api: Option<BrokeredApi>,
+    /// Whether the usage feed and its status line apply — they read an
+    /// Anthropic endpoint, so they are claude's and nobody else's.
+    usage: bool,
+    config: ConfigSeed,
 }
 
-const KNOWN_AGENTS: [KnownAgent; 1] = [KnownAgent {
-    name: "claude",
-    command: &["claude", "--dangerously-skip-permissions"],
-    instructions: ".claude/CLAUDE.md",
-}];
+const KNOWN_AGENTS: [KnownAgent; 2] = [
+    KnownAgent {
+        name: "claude",
+        command: &["claude", "--dangerously-skip-permissions"],
+        instructions: ".claude/CLAUDE.md",
+        // `@AGENTS.md` alone would resolve beside CLAUDE.md, inside
+        // `.claude/`; the canonical file is at the home root.
+        pointer: Pointer::Import("@~/AGENTS.md\n"),
+        model_env: Some("ANTHROPIC_MODEL"),
+        brokered_api: Some(BrokeredApi {
+            base_url: "ANTHROPIC_BASE_URL",
+            key: "ANTHROPIC_API_KEY",
+            dummy: "sk-wormhole-dummy",
+        }),
+        usage: true,
+        config: ConfigSeed::ClaudeJson,
+    },
+    KnownAgent {
+        name: "codex",
+        // The analogue of claude's flag; codex's own docs reserve it for
+        // an isolated runner, which the box is. Also necessary: codex's
+        // Landlock/bwrap sandbox cannot be assumed to nest in here.
+        command: &["codex", "--dangerously-bypass-approvals-and-sandbox"],
+        instructions: ".codex/AGENTS.md",
+        // Codex has no import syntax, so the pointer is a symlink.
+        pointer: Pointer::Symlink,
+        model_env: None,
+        // Codex reaches its API through the CONNECT leg with its own
+        // credential; the broker's injection leg speaks only Anthropic.
+        brokered_api: None,
+        usage: false,
+        config: ConfigSeed::CodexToml,
+    },
+];
 
 fn known(name: &str) -> Option<&'static KnownAgent> {
     KNOWN_AGENTS.iter().find(|agent| agent.name == name)
@@ -501,6 +580,30 @@ pub fn instructions_target(manifest: &Manifest) -> Option<&'static str> {
     known(manifest.agent.run.as_deref()?).map(|agent| agent.instructions)
 }
 
+/// How the agent's own instructions path delivers the canonical
+/// `AGENTS.md`. `None` when the box has no agent.
+pub fn instructions_pointer(manifest: &Manifest) -> Option<Pointer> {
+    known(manifest.agent.run.as_deref()?).map(|agent| agent.pointer)
+}
+
+/// Which config file a start seeds for this agent. `None` with no agent.
+pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
+    known(manifest.agent.run.as_deref()?).map(|agent| agent.config)
+}
+
+/// Whether the usage feed and its status line apply to this box's agent.
+/// They read an Anthropic endpoint with the host's claude credential, so
+/// any other agent — or no agent — means no.
+#[must_use]
+pub fn usage_feed(manifest: &Manifest) -> bool {
+    manifest
+        .agent
+        .run
+        .as_deref()
+        .and_then(known)
+        .is_some_and(|agent| agent.usage)
+}
+
 /// The instructions file a box's agent gets: the built-in text, then the
 /// manifest's extra ones after a blank line, so they win where they
 /// disagree.
@@ -643,8 +746,18 @@ pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
         ..EnvVar::default()
     };
     let mut declared = manifest.env.clone();
-    if let Some(model) = manifest.agent.model.as_deref() {
-        declared.insert("ANTHROPIC_MODEL".to_owned(), fixed(model.to_owned()));
+    // Only when this agent reads a model variable at all: exporting
+    // ANTHROPIC_MODEL to codex would be a line nobody reads, and worse, a
+    // lie about how the model was actually passed.
+    if let Some(model) = manifest.agent.model.as_deref()
+        && let Some(var) = manifest
+            .agent
+            .run
+            .as_deref()
+            .and_then(known)
+            .and_then(|agent| agent.model_env)
+    {
+        declared.insert(var.to_owned(), fixed(model.to_owned()));
     }
     // Mounting the host's bundle is not enough on its own: the clients in
     // the box mostly do not read that path unless they are told to, and
@@ -660,15 +773,23 @@ pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
     if brokers(manifest) {
         // The agent talks to the forwarder and nothing else. The dummy key
         // exists only so its client starts at all; the broker strips it and
-        // puts the real credential on, host-side.
-        declared.insert(
-            "ANTHROPIC_BASE_URL".to_owned(),
-            fixed(crate::broker::base_url_in_box()),
-        );
-        declared.insert(
-            "ANTHROPIC_API_KEY".to_owned(),
-            fixed("sk-wormhole-dummy".to_owned()),
-        );
+        // puts the real credential on, host-side. Only for an agent whose
+        // API leg the broker actually redirects — one that carries its own
+        // credential goes through the CONNECT leg and must not be pointed
+        // at an injection leg that speaks a different provider.
+        if let Some(api) = manifest
+            .agent
+            .run
+            .as_deref()
+            .and_then(known)
+            .and_then(|agent| agent.brokered_api.as_ref())
+        {
+            declared.insert(
+                api.base_url.to_owned(),
+                fixed(crate::broker::base_url_in_box()),
+            );
+            declared.insert(api.key.to_owned(), fixed(api.dummy.to_owned()));
+        }
         // The CONNECT leg, spelled the way the tools in the box read it:
         // cargo and friends take the uppercase pair, curl the lowercase.
         // Loopback excluded, or the agent's own API leg would try to
@@ -1554,6 +1675,91 @@ mod tests {
     #[test]
     fn no_agent_means_no_instructions_file() {
         assert_eq!(instructions_target(&full("")), None);
+        assert_eq!(instructions_pointer(&full("")), None);
+    }
+
+    /// The canonical text lives once, at the home root; claude's own file
+    /// is an import line pointing there. `@AGENTS.md` alone would resolve
+    /// inside `.claude/`, which is why the pointer spells the home out.
+    #[test]
+    fn claudes_instructions_file_is_an_import_of_the_canonical_one() {
+        let manifest = full("[agent]\nrun = \"claude\"\n");
+        assert_eq!(
+            instructions_pointer(&manifest),
+            Some(Pointer::Import("@~/AGENTS.md\n"))
+        );
+        assert_eq!(INSTRUCTIONS_SEED, "AGENTS.md");
+    }
+
+    /// Codex reads `$CODEX_HOME/AGENTS.md` and has no import syntax, so
+    /// its pointer is a symlink to the same canonical file.
+    #[test]
+    fn codexs_instructions_are_a_symlink_into_its_config_dir() {
+        let manifest = full("[agent]\nrun = \"codex\"\n");
+        assert_eq!(
+            instructions_target(&manifest).map(PathBuf::from),
+            Some(PathBuf::from(".codex/AGENTS.md"))
+        );
+        assert_eq!(instructions_pointer(&manifest), Some(Pointer::Symlink));
+    }
+
+    #[test]
+    fn codex_bypasses_its_own_sandbox_because_the_box_holds_the_line() {
+        let manifest = full("[agent]\nrun = \"codex\"\n");
+        assert_eq!(
+            agent_command(&manifest),
+            Ok(vec![
+                "codex".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned()
+            ])
+        );
+    }
+
+    /// The bug this pins: the model was exported as ANTHROPIC_MODEL for
+    /// *any* agent — a line codex never reads, saying the model was passed
+    /// when it was not. The model reaches codex through its config file.
+    #[test]
+    fn a_codex_model_is_not_exported_as_an_anthropic_variable() {
+        let manifest = full("[agent]\nrun = \"codex\"\nmodel = \"gpt-5-codex\"\n");
+        let env = box_env(&manifest, &host(&[]));
+        assert!(!env.contains_key("ANTHROPIC_MODEL"), "{env:?}");
+    }
+
+    /// A brokered codex box still gets the CONNECT proxy — that leg is
+    /// provider-neutral — but no Anthropic base URL and no dummy key: its
+    /// API leg tunnels with its own credential, and pointing it at the
+    /// injection leg would hand its requests to the wrong provider.
+    #[test]
+    fn a_brokered_codex_box_gets_the_tunnel_and_no_anthropic_redirect() {
+        let env = box_env(&full("[agent]\nrun = \"codex\"\n"), &host(&[]));
+        assert_eq!(
+            env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:8787")
+        );
+        assert!(!env.contains_key("ANTHROPIC_BASE_URL"), "{env:?}");
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"), "{env:?}");
+    }
+
+    /// The usage feed reads an Anthropic endpoint with the host's claude
+    /// credential; only a claude box may spawn it.
+    #[test]
+    fn the_usage_feed_applies_to_claude_and_nobody_else() {
+        assert!(usage_feed(&full("[agent]\nrun = \"claude\"\n")));
+        assert!(!usage_feed(&full("[agent]\nrun = \"codex\"\n")));
+        assert!(!usage_feed(&full("")));
+    }
+
+    #[test]
+    fn each_agent_names_the_config_file_a_start_seeds() {
+        assert_eq!(
+            config_seed(&full("[agent]\nrun = \"claude\"\n")),
+            Some(ConfigSeed::ClaudeJson)
+        );
+        assert_eq!(
+            config_seed(&full("[agent]\nrun = \"codex\"\n")),
+            Some(ConfigSeed::CodexToml)
+        );
+        assert_eq!(config_seed(&full("")), None);
     }
 
     #[test]

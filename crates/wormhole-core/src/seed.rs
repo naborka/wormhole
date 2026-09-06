@@ -55,12 +55,109 @@ pub fn claude_settings(existing: Option<&str>, command: &str) -> Result<String, 
     serde_json::to_string_pretty(&root).map_err(|e| format!("cannot serialize settings.json: {e}"))
 }
 
+/// Answers codex's first-run questions in the home's `.codex/config.toml`
+/// — merged, never overwritten, so logins and the agent's own choices in
+/// the kept home survive.
+///
+/// Two answers the box's existence already settles: the workspace is
+/// trusted (codex asks per directory, even under its bypass flag on some
+/// releases), and the model is the manifest's — codex reads no env var
+/// for one, so the config key is where the manifest's `model` lands. The
+/// manifest wins the model key each start, the same rule a fixed env
+/// variable follows; everything else in the file is the agent's own.
+pub fn codex_config(
+    existing: Option<&str>,
+    workspace: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
+    let mut root: toml::Table = match existing {
+        None => toml::Table::new(),
+        Some(text) => text
+            .parse()
+            .map_err(|e| format!("config.toml in the box home is not valid TOML: {e}"))?,
+    };
+    if let Some(model) = model {
+        root.insert("model".to_owned(), toml::Value::String(model.to_owned()));
+    }
+    let projects = root
+        .entry("projects")
+        .or_insert(toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or("projects in config.toml is not a table")?;
+    let project = projects
+        .entry(workspace.to_owned())
+        .or_insert(toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("projects.\"{workspace}\" in config.toml is not a table"))?;
+    project.insert(
+        "trust_level".to_owned(),
+        toml::Value::String("trusted".to_owned()),
+    );
+    toml::to_string(&root).map_err(|e| format!("cannot serialize config.toml: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parsed(text: &str) -> Value {
         serde_json::from_str(text).expect("valid JSON out")
+    }
+
+    fn toml_parsed(text: &str) -> toml::Table {
+        text.parse().expect("valid TOML out")
+    }
+
+    #[test]
+    fn a_fresh_codex_home_gets_trust_and_the_manifests_model() {
+        let config =
+            toml_parsed(&codex_config(None, "/home/me/proj", Some("gpt-5-codex")).expect("seeded"));
+        assert_eq!(config["model"].as_str(), Some("gpt-5-codex"));
+        assert_eq!(
+            config["projects"]["/home/me/proj"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_a_model_leaves_the_agents_own_choice_alone() {
+        let existing = "model = \"mine\"\n";
+        let config = toml_parsed(&codex_config(Some(existing), "/w", None).expect("merged"));
+        assert_eq!(config["model"].as_str(), Some("mine"));
+    }
+
+    /// The manifest's model wins each start, the rule a fixed env
+    /// variable already follows for claude.
+    #[test]
+    fn the_manifests_model_wins_over_the_agents_own() {
+        let config = toml_parsed(
+            &codex_config(Some("model = \"old\"\n"), "/w", Some("new")).expect("merged"),
+        );
+        assert_eq!(config["model"].as_str(), Some("new"));
+    }
+
+    /// The kept home accumulates the agent's own state. Seeding must
+    /// never destroy it.
+    #[test]
+    fn everything_codex_wrote_survives_the_merge() {
+        let existing =
+            "approval_policy = \"never\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n";
+        let config = toml_parsed(&codex_config(Some(existing), "/w", None).expect("merged"));
+        assert_eq!(config["approval_policy"].as_str(), Some("never"));
+        assert_eq!(
+            config["projects"]["/other"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(
+            config["projects"]["/w"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+    }
+
+    #[test]
+    fn a_corrupt_codex_config_is_refused_not_replaced() {
+        let err = codex_config(Some("not = = toml"), "/w", None).unwrap_err();
+        assert!(err.contains("not valid TOML"), "{err}");
     }
 
     #[test]

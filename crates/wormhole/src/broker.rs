@@ -12,6 +12,14 @@
 //! wormhole owning a TLS stack would be a large thing to get wrong for no
 //! gain. `curl` streams, which is the property that matters — a buffering
 //! implementation would break every token of a streamed reply.
+//!
+//! Two legs, two scopes. The `CONNECT` tunnel is provider-neutral and
+//! serves every agent. The credential-injection leg — this upstream, the
+//! `claudeAiOauth` file, the OAuth beta header, the refresh endpoint — is
+//! the Anthropic adapter, and only an agent whose registry entry names a
+//! `brokered_api` is pointed at it (`manifest::declarations`). An agent
+//! for another provider tunnels to its API with its own credential; a
+//! second injection adapter would slot in beside this one, not into it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};

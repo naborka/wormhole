@@ -690,14 +690,16 @@ fn run_box(args: &[String]) -> ! {
     );
     seed_instructions(&manifest, &manifest_dir, &home);
     seed_preflight(&manifest, &manifest_dir, &home);
-    seed_claude_config(&manifest, &workspace, &home);
+    seed_agent_config(&manifest, &workspace, &home);
     seed_statusline(&manifest, &home);
 
     // Keeps the limits file in the box home fresh for the status line.
     // The thread dies with this process, which is the box's lifetime.
     // `home` here is the box home; the host's own home — where the
     // credential lives — is the function, shadowed by that binding.
-    {
+    // Only where the feed applies: it polls an Anthropic endpoint with
+    // the host's claude credential, which is claude's business alone.
+    if manifest::usage_feed(&manifest) {
         let (data_home, host_home, box_home) =
             (data_home.clone(), crate::host_home(), home.clone());
         std::thread::spawn(move || usage::feed_box(&data_home, &host_home, &box_home));
@@ -2352,10 +2354,15 @@ fn refuse_unfilled(cli: &[run::EnvArg], env: &boxenv::BakedEnv) {
     }
 }
 
-/// Writes the agent's instructions file into the kept home, freshly on
-/// every start: the manifest's own directory (workspace or role) and the
-/// binary are its source of truth, so nothing a past box wrote there can
-/// drift away from them.
+/// Writes the agent's instructions into the kept home, freshly on every
+/// start: the manifest's own directory (workspace or role) and the binary
+/// are its source of truth, so nothing a past box wrote there can drift
+/// away from them.
+///
+/// The text lands once, in the canonical `AGENTS.md` at the home root;
+/// what goes at the path the agent actually reads is a pointer — an
+/// import line, or a symlink for an agent with no import syntax. One
+/// source of truth however many agents learn to read it.
 fn seed_instructions(manifest: &manifest::Manifest, manifest_dir: &Path, home: &Path) {
     let Some(target) = manifest::instructions_target(manifest) else {
         return;
@@ -2368,9 +2375,37 @@ fn seed_instructions(manifest: &manifest::Manifest, manifest_dir: &Path, home: &
     // the built-in instructions.
     seed_file(
         home,
-        target,
+        manifest::INSTRUCTIONS_SEED,
         &manifest::compose_instructions(DEFAULT_INSTRUCTIONS, extra.as_deref()),
     );
+    match manifest::instructions_pointer(manifest).expect("an agent with a target has a pointer") {
+        manifest::Pointer::Import(line) => seed_file(home, target, line),
+        manifest::Pointer::Symlink => seed_symlink(home, target),
+    }
+}
+
+/// Plants a symlink at `target` (relative to the box home) pointing at
+/// the canonical instructions file, replacing whatever a past start left
+/// there — a stale regular file would shadow the one source of truth.
+fn seed_symlink(home: &Path, target: &str) {
+    let link = home.join(target);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", parent.display())));
+    }
+    // Relative, so the kept home survives being moved: one `..` per
+    // directory between the link and the home root.
+    let depth = Path::new(target).components().count() - 1;
+    let back: PathBuf = std::iter::repeat_n("..", depth).collect();
+    let to = back.join(manifest::INSTRUCTIONS_SEED);
+    match std::fs::symlink_metadata(&link) {
+        Ok(_) => std::fs::remove_file(&link)
+            .unwrap_or_else(|e| fail(&format!("cannot replace {}: {e}", link.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => fail(&format!("cannot read {}: {e}", link.display())),
+    }
+    std::os::unix::fs::symlink(&to, &link)
+        .unwrap_or_else(|e| fail(&format!("cannot link {}: {e}", link.display())));
 }
 
 /// Writes one seeded file into the kept home, creating its directory —
@@ -2406,21 +2441,37 @@ fn seed_preflight(manifest: &manifest::Manifest, manifest_dir: &Path, home: &Pat
     seed_file(home, manifest::PREFLIGHT_SEED, &script);
 }
 
-/// Answers Claude Code's first-run questions in the home's `.claude.json`
-/// — merged, never overwritten, so logins and the agent's own choices in
-/// the kept home survive.
-fn seed_claude_config(manifest: &manifest::Manifest, workspace: &Path, home: &Path) {
-    if manifest.agent.run.as_deref() != Some("claude") {
+/// Answers the agent's first-run questions in its own config file —
+/// merged, never overwritten, so logins and the agent's own choices in
+/// the kept home survive. Which file and which format is the registry's
+/// answer, not a string compared here.
+fn seed_agent_config(manifest: &manifest::Manifest, workspace: &Path, home: &Path) {
+    let Some(kind) = manifest::config_seed(manifest) else {
         return;
+    };
+    let file = home.join(match kind {
+        manifest::ConfigSeed::ClaudeJson => ".claude.json",
+        manifest::ConfigSeed::CodexToml => ".codex/config.toml",
+    });
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", parent.display())));
     }
-    let file = home.join(".claude.json");
     let existing = match std::fs::read_to_string(&file) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => fail(&format!("cannot read {}: {e}", file.display())),
     };
-    let config = seed::claude_config(existing.as_deref(), &workspace.display().to_string())
-        .unwrap_or_else(|e| fail(&e));
+    let workspace = workspace.display().to_string();
+    let config = match kind {
+        manifest::ConfigSeed::ClaudeJson => seed::claude_config(existing.as_deref(), &workspace),
+        manifest::ConfigSeed::CodexToml => seed::codex_config(
+            existing.as_deref(),
+            &workspace,
+            manifest.agent.model.as_deref(),
+        ),
+    }
+    .unwrap_or_else(|e| fail(&e));
     std::fs::write(&file, config)
         .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", file.display())));
 }
@@ -2428,9 +2479,10 @@ fn seed_claude_config(manifest: &manifest::Manifest, workspace: &Path, home: &Pa
 /// Plants the status-line script and points Claude Code's settings at it,
 /// so the account's usage windows show during conversation. The script is
 /// re-seeded every start; the settings entry is merged, and a status line
-/// the user configured themselves wins.
+/// the user configured themselves wins. Tied to the usage feed — the
+/// script renders the file that feed keeps fresh, and both read Anthropic.
 fn seed_statusline(manifest: &manifest::Manifest, home: &Path) {
-    if manifest.agent.run.as_deref() != Some("claude") {
+    if !manifest::usage_feed(manifest) {
         return;
     }
     seed_file(home, STATUSLINE_SEED, &statusline_script());

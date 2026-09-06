@@ -303,11 +303,13 @@ fn box_seeds_the_kept_home_with_the_instructions() {
         "home named after the workspace: {}",
         home.display()
     );
-    let text =
-        std::fs::read_to_string(home.join(".claude/CLAUDE.md")).expect("instructions seeded");
+    let text = std::fs::read_to_string(home.join("AGENTS.md")).expect("instructions seeded");
     let default = text.find("isolated box").expect("built-in instructions");
     let extra = text.find("Be the architect.").expect("extra instructions");
     assert!(default < extra, "extra instructions must come last");
+    // The agent's own file is a pointer, so the text exists exactly once.
+    let pointer = std::fs::read_to_string(home.join(".claude/CLAUDE.md")).expect("pointer seeded");
+    assert_eq!(pointer, "@~/AGENTS.md\n");
 
     let config = std::fs::read_to_string(home.join(".claude.json")).expect("config seeded");
     for answered in [
@@ -517,7 +519,7 @@ fn a_role_serves_a_workspace_without_a_manifest() {
         .env("XDG_CONFIG_HOME", &config_home)
         .output()
         .expect("wormhole binary should spawn");
-    let text = std::fs::read_to_string(kept_home(&data_home).join(".claude/CLAUDE.md"))
+    let text = std::fs::read_to_string(kept_home(&data_home).join("AGENTS.md"))
         .expect("instructions seeded");
     assert!(text.contains("You test things."), "{text}");
 }
@@ -563,7 +565,7 @@ fn an_explicit_role_beats_the_workspace_manifest() {
         "the box must say which manifest it uses:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let text = std::fs::read_to_string(kept_home(&data_home).join(".claude/CLAUDE.md"))
+    let text = std::fs::read_to_string(kept_home(&data_home).join("AGENTS.md"))
         .expect("instructions seeded");
     assert!(text.contains("From the role."), "{text}");
     assert!(!text.contains("From the workspace."), "{text}");
