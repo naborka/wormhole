@@ -66,6 +66,9 @@ fn main() {
         Some("usage") => account_usage(),
         Some("attach") => attach(&args[1..]),
         Some("env") => env_cmd(&args[1..]),
+        Some("secret") => secret_cmd(&args[1..]),
+        Some("allow") => egress_cmd(&args[1..], EgressEdit::Allow),
+        Some("deny") => egress_cmd(&args[1..], EgressEdit::Deny),
         Some("tui") | None => tui(),
         // The banner is not `box`'s: §1 says every launch says which stage
         // its boundary is in, and a bare `run` is a launch.
@@ -81,12 +84,9 @@ fn main() {
             }
             Err(e) => usage(&e.to_string()),
         },
-        // The host half: holds the credential, reaches the API, and is the
-        // only thing that does either.
-        Some("broker") => broker::serve(
-            &paths::broker_socket(&data_home()),
-            &host_home().join(".claude/.credentials.json"),
-        ),
+        // The host half: holds the credential, reaches the API and the
+        // allowed hosts, and is the only thing that does any of it.
+        Some("broker") => broker::broker_cmd(&args[1..]),
         Some("__boxed") => boundary::boxed_child(&args[1..]),
         Some("__build") => boundary::boxed_build(&args[1..]),
         Some("__probe") => match args.get(1) {
@@ -637,7 +637,14 @@ fn run_box(args: &[String]) -> ! {
     // only once it can look that terminal up, hence `carried` after the
     // home exists.
     let host = terminfo::carried(host_env(), &home);
-    let baked = boxenv::resolve(&manifest::declarations(&manifest), &parsed.env, &host);
+    let declared = manifest::declarations(&manifest);
+    let store = read_secrets();
+    let mut baked = boxenv::resolve(&declared, &parsed.env, &host, &store);
+    // An answer lands in the store, and the store is re-resolved — the
+    // resolution rule has one body, and this is not a second one.
+    if let Some(store) = ask_secrets(&declared, &baked, store) {
+        baked = boxenv::resolve(&declared, &parsed.env, &host, &store);
+    }
     refuse_unfilled(&parsed.env, &baked);
     if let Some(line) = boxenv::start_line(&baked) {
         println!("{line}");
@@ -647,7 +654,7 @@ fn run_box(args: &[String]) -> ! {
 
     let command = match parsed.command {
         None => manifest::launch_command(&manifest).unwrap_or_else(|e| fail(&e.to_string())),
-        Some(command) => command,
+        Some(command) => manifest::brokered_command(&manifest, command),
     };
 
     // One directory per box, named by the process that owns it, so two
@@ -724,17 +731,28 @@ fn run_box(args: &[String]) -> ! {
 
     // Brokering needs exactly two things in the box: the socket to speak
     // to, and the binary that speaks to it. Both read-only, neither of
-    // them a credential — that stays on this side.
-    let broker_socket = manifest.access.broker.then(|| {
-        let socket = paths::broker_socket(&data_home);
-        if !socket.exists() {
-            fail(&format!(
-                "this manifest brokers, but nothing is listening on {}; start one with `wormhole broker`",
-                socket.display()
-            ));
-        }
-        socket.display().to_string()
+    // them a credential — that stays on this side. The broker itself is
+    // the box's own: spawned here with this manifest's allowlist, its
+    // socket in this box's directory, killed when the box ends. Nothing
+    // to start by hand, and one box's revocation never touches another's.
+    // What this box may reach through the broker: the manifest's hosts
+    // plus the box's own kept additions, one list feeding the live file,
+    // the broker and the banner alike — so the banner can never
+    // understate what an earlier `wormhole allow` opened.
+    let egress = wormhole_core::broker::effective_egress(
+        &manifest.access.egress,
+        &read_hosts(&kept_egress(&home)),
+    );
+    let broker_child = manifest::brokers(&manifest).then(|| {
+        spawn_broker(
+            &box_dir,
+            &egress,
+            box_alias.as_deref().unwrap_or(&box_id),
+        )
     });
+    let broker_socket = broker_child
+        .as_ref()
+        .map(|_| paths::box_broker_socket(&box_dir).display().to_string());
 
     let run_args = run::RunArgs {
         grants: manifest
@@ -744,7 +762,8 @@ fn run_box(args: &[String]) -> ! {
             .map(|g| expand_home(g))
             .collect(),
         broker: broker_socket,
-        dns: manifest.access.dns,
+        egress,
+        dns: manifest::runtime_dns(&manifest),
         image: Some(root.display().to_string()),
         pidfile: Some(box_dir.join("init.pid").display().to_string()),
         ca: host_ca(&manifest).inspect(|bundle| println!("trusting host CA bundle {bundle}")),
@@ -765,6 +784,13 @@ fn run_box(args: &[String]) -> ! {
         Some(&home),
         &manifest.limits,
     );
+    // The broker dies with its box: a socket nothing listens on is what
+    // the next start would otherwise trip over, and a broker that
+    // outlives its box holds a credential open for nobody.
+    if let Some(mut child) = broker_child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     // The receipt, before the box directory that holds the snapshot goes.
     // Proof of what happened, which is the part trust alone never gives.
     if let Some(before) = before {
@@ -2048,6 +2074,265 @@ fn write_baked_env(box_dir: &Path, baked: &boxenv::BakedEnv) {
 fn read_baked_env(box_dir: &Path) -> Option<boxenv::BakedEnv> {
     let text = std::fs::read_to_string(paths::baked_env(box_dir)).ok()?;
     Some(boxenv::parse(&text).unwrap_or_else(|e| fail(&e)))
+}
+
+use wormhole_core::broker::EgressEdit;
+
+/// `wormhole allow <box> <host>...` / `wormhole deny <box> <host>...`:
+/// change what a running box may reach, effective on its very next
+/// tunnel — the broker reads the live file per `CONNECT`, so nothing
+/// restarts, not the box and not the broker. The change is also kept in
+/// the box's home, so the next start of the same box remembers it. Only
+/// a person on the host can type this; nothing inside a box can widen
+/// its own list.
+///
+/// `deny` closes new tunnels only: one already open lives until either
+/// side hangs up, the same honesty `umount` owed to open fds.
+fn egress_cmd(args: &[String], edit: EgressEdit) -> ! {
+    let verb = match edit {
+        EgressEdit::Allow => "allow",
+        EgressEdit::Deny => "deny",
+    };
+    let [wanted, hosts @ ..] = args else {
+        usage(&format!("usage: wormhole {verb} <id|name> <host>..."));
+    };
+    if hosts.is_empty() {
+        usage(&format!("usage: wormhole {verb} {wanted} <host>..."));
+    }
+    let data_home = data_home();
+    let entry = running_box(&data_home, wanted);
+    let live = paths::egress_file(&paths::box_dir(&data_home, entry.pid));
+    if !live.exists() {
+        fail(&format!(
+            "box {wanted} has no live egress list; it does not broker, \
+             so there is nothing to {verb} on"
+        ));
+    }
+    // A deny is judged against what the box may actually reach — the
+    // live list — before anything is edited, so it can name the box.
+    if edit == EgressEdit::Deny {
+        let current = read_hosts(&live);
+        for host in hosts {
+            if !current.contains(host) {
+                fail(&format!(
+                    "{host} is not on box {wanted}'s list; nothing to deny"
+                ));
+            }
+        }
+    }
+    // The same edit lands twice: on the live file the broker reads per
+    // tunnel, and on the kept file the next start of this box reads.
+    edit_hosts(&live, hosts, edit).unwrap_or_else(|e| fail(&e));
+    let home = paths::home_dir(&data_home, &paths::box_key(&entry.workspace, &entry.box_id));
+    edit_hosts(&home.join(home::KEPT_EGRESS), hosts, edit).unwrap_or_else(|e| fail(&e));
+    for host in hosts {
+        match edit {
+            EgressEdit::Allow => println!("{host} allowed for box {wanted}, effective now"),
+            EgressEdit::Deny => println!(
+                "{host} denied for box {wanted}: new tunnels refused now; \
+                 one already open lives until it closes"
+            ),
+        }
+    }
+    std::process::exit(0)
+}
+
+/// One host-list file edited under the one rule body core owns. A deny
+/// of a host the file never had is fine here: the kept file holds only
+/// the person's own additions, and the live file was checked first.
+fn edit_hosts(file: &Path, hosts: &[String], edit: EgressEdit) -> Result<(), String> {
+    let current = read_hosts(file);
+    let edited = match wormhole_core::broker::apply_egress_edit(&current, hosts, edit) {
+        Ok(edited) => edited,
+        Err(_) if edit == EgressEdit::Deny => {
+            let mut kept = current;
+            kept.retain(|host| !hosts.contains(host));
+            kept
+        }
+        Err(e) => return Err(e),
+    };
+    replace_file(file, wormhole_core::broker::render_egress_file(&edited))
+}
+
+/// The hosts a list file holds, an absent file being an empty list.
+fn read_hosts(file: &Path) -> Vec<String> {
+    std::fs::read_to_string(file)
+        .map(|text| wormhole_core::broker::parse_egress_file(&text))
+        .unwrap_or_default()
+}
+
+/// Where a box's kept egress additions live — `wormhole allow` writes
+/// there so the same box remembers across restarts.
+fn kept_egress(home: &Path) -> PathBuf {
+    home.join(home::KEPT_EGRESS)
+}
+
+/// Starts this box's broker: the effective allowlist written where the
+/// broker re-reads it per tunnel, a socket in the box's own directory,
+/// stdout dropped (its one line is ours to say) and stderr kept — a
+/// broker's complaint belongs on the terminal that owns the box. Returns
+/// once the socket accepts, so the box never races its own way out.
+fn spawn_broker(box_dir: &Path, egress: &[String], name: &str) -> std::process::Child {
+    let socket = paths::box_broker_socket(box_dir);
+    let egress_file = paths::egress_file(box_dir);
+    replace_file(
+        &egress_file,
+        wormhole_core::broker::render_egress_file(egress),
+    )
+    .unwrap_or_else(|e| fail(&e));
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|e| fail(&format!("cannot find wormhole itself: {e}")));
+    let mut broker = std::process::Command::new(exe);
+    broker
+        .args(["broker", "--socket"])
+        .arg(&socket)
+        .arg("--egress-file")
+        .arg(&egress_file)
+        .args(["--name", name])
+        .stdout(std::process::Stdio::null());
+    let mut child = broker
+        .spawn()
+        .unwrap_or_else(|e| fail(&format!("cannot start the broker: {e}")));
+    for _ in 0..100 {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return child;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    fail(&format!(
+        "the broker never came up on {}; its error is above",
+        socket.display()
+    ));
+}
+
+/// `wormhole secret list|set|remove`: the host-side store of values a
+/// manifest's `ask` fills once. Names print; values never do. `set` reads
+/// the value masked from the terminal, or from a piped stdin — never from
+/// argv, where it would land in shell history.
+fn secret_cmd(args: &[String]) -> ! {
+    let strings: Vec<&str> = args.iter().map(String::as_str).collect();
+    match strings.as_slice() {
+        ["list"] => {
+            let store = read_secrets();
+            if store.is_empty() {
+                println!("no secrets kept");
+            }
+            for name in store.keys() {
+                println!("{name}");
+            }
+        }
+        ["set", name] => {
+            use std::io::IsTerminal;
+            let value = if std::io::stdin().is_terminal() {
+                prompt_secret(name)
+                    .unwrap_or_else(|| fail("no terminal to ask on; pipe the value in instead"))
+            } else {
+                let mut piped = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut piped)
+                    .unwrap_or_else(|e| fail(&format!("cannot read the value: {e}")));
+                piped.trim_end_matches(['\r', '\n']).to_owned()
+            };
+            if value.is_empty() {
+                fail("an empty value would keep nothing; give one");
+            }
+            let mut store = read_secrets();
+            store.insert((*name).to_owned(), value);
+            write_secrets(&store);
+            println!("{name} kept for every box");
+        }
+        ["remove", name] => {
+            let mut store = read_secrets();
+            if store.remove(*name).is_none() {
+                fail(&format!("no secret {name} is kept"));
+            }
+            write_secrets(&store);
+            println!("{name} removed; the next box that asks for it asks you");
+        }
+        _ => usage("usage: wormhole secret list | set NAME | remove NAME"),
+    }
+    std::process::exit(0)
+}
+
+/// The host-side secret store, absent file meaning empty store.
+fn read_secrets() -> wormhole_core::secrets::Store {
+    let file = paths::secrets_file(&config_home());
+    match std::fs::read_to_string(&file) {
+        Ok(text) => wormhole_core::secrets::parse(&text).unwrap_or_else(|e| fail(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => fail(&format!("cannot read {}: {e}", file.display())),
+    }
+}
+
+fn write_secrets(store: &wormhole_core::secrets::Store) {
+    let text = wormhole_core::secrets::to_toml(store).unwrap_or_else(|e| fail(&e));
+    replace_file_private(&paths::secrets_file(&config_home()), text)
+        .unwrap_or_else(|e| fail(&e));
+}
+
+/// Asks for every `ask` variable still without a value, once ever: the
+/// answer goes to the host-side store, so every later box — any role,
+/// any workspace — already has it. Off a terminal nothing can ask, so
+/// the start says what would fill the gap and moves on; whether that gap
+/// is fatal stays `required`'s decision, not this one's.
+fn ask_secrets(
+    declared: &BTreeMap<String, manifest::EnvVar>,
+    baked: &boxenv::BakedEnv,
+    mut store: wormhole_core::secrets::Store,
+) -> Option<wormhole_core::secrets::Store> {
+    let mut kept = false;
+    for name in boxenv::to_ask(declared, baked) {
+        let Some(value) = prompt_secret(name) else {
+            eprintln!(
+                "wormhole: {name} has no value and no terminal to ask on; \
+                 run `wormhole secret set {name}`"
+            );
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        store.insert(name.to_owned(), value);
+        kept = true;
+    }
+    if !kept {
+        return None;
+    }
+    write_secrets(&store);
+    println!(
+        "kept in {} for every box",
+        paths::secrets_file(&config_home()).display()
+    );
+    Some(store)
+}
+
+/// One masked line read from the terminal itself, not stdin: `/dev/tty`
+/// is what makes this work under a pipe, and its absence is what makes
+/// "no terminal" true. `None` means nobody can answer; an empty answer
+/// means "not now" and is the caller's to interpret.
+fn prompt_secret(name: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let _ = write!(tty, "{name} (asked once, kept for every box; empty skips): ");
+    let _ = tty.flush();
+    let quiet = nix::sys::termios::tcgetattr(&tty).ok().inspect(|original| {
+        let mut masked = original.clone();
+        masked.local_flags &= !nix::sys::termios::LocalFlags::ECHO;
+        let _ = nix::sys::termios::tcsetattr(&tty, nix::sys::termios::SetArg::TCSANOW, &masked);
+    });
+    let mut value = String::new();
+    let read = BufReader::new(&tty).read_line(&mut value);
+    if let Some(original) = quiet {
+        let _ = nix::sys::termios::tcsetattr(&tty, nix::sys::termios::SetArg::TCSANOW, &original);
+    }
+    let _ = writeln!(tty);
+    read.ok()?;
+    Some(value.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 /// A start or attach that would quietly run without something asked for

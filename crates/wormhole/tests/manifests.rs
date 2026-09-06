@@ -17,6 +17,7 @@ fn box_env(manifest: &Manifest, host: &BTreeMap<String, String>) -> BTreeMap<Str
         &manifest::declarations(manifest),
         &[],
         host,
+        &BTreeMap::new(),
     ))
 }
 

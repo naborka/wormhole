@@ -254,9 +254,14 @@ impl Banner {
     pub fn for_run(args: &crate::run::RunArgs) -> Self {
         let mut egress = Vec::new();
         // Mediated and narrow, but a way out: the box speaks to a socket
-        // the host serves, and what comes back is the model API.
+        // the host serves, and what comes back is the model API — plus
+        // every host the allowlist tunnels, counted so the banner never
+        // understates what the box can reach.
         if args.broker.is_some() {
-            egress.push("model api via the broker".to_owned());
+            egress.push(match args.egress.len() {
+                0 => "model api via the broker".to_owned(),
+                n => format!("model api + {n} allowed hosts via the broker"),
+            });
         }
         match (args.network, args.dns) {
             // A namespace of its own with nothing but loopback in it takes
@@ -556,6 +561,7 @@ mod tests {
             ca: None,
             artifacts: Vec::new(),
             broker: None,
+            egress: Vec::new(),
             network: crate::run::Network::None,
             root: crate::run::RootMode::default(),
             command: vec!["sh".to_owned()],

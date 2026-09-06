@@ -110,15 +110,25 @@ model = "claude-fable-5"
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
 
-# What the box can reach. Everything unnamed here is invisible to it.
+# What the box can reach. Everything unnamed here is invisible to it. The
+# defaults carry the design: no route, broker on, no credential in the
+# box. The resolver serves the build box (rustup fetches its toolchain);
+# the running box resolves nothing — the broker does, host-side.
 [access]
-# The credential file alone, not all of `~/.claude`: that directory's hooks
-# call host tools this box does not have.
-grants = ["~/.claude/.credentials.json", "~/.ssh"]
-# Change if you are on a VPN or split DNS. To take the route away entirely,
-# set `network = "none"` and `broker = true`, then drop this line and the
-# credentials grant: the box reaches the API through `wormhole broker`.
 dns = "1.1.1.1"
+# Reachable over HTTPS through the broker, exact names only: cargo's
+# registry and docs at run time, GitHub for cloning public sources.
+egress = [
+  "crates.io",
+  "static.crates.io",
+  "index.crates.io",
+  "static.rust-lang.org",
+  "docs.rs",
+  "github.com",
+  "codeload.github.com",
+  "raw.githubusercontent.com",
+  "objects.githubusercontent.com",
+]
 # Some networks intercept TLS with their own CA — Cloudflare WARP, a
 # corporate proxy — and a fresh store rightly refuses it. This adds the
 # host's bundle to what the box trusts, in the running box and in the
@@ -131,8 +141,7 @@ host_ca = true
 
 # The box's whole environment. `default` lets the host's value win when it
 # has one; `fixed` ignores the host, for anything that describes the box.
-[env.ANTHROPIC_API_KEY]
-default = ""
+# The API variables are the broker's to set and are not declared here.
 
 # Where the toolchain is. The shims on PATH find nothing without it, and
 # the host's value would name a directory this box does not have.
@@ -147,8 +156,10 @@ fixed = "/usr/local/rustup"
 [env.CAVEMAN_DEFAULT_MODE]
 fixed = "ultra"
 
+# Asked for once on the first start that finds it empty, then kept in
+# ~/.config/wormhole/secrets.toml for every box of every role.
 [env.CONTEXT7_API_KEY]
-default = ""
+ask = true
 
 # Wormhole carries your terminal's own description into the box home on
 # every start, so your real TERM wins here. This is what the box is told

@@ -148,46 +148,45 @@ preflight = "hooks/preflight.sh"
 | `run` | Which agent wormhole launches. Only `claude` is known; it starts with permission prompts bypassed, because the box holds the line. Absent means a box with no agent |
 | `model` | Becomes `ANTHROPIC_MODEL` in the box |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
-| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts; the agent then replaces the shell. A failing hook stops the box |
+| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts; the agent then replaces the shell. A failing hook stops the box. Non-secret setup only — plugins, skills, tool init. It runs inside the box, so a credential it saved would sit where the agent reads; credentials belong to `ask` (host-side store) or the broker, never here |
 
 ## `[access]` — what the box can reach
 
 ```toml
 [access]
-grants = ["~/.claude/.credentials.json", "~/.ssh"]
-dns = "1.1.1.1"
-network = "host"     # or "none"
-broker = false
+dns = "1.1.1.1"                          # the build box's resolver
+egress = ["crates.io", "*.crates.io"]    # HTTPS hosts, via the broker
 host_ca = false
+# grants = ["~/some/path"]               # host paths, only when you mean it
+# network = "host"                       # the opt-out escape hatch
+# broker = false                         # this box talks to nothing
 ```
 
 | Key | Meaning |
 |---|---|
 | `grants` | Host paths the box may see, bound at their host paths. `~` expands to your home. Symlinks, `..` and workspace overlap are refused |
-| `dns` | The one resolver the box may use. Absent means no DNS at all |
-| `network` | `"host"` (default) or `"none"` — see below |
-| `broker` | `false` (default) or `true` — reach the API through the host, holding no credential |
+| `dns` | The resolver the build box uses for its own fetches, and the running box only under `network = "host"`. A routeless box needs none: the broker resolves names host-side. Absent means no DNS anywhere |
+| `network` | `"none"` (default) — a namespace holding only loopback, no route off the machine — or `"host"`, every route the host has |
+| `broker` | Reach out through the host. Default: on when the manifest has an agent, off when it does not. The box holds no credential; wormhole starts and stops the broker with the box |
+| `egress` | HTTPS hosts the box may reach through the broker's `CONNECT` leg. Exact lowercase names, or `*.X` for one subdomain level — and only beside `X` itself. Empty is the baseline: nothing is reachable that is not named. Refused when nothing would enforce it (`network = "host"` or no broker) |
 | `host_ca` | **Adds** the host's CA bundle to what the box trusts, and points every TLS client at it — most do not read a bundle unless told to, and Node, which the agent is, never reads one at all. Applies to the build box as well. For networks that intercept TLS with their own CA. Off by default — see [what the box can reach](access.md) |
 
-Each field defaults to the permissive answer — an agent that cannot reach
-the model cannot work — and each is one line away from the tighter one.
+The defaults carry the design: no route, broker on, baseline empty. A
+box with no `[access]` table at all holds no credential, reaches the
+model API through the host, and reaches nothing else.
 
 ### `network` and `broker`
-
-```toml
-[access]
-network = "none"       # the box gets a namespace holding only loopback
-broker = true          # and reaches the API through the host
-```
 
 `network = "none"` gives the box a network namespace of its own with
 nothing in it but loopback. Connecting anywhere off the machine fails
 because **there is no route**, not because something filtered one.
 
-On its own that also stops the agent reaching the model, which is why the
-default is `"host"`. `broker = true` is the other half: the host runs
-`wormhole broker`, holds the credential, and the box talks to a socket
-bound into it. The pair is the design's whole point — see
+The broker is the other half, and wormhole runs it for you: every start
+of a brokered box spawns one with that box's `egress` list, its socket
+in the box's own directory, and ends it with the box. The agent reaches
+the model API through it with no credential in the box; `cargo`, `git`
+and anything that honors `HTTPS_PROXY` reach the `egress` hosts through
+its `CONNECT` leg, resolved and dialed host-side. See
 [the broker](broker.md).
 
 ## `[runtime]` — how the box is made
@@ -260,6 +259,30 @@ fixed = "/bin/bash"       # the host's value is ignored
 `default` is for things that describe you (keys, tokens). `fixed` is for
 things that describe the box — your host `SHELL` is a path that does not
 exist in there.
+
+Four more per-variable keys: `required = true` refuses a start while the
+variable has no value; `secret = true` masks the value on every screen;
+and `ask = true` fills it by asking you — once, ever. The first start
+that finds an asked variable empty prompts on the terminal (input
+masked) and keeps the answer in `~/.config/wormhole/secrets.toml`
+(0600), so every later box that declares the same name — any role, any
+workspace — already has it. One `CONTEXT7_API_KEY` typed one time serves
+all ten of your roles. An asked value is always masked, and it never
+comes from the manifest, so a role you fetch cannot carry one. Off a
+terminal nothing can ask: the start says which name is missing and
+points at `wormhole secret set NAME`; whether the gap is fatal stays
+`required`'s decision. `wormhole secret list | set NAME | remove NAME`
+manages the store; values never appear in argv or on any screen.
+
+```toml
+[env.CONTEXT7_API_KEY]
+ask = true                # asked once, kept for every box
+```
+
+`ask` beside `fixed` or `default` is refused: a value that is never
+missing could never be asked for. A secret a box holds is a secret that
+box's agent can read — for the model API credential use the broker,
+which keeps it out of the box entirely.
 
 `TERM` is the one key wormhole helps with. It is only a name: every curses
 program turns it into a description by looking it up, and the box carries

@@ -152,6 +152,25 @@ pub fn roles_dir(config_home: &Path) -> PathBuf {
     config_home.join("wormhole/roles")
 }
 
+/// A box's live egress allowlist, beside its root copy: what its broker
+/// re-reads per tunnel, and what `wormhole allow`/`deny` edit.
+pub fn egress_file(box_dir: &Path) -> PathBuf {
+    box_dir.join("egress")
+}
+
+/// A box's own broker socket, beside its root copy — per box, so one
+/// box's revocation never touches another's.
+pub fn box_broker_socket(box_dir: &Path) -> PathBuf {
+    box_dir.join("broker.sock")
+}
+
+/// The host-side secret store: values asked for once and shared by every
+/// box that declares them. In config beside the roles that ask — the
+/// person's own file, 0600, never a box's.
+pub fn secrets_file(config_home: &Path) -> PathBuf {
+    config_home.join("wormhole/secrets.toml")
+}
+
 /// One fetched commit, under the commit itself. Named by what was
 /// fetched rather than by what wanted it: a pin names a commit, not a
 /// role, so two roles pinned to one commit share one checkout and one

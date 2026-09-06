@@ -16,6 +16,7 @@ pub mod paths;
 pub mod receipt;
 pub mod registry;
 pub mod run;
+pub mod secrets;
 pub mod seed;
 pub mod source;
 pub mod table;

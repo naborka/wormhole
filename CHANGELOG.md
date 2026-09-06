@@ -9,6 +9,53 @@ true.
 
 ## Unreleased
 
+### The safe way is now the default way
+
+A manifest that says nothing about access gets the design's whole
+promise: no route off the machine, and the model API reached through
+the host-side broker, so no credential of yours is ever inside the box.
+Wormhole starts that broker for you — one per box, with that box's own
+allowlist — and stops it with the box. Nothing to run by hand any more.
+`network = "host"` remains as the explicit opt-out.
+
+### The box can reach the hosts you name, and only those
+
+New manifest key: `[access] egress = ["crates.io", "*.crates.io"]`.
+Every tool that honors `HTTPS_PROXY` — cargo, git, curl, the agent's
+own web fetches — reaches those hosts through the broker's CONNECT
+tunnel, resolved and dialed on the host, with nothing intercepted. A
+host you did not name gets a clear 403 that says exactly how to allow
+it. The baseline is empty on purpose.
+
+### `wormhole allow` — unblock a host without restarting anything
+
+When the agent hits a blocked host, the refusal names the fix:
+`wormhole allow <box> <host>`. Typed on the host, it takes effect on
+the agent's very next attempt — the box, the agent and the broker all
+keep running. `wormhole deny` takes a host back the same way. The box
+remembers your additions across restarts; your manifest is never
+edited behind your back, and nothing inside a box can widen its own
+list.
+
+### Secrets are asked for once, ever
+
+New env kind: `[env.CONTEXT7_API_KEY] ask = true`. The first start that
+finds it empty asks on the terminal (typed masked, stored host-side in
+`~/.config/wormhole/secrets.toml`, mode 0600) and every later box of
+every role that declares the same name just has it. One key, typed one
+time, serves all your roles. `wormhole secret list | set | remove`
+manages the store; values never appear in shell history or on any
+screen. Credentials never belong in preflight scripts — those are for
+plugins and tools, and the docs now say so.
+
+### Installing from git works on a plain toolchain again
+
+`cargo install` no longer demands the musl target. Where it is missing,
+the in-box forwarder is built against the host's own libc, statically,
+and the build refuses to embed anything that would need a loader from
+somebody's image — so the fix cannot silently undo the guarantee it
+bends.
+
 ### A brokered reply no longer claims to be HTTP/2
 
 The broker's upstream leg speaks whatever the API negotiates — HTTP/2 —

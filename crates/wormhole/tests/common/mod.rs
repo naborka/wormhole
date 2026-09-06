@@ -8,6 +8,18 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// Retries an attempt until it answers or two seconds pass — the one
+/// wait-until-listening loop, however a test's server comes up.
+pub fn await_ready<T>(mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
+    for _ in 0..100 {
+        if let Some(ready) = attempt() {
+            return Some(ready);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
 pub fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

@@ -54,10 +54,12 @@ fn init_never_writes_over_a_manifest_already_here() {
 /// The starter grants the agent's credential and nothing else. A default
 /// that handed over `~/.ssh` would be a default nobody read.
 #[test]
-fn the_starter_grants_nothing_but_the_agents_credential() {
+fn the_starter_grants_nothing_and_brokers_by_default() {
     let temp = tempfile::tempdir().expect("temp dir");
     wormhole(temp.path(), &["init"]);
     let text = std::fs::read_to_string(temp.path().join("wormhole.toml")).expect("manifest");
     let manifest = wormhole_core::manifest::parse(&text).expect("parses");
-    assert_eq!(manifest.access.grants, ["~/.claude/.credentials.json"]);
+    assert_eq!(manifest.access.grants, Vec::<String>::new());
+    assert!(wormhole_core::manifest::brokers(&manifest));
+    assert_eq!(manifest.access.network, wormhole_core::run::Network::None);
 }

@@ -7,11 +7,16 @@ license.workspace = true
 
 [dependencies]
 wormhole-core = { path = "../wormhole-core" }
-nix = { version = "0.30", features = ["sched", "mount", "user", "fs", "hostname", "process", "signal"] }
+nix = { version = "0.30", features = ["sched", "mount", "user", "fs", "hostname", "process", "signal", "term"] }
 tempfile = "3"
 sha2 = "0.10"
 landlock = "0.4.7"
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
+
+[build-dependencies]
+# For `requires_loader`: the build refuses to embed a forwarder that
+# would ask the box's image for a dynamic loader.
+wormhole-core = { path = "../wormhole-core" }
 
 [dev-dependencies]
 # `term` is for the panel test only: it drives the panel on a real pty,

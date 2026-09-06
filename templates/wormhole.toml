@@ -39,10 +39,17 @@ build = ["npm install -g @anthropic-ai/claude-code"]
 run = "claude"
 
 [access]
-# Baseline is empty: this workspace and nothing else. Every grant here is
-# a host path the agent can read — add one only when you mean it.
-grants = ["~/.claude/.credentials.json"]
+# Baseline is empty: this workspace and nothing else. The defaults hold
+# the line — no route off the machine, and the model API reached through
+# the host-side broker, so no credential ever enters the box. A grant is
+# a host path the agent can read; add one only when you mean it.
+# grants = ["~/some/path"]
+# The resolver serves the build box's own fetches (npm above); the
+# running box has no route to one and needs none.
 dns = "1.1.1.1"
+# Hosts the running box may reach over HTTPS through the broker. Exact
+# names or one-level wildcards; empty means nothing is reachable.
+# egress = ["crates.io", "static.crates.io"]
 # Add what the host trusts to what the box trusts. On a network that
 # intercepts TLS with its own CA — Cloudflare WARP, a corporate proxy — a
 # fresh store rightly refuses it. This mounts the host's bundle and points

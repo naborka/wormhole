@@ -5,6 +5,8 @@
 //! to that, so a toolchain or profile change that sneaks a loader back in
 //! fails here instead of inside someone's box.
 
+mod common;
+
 /// The same bytes `boundary.rs` writes into every brokered box.
 static FORWARDER: &[u8] = include_bytes!(env!("WORMHOLE_FORWARD_BIN"));
 
@@ -51,17 +53,8 @@ fn the_embedded_forwarder_relays_between_tcp_and_the_socket() {
         peer.write_all(b"pong").expect("write reply");
     });
     // The listener comes up when it comes up; retry rather than sleep.
-    let mut tcp = None;
-    for _ in 0..100 {
-        match std::net::TcpStream::connect(&addr) {
-            Ok(stream) => {
-                tcp = Some(stream);
-                break;
-            }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
-    }
-    let mut tcp = tcp.expect("the forwarder never started listening");
+    let mut tcp = common::await_ready(|| std::net::TcpStream::connect(&addr).ok())
+        .expect("the forwarder never started listening");
     tcp.write_all(b"ping").expect("write request");
     let mut reply = [0u8; 4];
     tcp.read_exact(&mut reply).expect("read reply");

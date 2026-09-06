@@ -61,19 +61,17 @@ run = "claude"
 model = "claude-sonnet-4-6"
 
 # What the box can reach. Everything unnamed here is invisible to it.
+# The defaults do the heavy lifting: no route (`network = "none"`) and the
+# broker on, so the box holds no credential and reaches the model API
+# through the host. The resolver serves the build box's own fetches.
 [access]
-# The credential file alone, not all of `~/.claude`: that directory's hooks
-# call host tools this box does not have.
-grants = ["~/.claude/.credentials.json", "~/.ssh"]
-# Change if you are on a VPN or split DNS. To take the route away entirely,
-# set `network = "none"` and `broker = true`, then drop this line and the
-# credentials grant: the box reaches the API through `wormhole broker`.
 dns = "1.1.1.1"
+# The hosts the box may reach over HTTPS through the broker, for cargo at
+# run time. Exact names; nothing else resolves, let alone connects.
+egress = ["crates.io", "static.crates.io", "index.crates.io", "static.rust-lang.org", "docs.rs"]
 
 # The box's whole environment. `default` lets the host's value win when it
 # has one; `fixed` ignores the host, for anything that describes the box.
-[env.ANTHROPIC_API_KEY]
-default = ""
 
 # TERM names a description every curses program looks up, and the box
 # carries only what Alpine's ncurses ships. Wormhole carries your

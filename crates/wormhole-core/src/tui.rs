@@ -371,6 +371,18 @@ pub fn preview(manifest: &Manifest, source: &str, image_ready: bool) -> String {
         Some(dns) => text.push_str(&format!("  dns: {dns}\n")),
         None => text.push_str("  dns: none\n"),
     }
+    // The route is what the box can reach; a preview that hid it would
+    // understate exactly the thing this screen exists to show.
+    text.push_str(match manifest.access.network {
+        crate::run::Network::Host => "  network: host — every route the host has\n",
+        crate::run::Network::None => "  network: none — loopback only\n",
+    });
+    if crate::manifest::brokers(manifest) {
+        text.push_str("  broker: model api reached host-side, no credential in box\n");
+        for host in &manifest.access.egress {
+            text.push_str(&format!("  egress: {host}\n"));
+        }
+    }
     if manifest.env.is_empty() {
         text.push_str("\nenv: none\n");
     } else {
@@ -499,9 +511,10 @@ mod tests {
             "instructions = \"ROLE.md\"\n",
             "preflight = \"hooks/preflight.sh\"\n",
             "[access]\n",
-            "grants = [\"~/.ssh\", \"~/.claude/.credentials.json\"]\n",
+            "grants = [\"~/some/path\"]\n",
             "dns = \"1.1.1.1\"\n",
             "host_ca = true\n",
+            "egress = [\"crates.io\"]\n",
             "[env.SHELL]\nfixed = \"/bin/bash\"\n",
             "[env.ANTHROPIC_API_KEY]\ndefault = \"\"\n",
         ));
@@ -512,10 +525,12 @@ mod tests {
             "claude",
             "claude-fable-5",
             "workspace (read-write)",
-            "~/.ssh",
-            "~/.claude/.credentials.json",
+            "~/some/path",
             "host CA bundle: trusted",
             "dns: 1.1.1.1",
+            "network: none — loopback only",
+            "broker: model api reached host-side, no credential in box",
+            "egress: crates.io",
             "SHELL = /bin/bash",
             "ANTHROPIC_API_KEY (host value, empty default)",
             "preflight: hooks/preflight.sh",

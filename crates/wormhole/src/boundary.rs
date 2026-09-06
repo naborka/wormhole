@@ -122,6 +122,7 @@ pub fn build_in(
         ca,
         artifacts: artifacts.to_vec(),
         broker: None,
+        egress: Vec::new(),
         network: Network::default(),
         root: RootMode::default(),
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],

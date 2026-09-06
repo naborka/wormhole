@@ -15,21 +15,72 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use wormhole_core::broker::{self, BrokerError, Credential};
 
-/// The one host wormhole talks to. The box never names it.
+/// The one host wormhole talks to with the credential. Everything else a
+/// box reaches goes through the `CONNECT` leg and its allowlist.
 const UPSTREAM: &str = "https://api.anthropic.com";
 
-/// Host side: serve the unix socket until killed.
-///
-/// One connection at a time is deliberate for now — the baton in a group is
-/// turn-based and a single agent makes one request at a time — and it is
-/// the shape that keeps the refresh lock honest while there is no
-/// connection pool to reason about.
-pub fn serve(socket: &Path, credential_file: &Path) -> ! {
+/// How a broker knows what a tunnel may reach. A fixed list serves the
+/// hand-run form; a file is what a box's broker gets, re-read on every
+/// tunnel so `wormhole allow` acts without anything restarting.
+pub struct Egress {
+    fixed: Vec<String>,
+    file: Option<PathBuf>,
+    /// What the refusal calls this box, so a 403 can name the exact
+    /// `wormhole allow` line that unblocks it.
+    box_name: Option<String>,
+}
+
+impl Egress {
+    /// Whether the allowlist admits this host, as of this moment. The
+    /// fixed part answers without touching the disk; only a miss re-reads
+    /// the live file, which is where an `allow` typed after this broker
+    /// started shows up. A file that cannot be read is an empty
+    /// contribution, never a crash — refusing extra hosts is the safe
+    /// direction to fail in.
+    fn allows(&self, host: &str) -> bool {
+        if broker::egress_allows(&self.fixed, host) {
+            return true;
+        }
+        let Some(file) = &self.file else {
+            return false;
+        };
+        std::fs::read_to_string(file)
+            .is_ok_and(|text| broker::egress_allows(&broker::parse_egress_file(&text), host))
+    }
+}
+
+/// `wormhole broker [--socket PATH] [--egress H1,..] [--egress-file PATH]
+/// [--name NAME]`: the standalone form, for running one by hand. A box
+/// spawns its own with `--egress-file` and `--name`; this one defaults to
+/// the shared path and an empty list.
+pub fn broker_cmd(args: &[String]) -> ! {
+    let parsed = broker::parse_broker_args(args).unwrap_or_else(|e| crate::usage(&e));
+    let socket = parsed
+        .socket
+        .map_or_else(|| wormhole_core::paths::broker_socket(&crate::data_home()), PathBuf::from);
+    let egress = Egress {
+        fixed: parsed.fixed,
+        file: parsed.file.map(PathBuf::from),
+        box_name: parsed.box_name,
+    };
+    serve(
+        &socket,
+        &crate::host_home().join(".claude/.credentials.json"),
+        egress,
+    )
+}
+
+/// Host side: serve the unix socket until killed, one thread per
+/// connection — a `CONNECT` tunnel lives as long as the TLS session in
+/// it, and the agent's next API request must not queue behind it. The
+/// refresh path stays single-writer under its own `flock`.
+pub fn serve(socket: &Path, credential_file: &Path, egress: Egress) -> ! {
     if let Some(parent) = socket.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -40,15 +91,20 @@ pub fn serve(socket: &Path, credential_file: &Path) -> ! {
         Err(e) => crate::fail(&format!("cannot listen on {}: {e}", socket.display())),
     };
     println!("broker: listening on {}", socket.display());
+    let egress: Arc<Egress> = Arc::new(egress);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(e) = relay(stream, credential_file) {
-                    // Redaction happens inside `relay`, where the
-                    // credential is in scope; anything reaching here is
-                    // already safe to print.
-                    eprintln!("broker: {e}");
-                }
+                let credential_file = credential_file.to_owned();
+                let egress = Arc::clone(&egress);
+                std::thread::spawn(move || {
+                    if let Err(e) = relay(stream, &credential_file, &egress) {
+                        // Redaction happens inside `relay`, where the
+                        // credential is in scope; anything reaching here
+                        // is already safe to print.
+                        eprintln!("broker: {e}");
+                    }
+                });
             }
             Err(e) => eprintln!("broker: cannot accept: {e}"),
         }
@@ -86,9 +142,10 @@ fn at_socket<T>(
     done
 }
 
-/// One request from the box: read its head, renew the credential if it is
-/// close to expiry, inject it, and stream the reply straight back.
-fn relay(stream: UnixStream, credential_file: &Path) -> Result<(), String> {
+/// One request from the box: read its head, then either open the tunnel
+/// a `CONNECT` asks for, or renew the credential if it is close to
+/// expiry, inject it, and stream the API reply straight back.
+fn relay(stream: UnixStream, credential_file: &Path, egress: &Egress) -> Result<(), String> {
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut raw = Vec::new();
     // Up to the blank line and not one byte further: everything after it
@@ -109,6 +166,9 @@ fn relay(stream: UnixStream, credential_file: &Path) -> Result<(), String> {
     }
     let text = String::from_utf8_lossy(&raw).into_owned();
     let head = broker::parse_head(&text).map_err(|e| e.to_string())?;
+    if let Some(authority) = head.authority() {
+        return tunnel(stream, reader, authority, egress);
+    }
 
     let mut body = Vec::new();
     if let Some(length) = head.content_length() {
@@ -120,7 +180,7 @@ fn relay(stream: UnixStream, credential_file: &Path) -> Result<(), String> {
 
     let credential = fresh_credential(credential_file)?;
     let outgoing = broker::outgoing(&head.headers, &credential.access_token);
-    let url = broker::upstream_url(UPSTREAM, &head.path);
+    let url = broker::upstream_url(UPSTREAM, head.path().ok_or("no path in the request")?);
 
     let mut curl = Command::new("curl");
     curl.args(["--silent", "--show-error", "--no-buffer"])
@@ -191,6 +251,65 @@ fn relay(stream: UnixStream, credential_file: &Path) -> Result<(), String> {
             &credential,
         ));
     }
+    Ok(())
+}
+
+/// The `CONNECT` leg: judge the target against the allowlist, dial it
+/// host-side, say `200 Connection established`, then move bytes both
+/// ways until either side closes. The broker never sees inside the
+/// tunnel — the TLS in it is the client's and the host's business.
+///
+/// A refusal is a real HTTP reply naming the host and the manifest line
+/// that would allow it; a blocked host must never look like a network
+/// failure.
+fn tunnel(
+    stream: UnixStream,
+    mut from_box: BufReader<UnixStream>,
+    target: &str,
+    egress: &Egress,
+) -> Result<(), String> {
+    let mut out = stream;
+    let name = egress.box_name.as_deref();
+    let (host, port) = match broker::connect_target(target) {
+        Ok(target) => target,
+        Err(why) => return refuse(&mut out, &broker::connect_refused(target, &why, name)),
+    };
+    // The live file is read per tunnel, so an `allow` typed on the host
+    // is already in force here — no restart, of anything.
+    if !egress.allows(&host) {
+        return refuse(
+            &mut out,
+            &broker::connect_refused(&host, "not in this box's egress allowlist", name),
+        );
+    }
+    let upstream = match std::net::TcpStream::connect((host.as_str(), port)) {
+        Ok(upstream) => upstream,
+        Err(e) => return refuse(&mut out, &broker::connect_failed(&host, &e.to_string())),
+    };
+    out.write_all(broker::CONNECT_ESTABLISHED.as_bytes())
+        .map_err(|e| format!("cannot answer the CONNECT: {e}"))?;
+    // Both directions at once, same shape as the in-box forwarder: a
+    // reply that begins before the request finishes uploading is normal.
+    let mut up_in = upstream
+        .try_clone()
+        .map_err(|e| format!("cannot split the tunnel: {e}"))?;
+    let mut up_out = upstream;
+    let into_upstream = std::thread::spawn(move || {
+        // The reader first: it may hold bytes the client sent right
+        // behind its CONNECT, and they belong at the front.
+        let _ = std::io::copy(&mut from_box, &mut up_out);
+        let _ = up_out.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut up_in, &mut out);
+    let _ = out.shutdown(std::net::Shutdown::Write);
+    let _ = into_upstream.join();
+    Ok(())
+}
+
+/// A whole policy reply written and done. Best-effort: a client that
+/// hung up before reading its refusal lost nothing it wanted.
+fn refuse(out: &mut UnixStream, reply: &str) -> Result<(), String> {
+    let _ = out.write_all(reply.as_bytes());
     Ok(())
 }
 

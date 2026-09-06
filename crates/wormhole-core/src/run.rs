@@ -33,6 +33,12 @@ pub struct RunArgs {
     /// path, together with wormhole's own binary, so the box can reach the
     /// API without a credential or a route.
     pub broker: Option<String>,
+    /// Every host the broker's `CONNECT` leg admits for this box — the
+    /// manifest's plus the kept additions. On the struct the banner is
+    /// computed from, so a way out can never bypass the line that
+    /// promises to name every way out. The child process ignores it;
+    /// enforcement is the broker's, host-side.
+    pub egress: Vec<String>,
     pub network: Network,
     pub root: RootMode,
     pub command: Vec<String>,
@@ -70,15 +76,15 @@ impl fmt::Display for RootMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
-    /// The host's network namespace: every route the host has, the box has.
-    /// The default until the broker exists, because it is the only way an
-    /// agent reaches the API at all — and the banner says so rather than
-    /// claiming an isolation the box does not have.
-    #[default]
+    /// The host's network namespace: every route the host has, the box
+    /// has. The opt-in escape hatch (`--network host`), no longer any
+    /// default: the broker is how a box reaches out now.
     Host,
     /// A network namespace of the box's own, holding nothing but loopback.
     /// `connect()` to anything off the machine fails because there is no
-    /// route, not because something filtered it.
+    /// route, not because something filtered it. The default everywhere —
+    /// default deny is the whole design, said once here.
+    #[default]
     None,
 }
 
@@ -276,6 +282,8 @@ pub fn parse_args(args: &[String]) -> Result<RunArgs, ParseError> {
         ca,
         artifacts,
         broker,
+        // A bare `run` spawns no broker, so there is nothing to admit.
+        egress: Vec::new(),
         network,
         root,
         command: command.to_vec(),
@@ -631,6 +639,7 @@ mod tests {
                 ),
             ],
             broker: Some("/data/wormhole/broker.sock".to_owned()),
+            egress: Vec::new(),
             network: Network::None,
             root: RootMode::Readonly,
             command: strings(&["sh", "-c", "ls -a"]),
@@ -645,6 +654,7 @@ mod tests {
             ca: None,
             artifacts: Vec::new(),
             broker: None,
+            egress: Vec::new(),
             network: Network::default(),
             root: RootMode::default(),
             command: strings(&["/bin/true"]),
@@ -665,6 +675,7 @@ mod tests {
                 ca: None,
                 artifacts: Vec::new(),
                 broker: None,
+                egress: Vec::new(),
                 network: Network::default(),
                 root: RootMode::default(),
                 command: strings(&["/bin/true"])
@@ -685,6 +696,7 @@ mod tests {
                 ca: None,
                 artifacts: Vec::new(),
                 broker: None,
+                egress: Vec::new(),
                 network: Network::default(),
                 root: RootMode::default(),
                 command: strings(&["ls", "-a", "/"])
@@ -705,6 +717,7 @@ mod tests {
                 ca: None,
                 artifacts: Vec::new(),
                 broker: None,
+                egress: Vec::new(),
                 network: Network::default(),
                 root: RootMode::default(),
                 command: strings(&["sh", "--", "-c"])
@@ -748,6 +761,7 @@ mod tests {
                 ca: None,
                 artifacts: Vec::new(),
                 broker: None,
+                egress: Vec::new(),
                 network: Network::default(),
                 root: RootMode::default(),
                 command: strings(&["/bin/true"]),
@@ -788,6 +802,7 @@ mod tests {
                 ca: None,
                 artifacts: Vec::new(),
                 broker: None,
+                egress: Vec::new(),
                 network: Network::default(),
                 root: RootMode::default(),
                 command: strings(&["/bin/true"]),
@@ -824,6 +839,7 @@ mod tests {
                 ca: None,
                 artifacts: Vec::new(),
                 broker: None,
+                egress: Vec::new(),
                 network: Network::default(),
                 root: RootMode::default(),
                 command: strings(&["sh", "--grant", "/x"]),

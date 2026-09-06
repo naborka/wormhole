@@ -8,7 +8,9 @@ wormhole init
 
 `wormhole.toml` in your workspace root is the whole recipe: the image, the
 agent, and everything the box may reach. `init` writes a working one —
-Alpine, Node, Claude Code, your credential and nothing else of your host:
+Alpine, Node, Claude Code, no route off the machine, and no credential of
+yours anywhere in the box: the agent reaches the model API through the
+host-side [broker](broker.md):
 
 ```toml
 {{#include ../../../templates/wormhole.toml}}
@@ -62,6 +64,9 @@ wormhole ps --all         # every box this host keeps, running or idle
 wormhole usage            # the account's usage windows, with resets
 wormhole attach <id|name> # second terminal into a running box (its agent)
 wormhole attach <id> -- sh
+wormhole allow <id|name> <host>  # let it reach one more host, live
+wormhole deny <id|name> <host>   # take one back; no restart either way
+wormhole secret list      # values `ask = true` keeps, shared by every box
 wormhole stop <id|name>   # end a running box from anywhere
 wormhole rename <id|name> <new>  # call it something else
 wormhole reset <id|name>  # keep the box, empty its home

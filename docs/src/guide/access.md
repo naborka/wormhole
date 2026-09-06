@@ -52,25 +52,25 @@ Four things hold that are not mounts, and none of them can be turned off:
 
 ## What it can dial
 
-By default the box shares the host's network namespace: it can open
-connections wherever the host can. The resolver line and default-deny
-grants bound what it can *find* and *read*, not what it can *dial*.
-
-Two manifest keys change that, and they belong together:
+By default: nothing it was not given. The box gets a network namespace
+of its own holding only loopback — there is **no route** off the
+machine, rather than a filter in front of one — and reaches out through
+the broker alone: the model API with no credential in the box, and the
+manifest's `egress` hosts over `CONNECT`, resolved and dialed host-side.
+See [the broker](broker.md).
 
 ```toml
 [access]
-network = "none"     # a namespace of its own, holding only loopback
-broker  = true       # the API through the host, no credential in the box
+network = "host"     # the opt-out: every route the host has
 ```
 
-`network = "none"` means there is **no route** to take, rather than a
-filter in front of one. On its own it also stops the agent reaching the
-model, so `broker = true` is the other half — see
-[the broker](broker.md). Every launch prints which of these it got:
+With `network = "host"` the box can open connections wherever the host
+can; the resolver line and default-deny grants bound what it can *find*
+and *read*, not what it can *dial*. Every launch prints which of these
+it got:
 
 ```
-boundary: namespaces (host kernel SHARED) · egress: model api via the broker · workspace: rw · grants: 0
+boundary: namespaces (host kernel SHARED) · egress: model api + 5 allowed hosts via the broker · workspace: rw · grants: 0
 ```
 
 That line is not decoration. A staged boundary that does not say which

@@ -24,6 +24,8 @@ pub enum Source {
     Cli,
     /// Carried from the host environment; refreshed on attach.
     Host,
+    /// From the host-side secret store, asked for once and kept.
+    Store,
     /// The manifest's fallback for a host that had nothing.
     Default,
     /// Declared, but no source had a value.
@@ -72,13 +74,14 @@ fn cli_value(arg: &EnvArg, host: &BTreeMap<String, String>) -> Option<String> {
 }
 
 /// The baked env a start computes. `cli` beats the host, the host beats
-/// the default, and `fixed` beats everything — the same order one sentence
-/// can say.
+/// the store, the store beats the default, and `fixed` beats everything —
+/// the same order one sentence can say.
 #[must_use]
 pub fn resolve(
     declared: &BTreeMap<String, EnvVar>,
     cli: &[EnvArg],
     host: &BTreeMap<String, String>,
+    store: &BTreeMap<String, String>,
 ) -> BakedEnv {
     let unset = || (String::new(), Source::Unset);
     let mut env: BakedEnv = declared
@@ -91,6 +94,8 @@ pub fn resolve(
                 cli_value(arg, host).map_or_else(unset, |value| (value, Source::Cli))
             } else if let Some(value) = carried(host, name) {
                 (value, Source::Host)
+            } else if let Some(value) = carried(store, name) {
+                (value, Source::Store)
             } else if var.default.is_empty() {
                 unset()
             } else {
@@ -101,7 +106,9 @@ pub fn resolve(
                 Var {
                     value,
                     source,
-                    secret: var.secret,
+                    // An asked value is a credential by nature; it is
+                    // masked whether or not the manifest said so.
+                    secret: var.secret || var.ask,
                     required: var.required,
                 },
             )
@@ -194,6 +201,19 @@ pub fn unfilled_cli<'a>(cli: &'a [EnvArg], env: &BakedEnv) -> Vec<&'a str> {
         .filter(|arg| arg.value.is_none())
         .filter(|arg| !env.get(&arg.name).is_some_and(Var::is_set))
         .map(|arg| arg.name.as_str())
+        .collect()
+}
+
+/// The names a start should ask for: declared `ask`, and no source had a
+/// value. The caller prompts on a terminal and keeps the answers in the
+/// host-side store, so every later box already has them.
+#[must_use]
+pub fn to_ask<'a>(declared: &'a BTreeMap<String, EnvVar>, env: &BakedEnv) -> Vec<&'a str> {
+    declared
+        .iter()
+        .filter(|(_, var)| var.ask)
+        .filter(|(name, _)| !env.get(*name).is_some_and(Var::is_set))
+        .map(|(name, _)| name.as_str())
         .collect()
 }
 
@@ -307,6 +327,7 @@ pub fn table(env: &BakedEnv) -> String {
             Source::Cli => "cli",
             Source::Host => "host",
             Source::Default => "default",
+            Source::Store => "store",
             Source::Unset => "unset",
         };
         let refresh = if var.source == Source::Fixed {
@@ -340,7 +361,17 @@ mod tests {
             fixed: None,
             required: false,
             secret: false,
+            ask: false,
         }
+    }
+
+    /// `resolve` with an empty store, which is what most rules need.
+    fn bake(
+        declared: &BTreeMap<String, EnvVar>,
+        cli: &[EnvArg],
+        host: &BTreeMap<String, String>,
+    ) -> BakedEnv {
+        resolve(declared, cli, host, &BTreeMap::new())
     }
 
     fn host(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -384,7 +415,7 @@ mod tests {
                 },
             ),
         ]);
-        let env = resolve(
+        let env = bake(
             &vars,
             &[spelled("SHELL", "/bin/zsh"), spelled("A", "cli")],
             &host(&[("SHELL", "/bin/fish"), ("A", "host"), ("B", "host")]),
@@ -403,14 +434,58 @@ mod tests {
     /// carries the host's value for it.
     #[test]
     fn a_cli_flag_declares_an_ad_hoc_variable() {
-        let env = resolve(&declared(&[]), &[named("FOO")], &host(&[("FOO", "1")]));
+        let env = bake(&declared(&[]), &[named("FOO")], &host(&[("FOO", "1")]));
         assert_eq!(env["FOO"].value, "1");
         assert_eq!(env["FOO"].source, Source::Cli);
     }
 
+    /// The store fills what the host does not: the host wins where it has
+    /// a word, the store answers where it does not, and an empty store
+    /// value is no value, same as the host's.
+    #[test]
+    fn the_store_fills_what_the_host_does_not() {
+        let vars = declared(&[("A", plain()), ("B", plain()), ("C", plain())]);
+        let env = resolve(
+            &vars,
+            &[],
+            &host(&[("A", "host")]),
+            &host(&[("A", "stored"), ("B", "stored"), ("C", "")]),
+        );
+        assert_eq!(env["A"].value, "host");
+        assert_eq!(env["A"].source, Source::Host);
+        assert_eq!(env["B"].value, "stored");
+        assert_eq!(env["B"].source, Source::Store);
+        assert_eq!(env["C"].source, Source::Unset);
+    }
+
+    /// An asked value is a credential whether or not the manifest said
+    /// `secret`; it is masked everywhere.
+    #[test]
+    fn an_asked_variable_is_masked_without_being_told() {
+        let vars = declared(&[("KEY", EnvVar { ask: true, ..plain() })]);
+        let env = resolve(&vars, &[], &host(&[]), &host(&[("KEY", "hush")]));
+        assert!(env["KEY"].secret);
+        let table = table(&env);
+        assert!(!table.contains("hush"), "{table}");
+        assert!(table.contains("store"), "{table}");
+    }
+
+    /// Asked means asked only while no source has a value: filled from
+    /// anywhere, the name drops off the list; empty everywhere, it stays.
+    #[test]
+    fn to_ask_lists_only_asked_names_still_unset() {
+        let vars = declared(&[
+            ("FILLED", EnvVar { ask: true, ..plain() }),
+            ("MISSING", EnvVar { ask: true, ..plain() }),
+            ("PLAIN", plain()),
+        ]);
+        let env = resolve(&vars, &[], &host(&[("FILLED", "v")]), &host(&[]));
+        assert_eq!(to_ask(&vars, &env), vec!["MISSING"]);
+    }
+
     #[test]
     fn an_empty_host_value_is_no_value() {
-        let env = resolve(&declared(&[("A", plain())]), &[], &host(&[("A", "")]));
+        let env = bake(&declared(&[("A", plain())]), &[], &host(&[("A", "")]));
         assert_eq!(env["A"].source, Source::Unset);
         assert_eq!(missing_required(&env), Vec::<&str>::new());
     }
@@ -424,15 +499,15 @@ mod tests {
                 ..plain()
             },
         )]);
-        let env = resolve(&vars, &[], &host(&[]));
+        let env = bake(&vars, &[], &host(&[]));
         assert_eq!(missing_required(&env), vec!["SENTRY_TOKEN"]);
-        let filled = resolve(&vars, &[spelled("SENTRY_TOKEN", "t")], &host(&[]));
+        let filled = bake(&vars, &[spelled("SENTRY_TOKEN", "t")], &host(&[]));
         assert_eq!(missing_required(&filled), Vec::<&str>::new());
     }
 
     #[test]
     fn the_baked_env_survives_the_toml_round_trip() {
-        let env = resolve(
+        let env = bake(
             &declared(&[(
                 "KEY",
                 EnvVar {
@@ -452,7 +527,7 @@ mod tests {
     /// set, the baked value survives where it is not, fixed never moves.
     #[test]
     fn refresh_takes_the_hosts_word_only_where_it_has_one() {
-        let baked = resolve(
+        let baked = bake(
             &declared(&[
                 (
                     "SHELL",
@@ -476,7 +551,7 @@ mod tests {
 
     #[test]
     fn refresh_applies_cli_flags_and_reports_them() {
-        let baked = resolve(&declared(&[("A", plain())]), &[], &host(&[("A", "1")]));
+        let baked = bake(&declared(&[("A", plain())]), &[], &host(&[("A", "1")]));
         let (env, changes) = refresh(
             &baked,
             &[spelled("A", "2"), spelled("NEW", "n")],
@@ -492,7 +567,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_attach_says_nothing() {
-        let baked = resolve(&declared(&[("A", plain())]), &[], &host(&[("A", "1")]));
+        let baked = bake(&declared(&[("A", plain())]), &[], &host(&[("A", "1")]));
         let (env, changes) = refresh(&baked, &[], &host(&[("A", "1")]));
         assert_eq!(env, baked);
         assert_eq!(diff_line(&changes), None);
@@ -507,7 +582,7 @@ mod tests {
     /// keep refreshing it — while a spelled one is the CLI's own word.
     #[test]
     fn a_bare_flag_stays_host_carried_a_spelled_one_does_not() {
-        let baked = resolve(&declared(&[]), &[], &host(&[]));
+        let baked = bake(&declared(&[]), &[], &host(&[]));
         let (env, _) = refresh(
             &baked,
             &[named("A"), spelled("B", "b")],
@@ -521,7 +596,7 @@ mod tests {
     /// attach is satisfied by the baked value the box already has.
     #[test]
     fn a_bare_flag_is_unfilled_only_with_no_value_anywhere() {
-        let baked = resolve(
+        let baked = bake(
             &declared(&[("KEPT", plain())]),
             &[],
             &host(&[("KEPT", "v")]),
@@ -537,7 +612,7 @@ mod tests {
     /// table. Its name may.
     #[test]
     fn a_secret_value_is_masked_everywhere() {
-        let env = resolve(
+        let env = bake(
             &declared(&[(
                 "KEY",
                 EnvVar {
@@ -558,7 +633,7 @@ mod tests {
 
     #[test]
     fn the_start_line_counts_set_and_unset_apart() {
-        let env = resolve(
+        let env = bake(
             &declared(&[("A", plain()), ("B", plain())]),
             &[],
             &host(&[("A", "1")]),

@@ -75,6 +75,11 @@ const BOXES: &[Line] = &[
         blurb: "a second terminal into a running box",
     },
     Line {
+        name: "allow",
+        args: "ID|NAME HOST...",
+        blurb: "let it reach one more host, live; deny undoes",
+    },
+    Line {
         name: "stop",
         args: "ID|NAME",
         blurb: "end it; the home is kept for the next start",
@@ -141,9 +146,14 @@ const REST: &[Line] = &[
         blurb: "what is left of the account's limits",
     },
     Line {
+        name: "secret",
+        args: "list|set NAME|remove NAME",
+        blurb: "values `ask` keeps, shared by every box",
+    },
+    Line {
         name: "broker",
         args: "",
-        blurb: "the host-side proxy that holds the credential",
+        blurb: "the host-side proxy holding the credential",
     },
     Line {
         name: "run",
@@ -202,16 +212,16 @@ A BOX
 "#;
 
 const AFTER_BOXES: &str = r#"
-  reset keeps the box and empties it. remove takes it away. Both need the
-  box stopped, and both are refused while it runs.
-
   A variable reaches a box only when declared: [env] in the manifest, or
   --env NAME[=VALUE] on box or attach; bare NAME carries the host's value.
   Attach refreshes declared ones — your export wins, fixed never moves.
+  ask = true prompts once, masked, and keeps the answer for every box.
+  A blocked HTTPS host answers 403 naming the `wormhole allow` line that
+  unblocks it — typed on the host it acts immediately, nothing restarts.
 
 PANEL   (bare `wormhole`)
   enter join or start · n new · d stop · x remove · r reset · q quit
-  x and r ask first. y is the only key that answers; anything else cancels.
+  x and r ask first; y answers, anything else cancels.
 
 MANIFEST
   ./wormhole.toml is the whole recipe; nothing reaches the box unless it
@@ -236,16 +246,16 @@ MANIFEST
   instructions = "ROLE.md"          # added to the built-in instructions
   preflight = "hooks/setup.sh"      # runs in the box before the agent
 
-  [access]                          # baseline is empty: this folder only
-  grants = ["~/.ssh"]               # host paths the box may see
-  dns = "1.1.1.1"                   # without it the box has no resolver
-  host_ca = true                    # trust what the host trusts
-  network = "none"                  # no route off the machine at all
-  broker = true                     # API via the host; no credential in box
+  [access]                          # baseline: this folder, no route, and
+  egress = ["crates.io"]            # the broker on — no credential in the
+  dns = "1.1.1.1"                   # box, the API and these hosts reached
+  host_ca = true                    # host-side. dns feeds the build box.
+  grants = ["~/some/path"]          # opt out: network="host", broker=false
 
   [env.SOME_VAR]
   fixed = "1"                       # the box cannot override this
   # default = ""                    # host's value wins when it has one
+  # ask = true                      # asked once, kept for every box
   # required = true                 # secret = true masks it when printed
 
   [runtime]
@@ -287,20 +297,18 @@ MORE
 
 const TAIL: &str = r#"
 DISK
-  wormhole gc removes only what it can prove.
-  dead          finished with               --delete takes it
-  unreferenced  no box here starts from it  --delete --unreferenced
-  unproven      a recipe could not be read  nothing takes it
-  live          in use                      nothing takes it
+  wormhole gc removes only what it can prove. dead: --delete takes it.
+  unreferenced — no box here starts from it — needs --unreferenced too.
+  unproven (a recipe could not be read) and live are never taken.
 
 WHERE THINGS ARE
   ./wormhole.toml                   this folder's recipe
   ~/.config/wormhole/roles/         installed roles
+  ~/.config/wormhole/secrets.toml   what `ask` kept; yours, 0600
   ~/.local/share/wormhole/homes/    one kept $HOME per box
   ~/.local/share/wormhole/images/   built images, by recipe digest
 
-EXIT
-  0 did it   ·   1 refused, and said why   ·   2 the command was wrong
+EXIT  0 did it  ·  1 refused, and said why  ·  2 the command was wrong
 
 Full guide: https://naborka.github.io/wormhole
 "#;

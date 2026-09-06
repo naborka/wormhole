@@ -91,17 +91,43 @@ pub fn outgoing(from_box: &[(String, String)], token: &str) -> Outgoing {
     Outgoing { headers }
 }
 
+/// What a request line points at. Typed, so "a path" and "a CONNECT
+/// authority" can never be confused downstream: the parser is the only
+/// place the method decides which one a request carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// `/path?query`, for the model-API leg. Never a full URL: the box
+    /// does not choose which host its request reaches.
+    Origin(String),
+    /// `host:port`, carried by `CONNECT` alone; `connect_target` judges
+    /// it before anything dials.
+    Authority(String),
+}
+
 /// A request's head, as it arrived from the box.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Head {
     pub method: String,
-    /// The path and query, as written. Never a full URL: the box does not
-    /// choose which host its request reaches.
-    pub path: String,
+    pub target: Target,
     pub headers: Vec<(String, String)>,
 }
 
 impl Head {
+    /// The origin-form path, `None` for a tunnel request.
+    pub fn path(&self) -> Option<&str> {
+        match &self.target {
+            Target::Origin(path) => Some(path),
+            Target::Authority(_) => None,
+        }
+    }
+
+    /// The `CONNECT` authority, `None` for an ordinary request.
+    pub fn authority(&self) -> Option<&str> {
+        match &self.target {
+            Target::Authority(authority) => Some(authority),
+            Target::Origin(_) => None,
+        }
+    }
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -132,9 +158,19 @@ pub fn parse_head(text: &str) -> Result<Head, BrokerError> {
         .next()
         .filter(|m| !m.is_empty())
         .ok_or(BrokerError::BadRequest)?;
-    let path = parts
+    // A path for every ordinary request; `CONNECT` alone carries the
+    // authority form (`host:port`), which `connect_target` then judges.
+    let target = parts
         .next()
-        .filter(|p| p.starts_with('/'))
+        .and_then(|p| {
+            if method == "CONNECT" {
+                Some(Target::Authority(p.to_owned()))
+            } else if p.starts_with('/') {
+                Some(Target::Origin(p.to_owned()))
+            } else {
+                None
+            }
+        })
         .ok_or(BrokerError::BadRequest)?;
     if !parts.next().is_some_and(|v| v.starts_with("HTTP/1.")) {
         return Err(BrokerError::BadRequest);
@@ -153,9 +189,234 @@ pub fn parse_head(text: &str) -> Result<Head, BrokerError> {
     }
     Ok(Head {
         method: method.to_owned(),
-        path: path.to_owned(),
+        target,
         headers,
     })
+}
+
+/// What one allowlist entry may look like, and why not otherwise.
+///
+/// The rules are CONCEPT.md §2's, exhaustively: an exact lowercase name,
+/// or a one-level wildcard `*.X` — and `*.X` only when `X` itself is in
+/// the list, which removes the public-suffix hazard (`*.github.io`)
+/// without shipping a Public Suffix List. `None` means the entry stands.
+pub fn egress_entry_error(entry: &str, list: &[String]) -> Option<String> {
+    let name = entry.strip_prefix("*.").unwrap_or(entry);
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.contains("..")
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+    {
+        return Some(
+            "an entry is an exact lowercase host name, or `*.` before one".to_owned(),
+        );
+    }
+    if entry.starts_with("*.") && !list.iter().any(|e| e == name) {
+        return Some(format!(
+            "a wildcard covers subdomains of a host you also name; add {name:?} \
+             itself if you mean it"
+        ));
+    }
+    None
+}
+
+/// Whether the allowlist admits this host: its exact name is listed, or a
+/// listed one-level wildcard covers it — `*.crates.io` reaches
+/// `static.crates.io` and never `a.b.crates.io`. The baseline is empty,
+/// so an empty list admits nothing.
+pub fn egress_allows(list: &[String], host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if list.contains(&host) {
+        return true;
+    }
+    let Some((first_label, parent)) = host.split_once('.') else {
+        return false;
+    };
+    !first_label.is_empty()
+        && list
+            .iter()
+            .any(|e| e.strip_prefix("*.").is_some_and(|base| base == parent))
+}
+
+/// What `wormhole allow` and `wormhole deny` do to a host list. The verb
+/// is data so the one rule body below serves both files an edit touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressEdit {
+    Allow,
+    Deny,
+}
+
+/// One list edited: `Allow` adds what is absent, each entry held to the
+/// allowlist rules against the merged result; `Deny` removes, and a host
+/// that was never there is an error — a deny that did nothing must say
+/// so, not print success.
+pub fn apply_egress_edit(
+    current: &[String],
+    hosts: &[String],
+    edit: EgressEdit,
+) -> Result<Vec<String>, String> {
+    let mut edited = current.to_vec();
+    match edit {
+        EgressEdit::Allow => {
+            let merged: Vec<String> = current.iter().chain(hosts.iter()).cloned().collect();
+            for host in hosts {
+                if let Some(rule) = egress_entry_error(host, &merged) {
+                    return Err(format!("{host}: {rule}"));
+                }
+                if !edited.contains(host) {
+                    edited.push(host.clone());
+                }
+            }
+        }
+        EgressEdit::Deny => {
+            for host in hosts {
+                if !edited.contains(host) {
+                    return Err(format!("{host} is not on the list; nothing to deny"));
+                }
+            }
+            edited.retain(|host| !hosts.contains(host));
+        }
+    }
+    Ok(edited)
+}
+
+/// The list a box's broker enforces: the manifest's hosts plus the
+/// box's kept additions, first spelling wins. One body, so the start,
+/// the banner and every edit agree on what "may reach" means.
+pub fn effective_egress(manifest_hosts: &[String], kept: &[String]) -> Vec<String> {
+    let mut hosts = manifest_hosts.to_vec();
+    for host in kept {
+        if !hosts.contains(host) {
+            hosts.push(host.clone());
+        }
+    }
+    hosts
+}
+
+/// The target a `CONNECT` names, judged before anything dials it: a bare
+/// `host:port` with the ports TLS and plain HTTP actually use. Anything
+/// else — a port that would make the tunnel a generic TCP channel, an
+/// address literal dressed as a name — is for the caller to refuse.
+pub fn connect_target(path: &str) -> Result<(String, u16), String> {
+    let (host, port) = path
+        .split_once(':')
+        .ok_or("a CONNECT target is host:port")?;
+    let port: u16 = port.parse().map_err(|_| "the port is not a number")?;
+    if !matches!(port, 443 | 80) {
+        return Err("only ports 443 and 80 are tunneled".to_owned());
+    }
+    if host.is_empty() || host.contains('/') || host.contains('@') {
+        return Err("the host is not a bare name".to_owned());
+    }
+    Ok((host.to_ascii_lowercase(), port))
+}
+
+/// What `wormhole broker` was told on its command line. Parsed here,
+/// pure, like `run::parse_args` — a flag loop in the binary is a flag
+/// loop no test drives.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrokerArgs {
+    /// Where to listen; the caller supplies its default.
+    pub socket: Option<String>,
+    /// Hosts allowed regardless of any file.
+    pub fixed: Vec<String>,
+    /// The live allowlist, re-read per tunnel.
+    pub file: Option<String>,
+    /// What a refusal calls the box, for the `wormhole allow` hint.
+    pub box_name: Option<String>,
+}
+
+pub fn parse_broker_args(args: &[String]) -> Result<BrokerArgs, String> {
+    let mut parsed = BrokerArgs::default();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let mut value = |what: &str| {
+            rest.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs {what}"))
+        };
+        match flag.as_str() {
+            "--socket" => parsed.socket = Some(value("a path")?),
+            "--egress" => {
+                parsed.fixed = value("a comma-separated host list")?
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect();
+            }
+            "--egress-file" => parsed.file = Some(value("a path")?),
+            "--name" => parsed.box_name = Some(value("a box name")?),
+            other => return Err(format!("unknown broker flag {other}")),
+        }
+    }
+    Ok(parsed)
+}
+
+/// The whole reply for a tunnel that may open. Sent before a single
+/// upstream byte, which is what tells the client to begin TLS.
+pub const CONNECT_ESTABLISHED: &str = "HTTP/1.1 200 Connection established\r\n\r\n";
+
+/// The whole reply for a refused `CONNECT`: the host, the reason, and
+/// what allows it — a blocked host must never look like a network
+/// failure. Given the box's name, the fix is the live one: a command
+/// run on the host, effective immediately, no restart.
+pub fn connect_refused(host: &str, why: &str, box_name: Option<&str>) -> String {
+    let fix = match box_name {
+        Some(name) => format!(
+            "allow it now, from the host: `wormhole allow {name} {host}` \
+             — or permanently: [access] egress = [\"{host}\"]"
+        ),
+        None => format!("allow it with [access] egress = [\"{host}\"]"),
+    };
+    plain_reply(
+        "403 Forbidden",
+        format!("wormhole: {host}: {why}; {fix}\n"),
+    )
+}
+
+/// One body for every whole-reply the broker writes itself: a real
+/// status line, plain text, and a length, so no client mistakes policy
+/// for a broken connection.
+fn plain_reply(status: &str, body: String) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\n\
+         content-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// What the live egress file holds: one host per line, blanks and `#`
+/// comments skipped. The box's start writes it from the manifest plus
+/// the box's kept additions; `wormhole allow`/`deny` edit it while the
+/// box runs, and the broker reads it per tunnel — policy that moves
+/// without a restart, because it never lived inside the box at all.
+pub fn parse_egress_file(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The file `parse_egress_file` reads back.
+pub fn render_egress_file(hosts: &[String]) -> String {
+    let mut text = String::new();
+    for host in hosts {
+        text.push_str(host);
+        text.push('\n');
+    }
+    text
+}
+
+/// The whole reply for a tunnel that was allowed and then could not be
+/// dialed: upstream's failure, not policy's, and the status says which.
+pub fn connect_failed(host: &str, error: &str) -> String {
+    plain_reply(
+        "502 Bad Gateway",
+        format!("wormhole: cannot reach {host}: {error}\n"),
+    )
 }
 
 /// The upstream URL for a request from the box: the one host wormhole
@@ -383,6 +644,132 @@ mod tests {
             .collect()
     }
 
+    fn list(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|e| (*e).to_owned()).collect()
+    }
+
+    /// CONCEPT.md §2 in one test: exact names, one-level wildcards only,
+    /// and an empty baseline that admits nothing.
+    #[test]
+    fn the_allowlist_admits_exactly_what_it_names() {
+        let egress = list(&["crates.io", "*.crates.io"]);
+        assert!(egress_allows(&egress, "crates.io"));
+        assert!(egress_allows(&egress, "static.crates.io"));
+        assert!(egress_allows(&egress, "Static.CRATES.io"), "case folds");
+        assert!(!egress_allows(&egress, "a.b.crates.io"), "one level only");
+        assert!(!egress_allows(&egress, "notcrates.io"));
+        assert!(!egress_allows(&egress, "evil.com"));
+        assert!(!egress_allows(&[], "crates.io"), "the baseline is empty");
+    }
+
+    /// `*.X` without `X` is the public-suffix hazard — `*.github.io`
+    /// would cover strangers' sites — so the wildcard needs its base.
+    #[test]
+    fn a_wildcard_needs_its_base_named() {
+        let alone = list(&["*.github.io"]);
+        assert!(egress_entry_error("*.github.io", &alone).is_some());
+        let with_base = list(&["*.crates.io", "crates.io"]);
+        assert!(egress_entry_error("*.crates.io", &with_base).is_none());
+        assert!(egress_entry_error("crates.io", &with_base).is_none());
+        for bad in ["", "*.", "UPPER.com", "a..b", ".x", "x.", "a/b", "a b"] {
+            assert!(egress_entry_error(bad, &list(&[bad])).is_some(), "{bad:?}");
+        }
+    }
+
+    /// A tunnel is judged before it is dialed: named hosts on the two web
+    /// ports, nothing else — any port would be a generic TCP channel.
+    #[test]
+    fn a_connect_target_is_a_host_on_a_web_port() {
+        assert_eq!(
+            connect_target("crates.io:443"),
+            Ok(("crates.io".to_owned(), 443))
+        );
+        assert_eq!(
+            connect_target("DL-CDN.alpinelinux.org:80"),
+            Ok(("dl-cdn.alpinelinux.org".to_owned(), 80))
+        );
+        for bad in ["crates.io", "crates.io:22", "crates.io:x", ":443", "a@b:443"] {
+            assert!(connect_target(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// One rule body for both files an edit touches: allow adds absent
+    /// entries under the allowlist rules; deny of a host never listed is
+    /// an error, not a silent success.
+    #[test]
+    fn an_egress_edit_adds_validated_hosts_and_denies_only_what_exists() {
+        let current = list(&["crates.io"]);
+        assert_eq!(
+            apply_egress_edit(&current, &list(&["docs.rs", "crates.io"]), EgressEdit::Allow),
+            Ok(list(&["crates.io", "docs.rs"]))
+        );
+        // A wildcard is valid when its base arrives in the same edit.
+        assert_eq!(
+            apply_egress_edit(&current, &list(&["b.io", "*.b.io"]), EgressEdit::Allow),
+            Ok(list(&["crates.io", "b.io", "*.b.io"]))
+        );
+        assert!(apply_egress_edit(&current, &list(&["*.alone.io"]), EgressEdit::Allow).is_err());
+        assert_eq!(
+            apply_egress_edit(&current, &list(&["crates.io"]), EgressEdit::Deny),
+            Ok(Vec::new())
+        );
+        assert!(apply_egress_edit(&current, &list(&["gone.io"]), EgressEdit::Deny).is_err());
+    }
+
+    /// One body for "what may this box reach": manifest first, kept
+    /// additions after, nothing twice.
+    #[test]
+    fn the_effective_list_is_manifest_plus_kept_without_repeats() {
+        assert_eq!(
+            effective_egress(&list(&["a.io", "b.io"]), &list(&["b.io", "c.io"])),
+            list(&["a.io", "b.io", "c.io"])
+        );
+    }
+
+    #[test]
+    fn broker_args_parse_like_every_other_command() {
+        let args: Vec<String> = ["--socket", "/s", "--egress", "a.io,b.io", "--name", "api"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let parsed = parse_broker_args(&args).expect("parses");
+        assert_eq!(parsed.socket.as_deref(), Some("/s"));
+        assert_eq!(parsed.fixed, list(&["a.io", "b.io"]));
+        assert_eq!(parsed.box_name.as_deref(), Some("api"));
+        assert!(parse_broker_args(&["--socket".to_owned()]).is_err());
+        assert!(parse_broker_args(&["--wat".to_owned()]).is_err());
+    }
+
+    /// The head parser admits the authority form for CONNECT alone.
+    #[test]
+    fn a_connect_head_parses_and_only_for_connect() {
+        let head = parse_head("CONNECT crates.io:443 HTTP/1.1\r\n\r\n").expect("parses");
+        assert_eq!((head.method.as_str(), head.authority().expect("authority")), ("CONNECT", "crates.io:443"));
+        assert!(parse_head("GET crates.io:443 HTTP/1.1\r\n\r\n").is_err());
+    }
+
+    /// A refusal names the host and the fix, and is a real HTTP reply —
+    /// a blocked host must never look like a network failure. With the
+    /// box's name it names the live fix, which needs no restart.
+    #[test]
+    fn a_refused_connect_says_what_would_allow_it() {
+        let reply = connect_refused("evil.com", "not in this box's egress list", None);
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(reply.contains("egress = [\"evil.com\"]"), "{reply}");
+        let live = connect_refused("evil.com", "blocked", Some("api"));
+        assert!(live.contains("wormhole allow api evil.com"), "{live}");
+    }
+
+    /// The live file: hosts by line, comments and blanks skipped, and a
+    /// round trip that loses nothing.
+    #[test]
+    fn the_egress_file_round_trips_hosts_by_line() {
+        let text = "# added live\ncrates.io\n\n  sentry.io  \n";
+        assert_eq!(parse_egress_file(text), list(&["crates.io", "sentry.io"]));
+        let hosts = list(&["a.io", "*.b.io"]);
+        assert_eq!(parse_egress_file(&render_egress_file(&hosts)), hosts);
+    }
+
     fn names(out: &Outgoing) -> Vec<String> {
         out.headers
             .iter()
@@ -588,7 +975,7 @@ mod tests {
         )
         .expect("valid");
         assert_eq!(head.method, "POST");
-        assert_eq!(head.path, "/v1/messages");
+        assert_eq!(head.path().expect("a path"), "/v1/messages");
         assert_eq!(head.header("content-length"), Some("12"));
         // Case-insensitive, because the wire is.
         assert_eq!(head.header("CONTENT-LENGTH"), Some("12"));
@@ -629,7 +1016,7 @@ mod tests {
             "https://api.anthropic.com/v1/messages"
         );
         let head = parse_head("GET /v1/m HTTP/1.1\r\nHost: evil.test\r\n\r\n").expect("valid");
-        let url = upstream_url("https://api.anthropic.com", &head.path);
+        let url = upstream_url("https://api.anthropic.com", head.path().expect("a path"));
         assert!(!url.contains("evil.test"), "{url}");
         // And the header itself never reaches upstream.
         assert!(
