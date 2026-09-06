@@ -123,7 +123,11 @@ pub fn build_in(
         artifacts: artifacts.to_vec(),
         broker: None,
         egress: Vec::new(),
-        network: Network::default(),
+        // The build fetches for itself — `apk` its packages, `rustup` its
+        // toolchain — and has no broker to ride, so it runs on the host's
+        // network. Said explicitly: the default is routeless, and a build
+        // box that inherits it fails every fetch with "temporary error".
+        network: Network::Host,
         root: RootMode::default(),
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
     };
