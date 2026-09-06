@@ -87,12 +87,6 @@ fn main() {
             &paths::broker_socket(&data_home()),
             &host_home().join(".claude/.credentials.json"),
         ),
-        // The box half: moves bytes between loopback and that socket, and
-        // knows nothing. Run inside the box, by the box.
-        Some("__forward") => match args.get(1) {
-            Some(socket) => broker::forward(wormhole_core::broker::IN_BOX_ADDR, Path::new(socket)),
-            None => usage("__forward needs a socket path"),
-        },
         Some("__boxed") => boundary::boxed_child(&args[1..]),
         Some("__build") => boundary::boxed_build(&args[1..]),
         Some("__probe") => match args.get(1) {

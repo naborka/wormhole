@@ -43,10 +43,11 @@ pub const REFRESH_MARGIN_SECS: u64 = 300;
 /// image has to accommodate it.
 pub const SOCKET_IN_BOX: &str = "/run/wormhole/broker.sock";
 
-/// Where wormhole's own binary is bound into such a box, so the box can
-/// run the forwarder. Read-only, and it is the same binary — there is
-/// nothing for the user to install, which §12 promised.
-pub const WORMHOLE_IN_BOX: &str = "/run/wormhole/wormhole";
+/// Where the forwarder helper is bound into such a box. Read-only, and
+/// carried inside wormhole's own binary — there is nothing for the user
+/// to install, which §12 promised. Built static against musl, so it runs
+/// in any image regardless of the image's libc.
+pub const FORWARD_IN_BOX: &str = "/run/wormhole/forward";
 
 /// What the box's agent is pointed at. Loopback only; with
 /// `network = "none"` loopback is the only thing that exists.
@@ -64,7 +65,7 @@ pub fn base_url_in_box() -> String {
 /// outside because it must listen on the box's loopback, and with
 /// `network = "none"` that loopback exists nowhere else.
 pub fn forwarder_line() -> String {
-    format!("{WORMHOLE_IN_BOX} __forward {SOCKET_IN_BOX} &")
+    format!("{FORWARD_IN_BOX} {IN_BOX_ADDR} {SOCKET_IN_BOX} &")
 }
 
 /// What the broker sends upstream for one request from the box.
@@ -308,19 +309,34 @@ pub fn redact(message: &str, credential: &Credential) -> String {
     safe
 }
 
+/// The status line the box's client sees, whatever the upstream leg spoke.
+///
+/// `curl --include` writes the upstream head verbatim, and its version
+/// token names the ALPN of *that* leg — `HTTP/2 200`. The box-side leg is
+/// plain HTTP/1.1, and a client refuses a version its own connection never
+/// negotiated. Only the version token changes; status and reason move
+/// untouched, and a line that is not a status line moves verbatim.
+pub fn client_status_line(upstream: &str) -> String {
+    match upstream.split_once(' ') {
+        Some((version, rest)) if version.starts_with("HTTP/") => format!("HTTP/1.1 {rest}"),
+        _ => upstream.to_owned(),
+    }
+}
+
 /// `PT_INTERP`: the program header that names a dynamic loader.
 const PT_INTERP: u32 = 3;
 
 /// Whether an ELF binary asks the image for a dynamic loader.
 ///
-/// The bound-in binary runs inside whatever image the box uses. A
-/// dynamically linked wormhole names its build host's loader
+/// The bound-in forwarder runs inside whatever image the box uses. A
+/// dynamically linked one names its build host's loader
 /// (`/lib64/ld-linux-*` or musl's), which a foreign image does not have,
 /// and the exec dies with a bare "not found" that blames the wrong thing.
 /// Static (including static-pie) has no `PT_INTERP` and runs anywhere,
 /// which is what the §12 "nothing to install" promise actually requires.
+/// A test in `wormhole` holds the embedded helper to this.
 pub fn requires_loader(elf: &[u8]) -> Result<bool, String> {
-    let bad = |what: &str| format!("wormhole's own binary is not a readable 64-bit ELF: {what}");
+    let bad = |what: &str| format!("the forwarder binary is not a readable 64-bit ELF: {what}");
     let u16_at = |at: usize| Some(u16::from_le_bytes([*elf.get(at)?, *elf.get(at + 1)?]));
     if elf.get(..4) != Some(b"\x7fELF".as_slice()) {
         return Err(bad("wrong magic"));
@@ -356,19 +372,6 @@ pub fn requires_loader(elf: &[u8]) -> Result<bool, String> {
     Ok(false)
 }
 
-/// The refusal for a dynamically linked wormhole asked to broker into an
-/// image. Actionable: it names the rebuild that fixes it, because the
-/// alternative the user sees otherwise is the exec's bare "not found"
-/// inside the box.
-pub fn dynamic_binary_error() -> String {
-    "wormhole is dynamically linked, so its forwarder cannot run inside the image \
-     (the image lacks this host's loader); rebuild it static: \
-     rustup target add x86_64-unknown-linux-musl && \
-     cargo install --git https://github.com/naborka/wormhole --locked \
-     --target x86_64-unknown-linux-musl wormhole"
-        .to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +388,28 @@ mod tests {
             .iter()
             .map(|(n, _)| n.to_ascii_lowercase())
             .collect()
+    }
+
+    /// The box-side leg is plain HTTP/1.1 whatever ALPN the upstream leg
+    /// negotiated; a client refuses a version its connection never spoke.
+    #[test]
+    fn the_status_line_names_the_client_side_protocol_not_the_upstream_one() {
+        for line in ["HTTP/2 400\r\n", "HTTP/2.0 400\r\n", "HTTP/3 400\r\n"] {
+            assert_eq!(client_status_line(line), "HTTP/1.1 400\r\n");
+        }
+        assert_eq!(
+            client_status_line("HTTP/1.1 200 OK\r\n"),
+            "HTTP/1.1 200 OK\r\n"
+        );
+    }
+
+    /// A line that is not a status line moves untouched: mangling bytes
+    /// the broker does not understand is worse than relaying them.
+    #[test]
+    fn a_line_that_is_not_a_status_line_is_relayed_verbatim() {
+        for line in ["", "\r\n", "not a status line\r\n", "HTTPS-ISH 200\r\n"] {
+            assert_eq!(client_status_line(line), line);
+        }
     }
 
     /// The dummy key exists so the agent's client starts at all. Sending
@@ -628,7 +653,8 @@ mod tests {
     #[test]
     fn the_forwarder_is_started_in_the_box_against_the_bound_socket() {
         let line = forwarder_line();
-        assert!(line.contains(WORMHOLE_IN_BOX), "{line}");
+        assert!(line.contains(FORWARD_IN_BOX), "{line}");
+        assert!(line.contains(IN_BOX_ADDR), "{line}");
         assert!(line.contains(SOCKET_IN_BOX), "{line}");
         assert!(line.ends_with('&'), "the forwarder must not block: {line}");
     }
@@ -637,7 +663,7 @@ mod tests {
     /// nothing about an image has to accommodate the broker.
     #[test]
     fn nothing_the_broker_needs_in_the_box_touches_the_image() {
-        for path in [SOCKET_IN_BOX, WORMHOLE_IN_BOX] {
+        for path in [SOCKET_IN_BOX, FORWARD_IN_BOX] {
             assert!(path.starts_with("/run/"), "{path}");
         }
     }
@@ -681,20 +707,11 @@ mod tests {
             &b"not an elf at all, just text"[..],
         ] {
             let err = requires_loader(bad).expect_err("must refuse");
-            assert!(err.contains("wormhole's own binary"), "{err}");
+            assert!(err.contains("forwarder binary"), "{err}");
         }
         let mut truncated = elf_with(&[1, 3]);
         truncated.truncate(0x7a); // second phdr promised, its p_type cut off
         assert!(requires_loader(&truncated).is_err());
-    }
-
-    /// The refusal must hand the user the rebuild, because the failure it
-    /// replaces is a bare "not found" from exec inside the box.
-    #[test]
-    fn the_dynamic_binary_refusal_names_the_static_rebuild() {
-        let err = dynamic_binary_error();
-        assert!(err.contains("x86_64-unknown-linux-musl"), "{err}");
-        assert!(err.contains("cargo install"), "{err}");
     }
 
     /// A refresh failure must say what went wrong. A blanket 401 gets

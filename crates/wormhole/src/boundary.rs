@@ -617,28 +617,12 @@ fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result
         ));
     }
     if let Some(socket) = &args.broker {
-        // The socket, and the binary that speaks to it. Both read-only —
-        // the box needs to talk through the broker, never to change it.
+        // Read-only: the box talks through the broker, never changes it.
         let real = fs::canonicalize(socket)
             .map_err(|e| format!("cannot resolve the broker socket {socket}: {e}"))?;
         grants.push(mount_plan::Grant::retargeted(
             real,
             wormhole_core::broker::SOCKET_IN_BOX,
-        ));
-        let exe = std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-        // A dynamically linked wormhole would exec inside the image against
-        // a loader the image does not have and die with a bare "not found".
-        // Refuse here, where the cause can still be named. Only an image
-        // root can lack the loader; the host's own /usr always has it.
-        if args.image.is_some() {
-            let elf = fs::read(&exe).map_err(|e| format!("cannot read own binary: {e}"))?;
-            if wormhole_core::broker::requires_loader(&elf)? {
-                return Err(wormhole_core::broker::dynamic_binary_error());
-            }
-        }
-        grants.push(mount_plan::Grant::retargeted(
-            fs::canonicalize(&exe).unwrap_or(exe),
-            wormhole_core::broker::WORMHOLE_IN_BOX,
         ));
     }
     let image = args.image.as_ref().map(PathBuf::from);
@@ -649,7 +633,35 @@ fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result
     };
     let ops = mount_plan::compute(&workspace, home, root, user, &grants, args.dns)
         .map_err(|e| format!("mount plan refused: {e}"))?;
-    enter_and_pivot(scratch, &ops, &workspace)
+    enter_and_pivot(scratch, &ops, &workspace)?;
+    if args.broker.is_some() {
+        write_forwarder()?;
+    }
+    Ok(())
+}
+
+/// The in-box forwarder, compiled for the musl target by `build.rs` and
+/// carried inside wormhole's own binary. Static, so it runs in any image
+/// regardless of the image's libc — however wormhole itself was linked.
+static FORWARDER: &[u8] = include_bytes!(env!("WORMHOLE_FORWARD_BIN"));
+
+/// Writes the forwarder into the pivoted box, executable for everyone.
+///
+/// Written, not bound: a bind's host-side temp file would outlive its
+/// deleter, which cannot reach host paths after the pivot. On the box's
+/// `/run` tmpfs it dies with the box. The file is the box's to scribble
+/// on, and that is fine — it holds no credential and reaches nothing the
+/// box cannot already reach; the boundary is the socket, which stays a
+/// read-only bind.
+fn write_forwarder() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = Path::new(wormhole_core::broker::FORWARD_IN_BOX);
+    let dir = path.parent().ok_or("the forwarder path has no parent")?;
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    fs::write(path, FORWARDER)
+        .map_err(|e| format!("cannot write the forwarder {}: {e}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("cannot mark the forwarder executable: {e}"))
 }
 
 /// Own mount namespace, every op applied into `scratch`, pivot into it,

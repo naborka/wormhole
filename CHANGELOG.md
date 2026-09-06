@@ -9,15 +9,27 @@ true.
 
 ## Unreleased
 
-### A dynamically linked wormhole is refused before it breaks a brokered box
+### A brokered reply no longer claims to be HTTP/2
 
-A brokered box runs wormhole's own binary inside the image, as the
-forwarder. If that binary was built against the host's glibc and the image
-is musl (Alpine), the exec inside the box died with a bare "not found"
-that named nothing. Now wormhole checks its own binary at launch: brokering
-into an image with a dynamically linked binary is refused up front, and the
-refusal hands you the exact musl rebuild command. The install guide gained
-the same recipe.
+The broker's upstream leg speaks whatever the API negotiates — HTTP/2 —
+and the reply's status line said so, verbatim: `HTTP/2 400`. The box's
+client speaks HTTP/1.1 on its side and refuses a version its connection
+never negotiated. The broker now rewrites just the version token of the
+status line to `HTTP/1.1` before anything streams; status, reason and
+every following byte move untouched.
+
+### The broker's in-box forwarder now runs in any image
+
+A brokered box used to run wormhole's own binary inside the image, as the
+forwarder. Built against the host's glibc, that binary could not start in
+a musl image (Alpine), so wormhole refused up front and told you to
+rebuild it static. That whole trade is gone: the forwarder is now its own
+tiny helper, compiled static against musl and carried inside wormhole's
+binary, written into the box at start. It runs under any libc, wormhole
+itself can be built however your host likes, and there is still nothing
+to install. Building wormhole now needs the musl target
+(`rustup target add x86_64-unknown-linux-musl`); the build says exactly
+that if it is missing.
 
 ### A box's environment is now visible, updatable, and honest on attach
 

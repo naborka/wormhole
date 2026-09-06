@@ -1,16 +1,11 @@
 //! The broker, carrying bytes.
 //!
-//! Two halves, because a credential must never be on the box's side of the
-//! boundary:
-//!
-//! - `serve` runs on the **host**, on a unix socket. It holds the token,
-//!   renews it, injects it, and is the only thing here that can reach the
-//!   API. The socket is bind-mounted into the box, so the box can speak to
-//!   it without a route to anywhere.
-//! - `forward` runs **inside the box**, on loopback, and does nothing but
-//!   move bytes between a TCP connection and that socket. It knows no
-//!   credential and reaches nothing else, which is why it is safe for it to
-//!   be the thing an untrusted agent talks to.
+//! This is the host half: `serve` on a unix socket holds the token, renews
+//! it, injects it, and is the only thing here that can reach the API. The
+//! socket is bind-mounted into the box, so the box can speak to it without
+//! a route to anywhere. The box half — the loopback forwarder — is the
+//! `wormhole-forward` crate, a static musl binary carried inside this one
+//! and written into every brokered box.
 //!
 //! The upstream leg is `curl`, the same choice `usage.rs` already makes:
 //! the host's CA store, proxy settings and TLS are the host's business, and
@@ -152,8 +147,25 @@ fn relay(stream: UnixStream, credential_file: &Path) -> Result<(), String> {
     // Streamed, not collected: the first chunk must reach the agent before
     // upstream has finished writing, or every streamed reply arrives as one
     // silent pause followed by a wall of text.
-    let mut upstream = child.stdout.take().ok_or("upstream produced no output")?;
+    let mut upstream = BufReader::new(child.stdout.take().ok_or("upstream produced no output")?);
     let mut out = stream;
+    // The one line curl writes in the upstream leg's voice: its `--include`
+    // head opens with that leg's ALPN version, `HTTP/2 200`, and the box's
+    // HTTP/1.1 client refuses it. Rewritten before anything streams; the
+    // decision is `client_status_line`, tested in wormhole-core.
+    let mut status = Vec::new();
+    upstream
+        .read_until(b'\n', &mut status)
+        .map_err(|e| format!("upstream read failed: {e}"))?;
+    let status = match std::str::from_utf8(&status) {
+        Ok(line) => broker::client_status_line(line).into_bytes(),
+        Err(_) => status, // not a status line; relayed verbatim
+    };
+    if out.write_all(&status).is_err() {
+        // The box hung up; nothing to report, but the child is still reaped.
+        let _ = child.wait();
+        return Ok(());
+    }
     let mut buffer = [0u8; 16 * 1024];
     loop {
         let read = match upstream.read(&mut buffer) {
@@ -274,44 +286,4 @@ fn ask_for_a_new_token(credential: &Credential) -> Result<String, String> {
         ));
     }
     String::from_utf8(output.stdout).map_err(|e| format!("the renewal reply is not text: {e}"))
-}
-
-/// Box side: a TCP listener on loopback that moves bytes to the broker's
-/// socket and back. It holds no credential and can reach nothing else, so
-/// this is the only part of the broker an untrusted agent ever touches.
-pub fn forward(addr: &str, socket: &Path) -> ! {
-    let listener = match std::net::TcpListener::bind(addr) {
-        Ok(listener) => listener,
-        Err(e) => crate::fail(&format!("cannot listen on {addr}: {e}")),
-    };
-    for stream in listener.incoming().flatten() {
-        if let Err(e) = pipe_both_ways(stream, socket) {
-            eprintln!("wormhole: broker forwarder: {e}");
-        }
-    }
-    crate::fail("the broker forwarder's listener ended")
-}
-
-fn pipe_both_ways(tcp: std::net::TcpStream, socket: &Path) -> Result<(), String> {
-    let unix = at_socket(socket, |name| UnixStream::connect(name))
-        .map_err(|e| format!("cannot reach the broker at {}: {e}", socket.display()))?;
-    let (mut tcp_in, mut tcp_out) = (
-        tcp.try_clone().map_err(|e| e.to_string())?,
-        tcp.try_clone().map_err(|e| e.to_string())?,
-    );
-    let (mut unix_in, mut unix_out) = (
-        unix.try_clone().map_err(|e| e.to_string())?,
-        unix.try_clone().map_err(|e| e.to_string())?,
-    );
-    // Both directions at once: a request whose reply begins before its body
-    // has finished uploading is normal, and a one-way-at-a-time relay would
-    // deadlock on it.
-    let up = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut tcp_in, &mut unix_out);
-        let _ = unix_out.shutdown(std::net::Shutdown::Write);
-    });
-    let _ = std::io::copy(&mut unix_in, &mut tcp_out);
-    let _ = tcp_out.shutdown(std::net::Shutdown::Write);
-    let _ = up.join();
-    Ok(())
 }

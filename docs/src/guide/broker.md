@@ -28,14 +28,11 @@ now holds. The broker takes them back:
 The **forwarder** runs inside the box on loopback and does one thing: move
 bytes between a TCP connection and the unix socket. It holds no credential
 and can reach nothing else, which is why it is safe for it to be the thing
-an untrusted agent talks to. It is wormhole's own binary, bound read-only
-into the box under `/run` — nothing to install.
-
-For that to work inside an image, the binary must not need the host's C
-library: an Alpine image has no glibc loader. Build wormhole static (see
-[Install](install.md)); a dynamically linked binary is refused at launch
-with the rebuild command, instead of dying inside the box with a bare
-"not found".
+an untrusted agent talks to. It is a small static helper carried inside
+wormhole's own binary and written into the box under `/run` at start —
+nothing to install. Static against musl, so it runs in any image no matter
+which C library the image ships, and no matter how wormhole itself was
+built.
 
 The **broker** runs on the host. It reads `~/.claude/.credentials.json`,
 strips the box's headers, injects the real token, and streams the reply

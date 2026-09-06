@@ -973,7 +973,9 @@ mod tests {
             full("[agent]\nrun = \"claude\"\npreflight = \"p.sh\"\n[access]\nbroker = true\n");
         let command = launch_command(&manifest).expect("command");
         let script = command.last().expect("script");
-        let forwarder = script.find("__forward").expect("forwarder");
+        let forwarder = script
+            .find(crate::broker::FORWARD_IN_BOX)
+            .expect("forwarder");
         let hook = script.find(PREFLIGHT_SEED).expect("hook");
         let agent = script.find("exec ").expect("exec");
         assert!(forwarder < hook, "{script}");
@@ -988,7 +990,7 @@ mod tests {
             .expect("command")
             .pop()
             .expect("script");
-        assert!(script.contains("__forward"), "{script}");
+        assert!(script.contains(crate::broker::FORWARD_IN_BOX), "{script}");
         assert!(script.contains("exec "), "{script}");
     }
 

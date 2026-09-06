@@ -27,24 +27,12 @@ commented manifest, how to make a role, and how to move the agent's version.
 wormhole help
 ```
 
-## If your boxes use images
-
-A brokered box runs wormhole's own binary inside the image, so that binary
-must not depend on the host's C library — an Alpine image has no glibc
-loader. Build it static by targeting musl:
-
-```sh
-rustup target add x86_64-unknown-linux-musl
-cargo install --git https://github.com/naborka/wormhole --locked \
-  --target x86_64-unknown-linux-musl wormhole
-```
-
-Wormhole checks this at launch and refuses with the same rebuild command
-rather than letting the box die with a bare "not found".
-
 ## Requirements
 
-- Rust 1.97 or newer, to build it
+- Rust 1.97 or newer, to build it, plus the musl target for your
+  architecture (`rustup target add x86_64-unknown-linux-musl`): the build
+  compiles the in-box broker forwarder against musl so it runs in any
+  image, and fails with that exact command if the target is missing
 - Linux with unprivileged user namespaces enabled (most desktop distros)
 - `curl`, `tar`, `cp` with reflink support on the filesystem for cheap
   image copies (Btrfs, XFS; works without, just slower)
