@@ -29,6 +29,9 @@ packages = [
   "nodejs",
   "npm",
   "git",
+  # `gh`, reading GitHub through the broker's tunnel. It takes the token
+  # from GITHUB_TOKEN — declared under [env] below, asked for once.
+  "github-cli",
   "openssh-client",
   "ca-certificates",
   # Rust: build-base gives cc and the linker. The compiler itself comes
@@ -128,6 +131,9 @@ egress = [
   "codeload.github.com",
   "raw.githubusercontent.com",
   "objects.githubusercontent.com",
+  # For `gh`. Whatever this box can do there is exactly what the token
+  # below can do — scope the token, and this line is scoped with it.
+  "api.github.com",
 ]
 # Some networks intercept TLS with their own CA — Cloudflare WARP, a
 # corporate proxy — and a fresh store rightly refuses it. This adds the
@@ -159,6 +165,15 @@ fixed = "ultra"
 # Asked for once on the first start that finds it empty, then kept in
 # ~/.config/wormhole/secrets.toml for every box of every role.
 [env.CONTEXT7_API_KEY]
+ask = true
+
+# What `gh` and git authenticate with. Use a fine-grained token scoped
+# to the repos this role works on, read-only unless you mean it: the
+# agent can read any secret the box holds, and the token's scope — plus
+# the egress list above — is the whole blast radius. Empty answer skips:
+# `gh` then reads public GitHub only. Never grant ~/.ssh instead; a key
+# is push-everything and scoped to nothing.
+[env.GITHUB_TOKEN]
 ask = true
 
 # Wormhole carries your terminal's own description into the box home on
