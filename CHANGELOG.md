@@ -9,6 +9,27 @@ true.
 
 ## Unreleased
 
+### Fixed: the broker could not renew the token
+
+The first time a box outlived its token, the agent got `401 OAuth access
+token has expired` and nothing it did helped — `/login` inside the box
+answered `proxy refused the connection`, which is correct (the box holds
+no credential; the login site is not on its allowlist) but no help.
+
+Three things were wrong at once. The renewal request was missing the
+client id and scopes Claude Code sends, so the endpoint refused it as
+`Invalid request format`. The broker then treated that refusal as "keep
+the old token" and forwarded one already expired. And had the request
+been accepted, the reply would have been written over the credential
+file verbatim, in the endpoint's shape rather than Claude Code's, which
+would have logged the host out.
+
+Now the renewal asks the way Claude Code does, the answer is merged into
+the file in the shape Claude Code reads, and a renewal that fails is
+never hidden: inside the margin the current token is used and the
+failure logged; past expiry the box gets a `403` naming the reason and
+the fix, which is `/login` on the host.
+
 ### Fixed: the build box lost its network
 
 Making "no route" the default also took the route away from the build

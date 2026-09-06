@@ -38,6 +38,15 @@ const STRIPPED: [&str; 5] = [
 /// what keeps that path unused.
 pub const REFRESH_MARGIN_SECS: u64 = 300;
 
+/// Where a renewal is asked for. Not the API host: the OAuth endpoint
+/// lives with the platform, and it is the one Claude Code itself uses.
+pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+
+/// Claude Code's public OAuth client id. A refresh without it is refused
+/// as `Invalid request format` — a public client has no secret, and the
+/// id is what names the grant the refresh token belongs to.
+pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
 /// Where the broker's socket lands inside a box that uses it. Under
 /// `/run`, which is a tmpfs the box already has, so nothing about the
 /// image has to accommodate it.
@@ -477,6 +486,18 @@ pub struct Credential {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: Option<u64>,
+    /// What the token was granted for. A renewal asks for the same set;
+    /// asking for none would hand back a token good for nothing.
+    pub scopes: Vec<String>,
+}
+
+/// A token value that may go into a header: non-empty, and nothing that
+/// would end the header early or break out of a JSON string.
+fn header_safe(name: &str, text: &str) -> Result<String, BrokerError> {
+    if text.is_empty() || text.contains(['\r', '\n', '"', '\\']) {
+        return Err(BrokerError::BadShape(name.to_owned()));
+    }
+    Ok(text.to_owned())
 }
 
 /// Reads a credential. The shape checks are not cosmetic: these values are
@@ -490,10 +511,7 @@ pub fn parse_credential(json: &str) -> Result<Credential, BrokerError> {
             .get(name)
             .and_then(Value::as_str)
             .ok_or(BrokerError::Unreadable)?;
-        if text.is_empty() || text.contains(['\r', '\n', '"', '\\']) {
-            return Err(BrokerError::BadShape(name.to_owned()));
-        }
-        Ok(text.to_owned())
+        header_safe(name, text)
     };
     Ok(Credential {
         access_token: field("accessToken")?,
@@ -504,7 +522,100 @@ pub fn parse_credential(json: &str) -> Result<Credential, BrokerError> {
             .get("expiresAt")
             .and_then(Value::as_u64)
             .map(|ms| ms / 1000),
+        scopes: oauth
+            .get("scopes")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
+}
+
+/// The body of a renewal request, the way Claude Code's own login sends
+/// it: the grant, the token, the public client id, and the scopes the
+/// token already has. Sending less than this is answered with `Invalid
+/// request format`, which for a while the broker mistook for a token
+/// still worth forwarding.
+#[must_use]
+pub fn refresh_request(credential: &Credential) -> String {
+    serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": credential.refresh_token,
+        "client_id": CLIENT_ID,
+        "scope": credential.scopes.join(" "),
+    })
+    .to_string()
+}
+
+/// The credential file after a renewal: the file as it was, with the new
+/// tokens and expiry put in place of the old. `now` is unix seconds.
+///
+/// The token endpoint answers in its own shape — `access_token`,
+/// `expires_in` — and Claude Code reads the file in another —
+/// `claudeAiOauth.accessToken`, `expiresAt` in milliseconds. The broker
+/// shares that file with the host's own login, so it must write the
+/// host's shape and leave everything else in the file alone: the
+/// subscription type, the scopes, whatever a newer Claude Code added.
+/// Writing the reply verbatim would log the host out.
+pub fn merge_renewal(existing: &str, reply: &str, now: u64) -> Result<String, BrokerError> {
+    let mut file: Value = serde_json::from_str(existing).map_err(|_| BrokerError::Unreadable)?;
+    let reply: Value = serde_json::from_str(reply)
+        .map_err(|_| BrokerError::RefreshFailed("the renewal reply is not JSON".to_owned()))?;
+    let token = |name: &str| -> Result<String, BrokerError> {
+        let text = reply.get(name).and_then(Value::as_str).ok_or_else(|| {
+            BrokerError::RefreshFailed(format!("the renewal reply carries no {name}"))
+        })?;
+        header_safe(name, text)
+    };
+    let access = token("access_token")?;
+    let refresh = token("refresh_token")?;
+    let expires_in = reply
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            BrokerError::RefreshFailed("the renewal reply names no expires_in".to_owned())
+        })?;
+    let oauth = file
+        .get_mut("claudeAiOauth")
+        .and_then(Value::as_object_mut)
+        .ok_or(BrokerError::Unreadable)?;
+    oauth.insert("accessToken".to_owned(), Value::String(access));
+    oauth.insert("refreshToken".to_owned(), Value::String(refresh));
+    oauth.insert(
+        "expiresAt".to_owned(),
+        Value::from((now + expires_in) * 1000),
+    );
+    if let Some(scope) = reply.get("scope").and_then(Value::as_str) {
+        let scopes: Vec<Value> = scope
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .map(Value::from)
+            .collect();
+        if !scopes.is_empty() {
+            oauth.insert("scopes".to_owned(), Value::Array(scopes));
+        }
+    }
+    serde_json::to_string_pretty(&file).map_err(|_| BrokerError::Unreadable)
+}
+
+/// The whole reply for a request the broker cannot put a credential on:
+/// the token is gone and the renewal did not work. Not a 401 — the agent
+/// would retry one seven times and learn nothing — but a reply that names
+/// the reason and the fix, which is on the host, never in the box: a box
+/// holds no credential and cannot log in.
+#[must_use]
+pub fn refresh_refused(why: &str) -> String {
+    plain_reply(
+        "403 Forbidden",
+        format!(
+            "wormhole: {why}; log in again on the host (`claude`, then `/login`) — \
+             the box holds no credential and `/login` inside it cannot work\n"
+        ),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,6 +1053,7 @@ mod tests {
             access_token: "new".to_owned(),
             refresh_token: "new-ref".to_owned(),
             expires_at: Some(100_000),
+            scopes: vec![],
         };
         assert!(!still_needs_refresh(&renewed, 1_000));
 
@@ -960,6 +1072,7 @@ mod tests {
             access_token: "sk-ant-secret".to_owned(),
             refresh_token: "rt-secret".to_owned(),
             expires_at: Some(1),
+            scopes: vec![],
         };
         let leaked = "upstream said 401 for Bearer sk-ant-secret (refresh rt-secret)";
         let safe = redact(leaked, &credential);
@@ -1108,5 +1221,95 @@ mod tests {
         let err = BrokerError::RefreshFailed("upstream returned 400".to_owned());
         assert!(err.to_string().contains("could not be renewed"), "{err}");
         assert!(err.to_string().contains("upstream returned 400"), "{err}");
+    }
+
+    /// The bug this pins: the renewal was sent bare — grant and token, no
+    /// client id, no scope — and the endpoint answered `Invalid request
+    /// format`. The broker took that as "keep the old token" and forwarded
+    /// one already expired; the box saw a 401 it could do nothing about.
+    #[test]
+    fn a_renewal_asks_the_way_claude_code_does() {
+        let credential = credential(
+            r#"{"claudeAiOauth":{"accessToken":"acc","refreshToken":"ref","expiresAt":1,"scopes":["user:inference","user:profile"]}}"#,
+        )
+        .expect("valid");
+        let body: Value = serde_json::from_str(&refresh_request(&credential)).expect("JSON");
+        assert_eq!(body["grant_type"], "refresh_token");
+        assert_eq!(body["refresh_token"], "ref");
+        assert_eq!(body["client_id"], CLIENT_ID);
+        assert_eq!(body["scope"], "user:inference user:profile");
+        assert!(TOKEN_URL.starts_with("https://platform.claude.com/"));
+    }
+
+    #[test]
+    fn a_credential_without_scopes_still_parses() {
+        let parsed = credential(
+            r#"{"claudeAiOauth":{"accessToken":"acc","refreshToken":"ref","expiresAt":1}}"#,
+        )
+        .expect("valid");
+        assert!(parsed.scopes.is_empty());
+    }
+
+    /// The other half of the same bug: the reply was written over the
+    /// credential file verbatim, in the endpoint's shape, which Claude
+    /// Code cannot read — a renewal that *worked* would have logged the
+    /// host out. The merge keeps the file's shape and everything in it
+    /// the reply does not replace.
+    #[test]
+    fn a_renewal_is_merged_into_the_file_in_claude_codes_shape() {
+        let existing = r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-ref","expiresAt":1000,"scopes":["user:inference"],"subscriptionType":"max"},"other":true}"#;
+        let reply = r#"{"token_type":"Bearer","access_token":"new","refresh_token":"new-ref","expires_in":3600,"scope":"user:inference user:profile"}"#;
+        let merged = merge_renewal(existing, reply, 5_000).expect("merged");
+        let file: Value = serde_json::from_str(&merged).expect("JSON");
+        let oauth = &file["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], "new");
+        assert_eq!(oauth["refreshToken"], "new-ref");
+        assert_eq!(oauth["expiresAt"], 8_600_000);
+        assert_eq!(oauth["subscriptionType"], "max");
+        assert_eq!(
+            oauth["scopes"],
+            serde_json::json!(["user:inference", "user:profile"])
+        );
+        assert_eq!(file["other"], true);
+        let reread = parse_credential(&merged).expect("the broker reads what it wrote");
+        assert_eq!(reread.access_token, "new");
+        assert_eq!(reread.expires_at, Some(8_600));
+    }
+
+    #[test]
+    fn a_reply_without_tokens_never_touches_the_file() {
+        let existing =
+            r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-ref","expiresAt":1000}}"#;
+        for reply in [
+            "not json",
+            r#"{"error":{"type":"invalid_request_error"}}"#,
+            r#"{"access_token":"new","expires_in":10}"#,
+            r#"{"access_token":"new","refresh_token":"r","scope":"x"}"#,
+            r#"{"access_token":"bad\nline","refresh_token":"r","expires_in":1}"#,
+        ] {
+            let err = merge_renewal(existing, reply, 1).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    BrokerError::RefreshFailed(_) | BrokerError::BadShape(_)
+                ),
+                "{reply}: {err}"
+            );
+        }
+    }
+
+    /// A refusal for a request the broker has no credential for names the
+    /// fix on the host, and never suggests the box log in — it cannot.
+    #[test]
+    fn a_refused_request_points_at_the_hosts_login() {
+        let reply = refresh_refused("the credential could not be renewed: 400");
+        assert!(reply.starts_with("HTTP/1.1 403 "), "{reply}");
+        assert!(reply.contains("could not be renewed: 400"), "{reply}");
+        assert!(reply.contains("on the host"), "{reply}");
+        let body = reply.split("\r\n\r\n").nth(1).expect("a body");
+        assert!(
+            reply.contains(&format!("content-length: {}", body.len())),
+            "{reply}"
+        );
     }
 }

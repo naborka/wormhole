@@ -178,7 +178,17 @@ fn relay(stream: UnixStream, credential_file: &Path, egress: &Egress) -> Result<
             .map_err(|e| format!("cannot read the request body: {e}"))?;
     }
 
-    let credential = fresh_credential(credential_file)?;
+    let mut stream = stream;
+    let credential = match fresh_credential(credential_file) {
+        Ok(credential) => credential,
+        // A real reply, not a dropped connection: the agent must see why
+        // and where the fix is (the host), rather than retry a 401 seven
+        // times or offer a `/login` the box cannot complete.
+        Err(why) => {
+            refuse(&mut stream, &broker::refresh_refused(&why))?;
+            return Err(why);
+        }
+    };
     let outgoing = broker::outgoing(&head.headers, &credential.access_token);
     let url = broker::upstream_url(UPSTREAM, head.path().ok_or("no path in the request")?);
 
@@ -319,12 +329,22 @@ fn refuse(out: &mut UnixStream, reply: &str) -> Result<(), String> {
 /// Re-read per request, so a rotation performed by anything else on the
 /// host — another broker, a `/login` — is picked up rather than cached past
 /// its usefulness.
+///
+/// A renewal that fails is not swallowed. Inside the margin the old token
+/// still works, so the request goes out on it and the failure is logged;
+/// past expiry there is nothing to send, and the error goes to the box
+/// as a reply that names it. Falling back to an expired token — which
+/// this once did — produces a 401 the agent can neither explain nor fix.
 fn fresh_credential(file: &Path) -> Result<Credential, String> {
     let credential = read_credential(file)?;
-    if !broker::refresh_before(credential.expires_at, crate::now_unix()).needed() {
-        return Ok(credential);
+    match broker::refresh_before(credential.expires_at, crate::now_unix()) {
+        broker::Refresh::NotYet => Ok(credential),
+        broker::Refresh::Before => renew(file).or_else(|why| {
+            eprintln!("broker: {why}; forwarding on the current token while it lasts");
+            Ok(credential)
+        }),
+        broker::Refresh::Expired => renew(file),
     }
-    renew(file).or(Ok(credential))
 }
 
 fn read_credential(file: &Path) -> Result<Credential, String> {
@@ -347,12 +367,19 @@ fn renew(file: &Path) -> Result<Credential, String> {
         // waiting for the file is cheaper than racing them for it.
         return read_credential(file);
     };
-    let credential = read_credential(file)?;
+    let existing = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let credential = broker::parse_credential(&existing).map_err(|e| e.to_string())?;
     if !broker::still_needs_refresh(&credential, crate::now_unix()) {
         drop(held);
         return Ok(credential); // the other writer already did it
     }
-    let renewed = ask_for_a_new_token(&credential)?;
+    let reply = ask_for_a_new_token(&credential)?;
+    // The reply is in the endpoint's shape; the file is in Claude Code's,
+    // and the host's own login reads it too. Merged, never written raw —
+    // raw, a successful renewal would have logged the host out.
+    let renewed = broker::merge_renewal(&existing, &reply, crate::now_unix())
+        .map_err(|e| broker::redact(&e.to_string(), &credential))?;
     // Atomic, and mode 600 before anything can read it: a killed process
     // must never leave a torn credential, and a token must never sit
     // world-readable even briefly.
@@ -362,22 +389,20 @@ fn renew(file: &Path) -> Result<Credential, String> {
 }
 
 /// The refresh request itself. The token goes to `curl` on stdin, never in
-/// argv — argv is world-readable on this host.
+/// argv — argv is world-readable on this host. The body is the one Claude
+/// Code's own login sends (`broker::refresh_request`); anything less is
+/// refused as `Invalid request format`.
 fn ask_for_a_new_token(credential: &Credential) -> Result<String, String> {
-    let body = format!(
-        "{{\"grant_type\":\"refresh_token\",\"refresh_token\":\"{}\"}}",
-        credential.refresh_token
-    );
     let config = format!(
         concat!(
-            "url = \"{upstream}/v1/oauth/token\"\n",
+            "url = \"{url}\"\n",
             "header = \"Content-Type: application/json\"\n",
             "request = \"POST\"\n",
             "data-binary = \"{body}\"\n",
-            "fail\nsilent\nshow-error\nmax-time = 20\n",
+            "fail-with-body\nsilent\nshow-error\nmax-time = 20\n",
         ),
-        upstream = UPSTREAM,
-        body = body.replace('"', "\\\""),
+        url = broker::TOKEN_URL,
+        body = broker::refresh_request(credential).replace('"', "\\\""),
     );
     let mut child = Command::new("curl")
         .args(["--config", "-"])
@@ -398,9 +423,16 @@ fn ask_for_a_new_token(credential: &Credential) -> Result<String, String> {
     if !output.status.success() {
         // Specific, not a blanket 401: the agent retries a 401 about seven
         // times and would burn every one without learning what was wrong.
+        // The reply body is the endpoint's own reason, when it gave one.
+        let why = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let body = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let why = if body.is_empty() {
+            why
+        } else {
+            format!("{why}: {body}")
+        };
         return Err(broker::redact(
-            &BrokerError::RefreshFailed(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-                .to_string(),
+            &BrokerError::RefreshFailed(why).to_string(),
             credential,
         ));
     }

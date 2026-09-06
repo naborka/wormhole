@@ -45,7 +45,18 @@ cannot choose its own identity upstream.
 
 It renews the token five minutes before expiry rather than after a
 rejection. Once reply headers are on the wire a retry is impossible, and
-the agent would burn its seven retries on a 401 silently.
+the agent would burn its seven retries on a 401 silently. The renewal is
+the same request Claude Code's own login makes, and the answer is merged
+into `~/.claude/.credentials.json` in the shape Claude Code reads — the
+host's login and the broker share that file, and both keep working.
+
+A renewal that fails is never hidden behind an expired token. Inside the
+five-minute margin the request still goes out on the current token and
+the failure is logged; past expiry the box gets a `403` that names the
+reason and the fix. The fix is on the host — `claude`, then `/login` —
+because the box holds no credential and its own `/login` has nowhere to
+go: the login site is not on the egress allowlist, and would be no use
+if it were.
 
 ## The `CONNECT` leg
 
