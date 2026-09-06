@@ -9,6 +9,15 @@ true.
 
 ## Unreleased
 
+### Fixed: the build box lost its network
+
+Making "no route" the default also took the route away from the build
+box, so every `apk add` and `rustup` fetch failed with `temporary error`
+and the build stopped at exit 14. The build has no broker to ride — it
+fetches for itself, on the host's network, resolving through `[access]
+dns` — and now says so explicitly instead of inheriting a default that
+was written for the running box.
+
 ### The safe way is now the default way
 
 A manifest that says nothing about access gets the design's whole
