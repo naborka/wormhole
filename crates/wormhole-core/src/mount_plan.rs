@@ -66,8 +66,8 @@ impl Grant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountOp {
-    /// An empty tmpfs as the root — the interim rootfs for bare
-    /// `wormhole run`, filled by the host-`/usr` binds. Step 4 replaces
+    /// An empty tmpfs as the root — the interim rootfs for a bare
+    /// `__run`, filled by the host-`/usr` binds. Step 4 replaces
     /// this with real overlay layers.
     TmpfsRoot,
     Tmpfs {
@@ -358,7 +358,7 @@ pub enum Root<'a> {
     /// Because nothing is copied, the image is shared by every box using
     /// it, and read-only is what makes that safe rather than merely fast.
     ImageReadOnly(&'a Path),
-    /// The interim rootfs for bare `wormhole run`: the host's `/usr`
+    /// The interim rootfs for a bare `__run`: the host's `/usr`
     /// read-only over a tmpfs root. Goes away when nothing needs it.
     HostUsr,
 }

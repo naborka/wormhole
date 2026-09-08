@@ -1,9 +1,54 @@
 #!/bin/sh
-# Alphaca Codex preflight. Runs in the box before the agent starts;
-# wormhole has already written ROLE.md into the canonical ~/AGENTS.md and
-# symlinked ~/.codex/AGENTS.md at it, so everything here is best-effort
-# extras — a failure warns and moves on, it never blocks launch.
+# Alphaca Codex preflight. Runs in the box before the agent. Codex is the
+# one thing that must be here at the end; everything else warns and moves on.
 set -eu
+
+bin="$HOME/.local/bin"
+mkdir -p "$bin"
+
+# The tag behind GitHub's latest-release redirect, without the API's
+# rate limit. Empty when it cannot be read.
+latest_tag() {
+    curl -fsSI "https://github.com/$1/releases/latest" 2>/dev/null \
+        | sed -n 's|^[Ll]ocation: .*/tag/\([^[:space:]]*\).*|\1|p' | tr -d '\r'
+}
+
+# Codex, latest release, in the kept home. Release tags read rust-vX.Y.Z
+# and the tarball holds one static musl binary named after its target.
+tag=$(latest_tag openai/codex)
+have=$(codex --version 2>/dev/null | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p')
+if [ -z "$tag" ] && [ -z "$have" ]; then
+    echo "[preflight] ERROR: cannot read codex's latest release and none is installed" >&2
+    exit 1
+elif [ -z "$tag" ]; then
+    echo "[preflight] WARN: cannot read codex's latest release; keeping $have" >&2
+elif [ "${tag#rust-v}" != "$have" ]; then
+    target="$(uname -m)-unknown-linux-musl"
+    url="https://github.com/openai/codex/releases/download/$tag/codex-$target.tar.gz"
+    if curl -fsSL "$url" | tar -xz -C "$bin" "codex-$target" \
+        && mv "$bin/codex-$target" "$bin/codex"; then
+        echo "[preflight] codex $tag"
+    elif [ -n "$have" ]; then
+        echo "[preflight] WARN: codex $tag download failed; keeping $have" >&2
+    else
+        echo "[preflight] ERROR: codex $tag download failed; nothing to run" >&2
+        exit 1
+    fi
+fi
+
+# rtk, latest release, same place.
+tag=$(latest_tag rtk-ai/rtk)
+have=$(rtk --version 2>/dev/null | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p')
+if [ -z "$tag" ]; then
+    echo "[preflight] WARN: cannot read rtk's latest release; keeping ${have:-none}" >&2
+elif [ "${tag#v}" != "$have" ]; then
+    url="https://github.com/rtk-ai/rtk/releases/download/$tag/rtk-$(uname -m)-unknown-linux-musl.tar.gz"
+    if curl -fsSL "$url" | tar -xz -C "$bin" rtk; then
+        echo "[preflight] rtk $tag"
+    else
+        echo "[preflight] WARN: rtk $tag download failed" >&2
+    fi
+fi
 
 # Skills -> codex's skills directory, via the `skills` installer. Each on
 # its own so one bad source does not take the rest down.

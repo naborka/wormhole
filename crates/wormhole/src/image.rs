@@ -80,29 +80,6 @@ pub fn copy(from: &Path, target: &Path) -> Result<(), String> {
     )
 }
 
-/// Copies a tree the cheap way or not at all. `copy` falls back to a full
-/// physical copy where reflink cannot apply; this refuses instead.
-///
-/// A workspace snapshot is only worth taking because it is nearly free —
-/// 0.41s for 1.2 GB on a filesystem that can reflink, and a multi-second
-/// physical copy of your whole tree on every box start where it cannot.
-/// Failing loudly is the honest answer to the second case; quietly paying
-/// it is not, and quietly skipping the snapshot is worse, because then you
-/// believe you have an undo point you do not have.
-pub fn reflink(from: &Path, target: &Path) -> Result<(), String> {
-    remove(target)?;
-    if let Some(parent) = target.parent() {
-        create(parent)?;
-    }
-    run(
-        Command::new("cp")
-            .args(["--archive", "--reflink=always"])
-            .arg(from)
-            .arg(target),
-        "snapshot the workspace (this filesystem may not support reflink)",
-    )
-}
-
 /// Renames a finished directory into place. Until this succeeds nothing
 /// can mistake a half-built image for a usable one.
 pub fn finish(partial: &Path, final_dir: &Path) -> Result<PathBuf, String> {

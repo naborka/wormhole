@@ -9,6 +9,53 @@ true.
 
 ## Unreleased
 
+### Changed: the codex role installs codex and rtk the way alphaca does
+
+The `alphaca-codex` role no longer bakes codex and rtk into its image —
+its codex artifact carried a placeholder digest, so the image could not
+be built at all. Its preflight hook now keeps the latest release of both
+in the box home's `~/.local/bin`, exactly as the alphaca role does for
+Claude Code.
+
+### Changed: one box table, and `ps <id>` shows one box
+
+`wormhole ps`, `ps --all` and the panel draw one table — id, name,
+alias, state, role, agent, last used, workspace — where `ps` used to
+have columns of its own. A running box whose home record cannot be read
+is still listed, from the registry that says it runs.
+
+`wormhole env <id>` is now `wormhole ps <id|name>`: that box's row and,
+while it runs, the environment it runs under. One command fewer to
+learn. `wormhole tui` is gone too; bare `wormhole` was always the panel.
+
+### Changed: a start prints only what differs from the baseline
+
+The last line of a start used to read `boundary: namespaces (host
+kernel SHARED) · egress: … · workspace: rw · grants: 0` on every box.
+There is one boundary stage, so it no longer names one; the line now
+says what the box got beyond the baseline — `dns: 1.1.1.1 · root:
+readonly · grants: 2` — and is absent when it got nothing. The
+`manifest:` and `root:` lines went the same way: printed only for a
+role and for a read-only root.
+
+### Removed: `[runtime] snapshot`, `[env] required` and `secret`, the MicroVM stage
+
+`snapshot = true` took a reflink copy of the workspace and printed what
+changed on exit. Off by default and used by no manifest; version control
+is the undo point. A `snapshots/` directory left under
+`~/.local/share/wormhole` by an earlier version can be deleted.
+
+`required = true` and `secret = true` on an `[env]` variable were used by
+no manifest either. `ask = true` already implied a secret, and still
+does; a manifest still naming either key is refused by name.
+
+`wormhole doctor` no longer probes for `/dev/kvm`: no MicroVM boundary
+exists to be ready for. Eight probes, not nine.
+
+`wormhole run` — the boundary on its own, no manifest — is internal now.
+Its eight flags existed for wormhole's own re-exec into the box, and
+`wormhole box -- sh` is the way to poke at a boundary.
+
 ### Changed: the box's PATH starts with its own `~/.local/bin`
 
 A tool the agent installs into its kept home is found before the

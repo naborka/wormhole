@@ -1,11 +1,11 @@
-//! Pure decisions behind `wormhole run`: argument parsing, the uid/gid
+//! Pure decisions behind a boxed launch: argument parsing, the uid/gid
 //! map a box writes, and how a child's wait status becomes our exit code.
 //! The syscalls live in the `wormhole` binary crate.
 
 use std::fmt;
 use std::net::IpAddr;
 
-/// Command line after the `run` subcommand:
+/// Command line after `__run`:
 /// `[--grant <path>]... [--dns <address>] [--image <dir>] [--share <file> <home path>]... -- <command> [args...]`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RunArgs {
@@ -100,10 +100,7 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseError::MissingSeparator => write!(
-                f,
-                "expected `--` before the command: wormhole run [--grant <path>]... -- <command>"
-            ),
+            ParseError::MissingSeparator => write!(f, "expected `--` before the command"),
             ParseError::EmptyCommand => write!(f, "no command given after `--`"),
             ParseError::UnknownFlag(flag) => write!(f, "unknown flag {flag}"),
             ParseError::GrantWithoutPath => write!(f, "--grant needs a path"),
@@ -161,7 +158,7 @@ impl fmt::Display for ParseError {
                     "usage: wormhole box [--role <name|dir|ref>] [--new | --id <id|name>] [--as <name>] [-- <command> [args...]]"
                 )
             }
-            ParseError::PsUsage => write!(f, "usage: wormhole ps [--all]"),
+            ParseError::PsUsage => write!(f, "usage: wormhole ps [--all | <id|name>]"),
             ParseError::RemoveUsage => write!(f, "usage: wormhole remove <id|name> [<id|name>...]"),
             ParseError::ResetUsage => write!(f, "usage: wormhole reset <id|name>"),
             ParseError::RenameUsage => write!(f, "usage: wormhole rename <id|name> <new name>"),
@@ -453,18 +450,22 @@ pub fn parse_attach_args(args: &[String]) -> Result<AttachArgs, ParseError> {
     })
 }
 
-/// Command line after the `ps` subcommand: `[--all]`.
+/// Command line after the `ps` subcommand: `[--all | <id|name>]`.
 #[derive(Debug, PartialEq, Eq)]
-pub struct PsArgs {
+pub enum PsArgs {
+    Running,
     /// Every box this host keeps, not only the running ones. An idle box
     /// is the one you resume, so it has to be listable.
-    pub all: bool,
+    All,
+    /// One box, and the environment it runs under.
+    One(String),
 }
 
 pub fn parse_ps_args(args: &[String]) -> Result<PsArgs, ParseError> {
     match args {
-        [] => Ok(PsArgs { all: false }),
-        [flag] if flag == "--all" || flag == "-a" => Ok(PsArgs { all: true }),
+        [] => Ok(PsArgs::Running),
+        [flag] if flag == "--all" || flag == "-a" => Ok(PsArgs::All),
+        [wanted] if !is_flag(wanted) => Ok(PsArgs::One(wanted.clone())),
         _ => Err(ParseError::PsUsage),
     }
 }
@@ -573,7 +574,7 @@ pub enum WaitOutcome {
     Signaled(i32),
 }
 
-/// The exit code `wormhole run` itself reports: the child's own code, or
+/// The exit code a launch itself reports: the child's own code, or
 /// the shell convention 128+signal when the child was killed.
 pub fn exit_code(outcome: WaitOutcome) -> i32 {
     match outcome {
@@ -1035,17 +1036,17 @@ mod tests {
     }
 
     #[test]
-    fn ps_lists_the_running_boxes_and_with_all_every_kept_one() {
-        assert_eq!(parse_ps_args(&[]), Ok(PsArgs { all: false }));
+    fn ps_lists_the_running_boxes_every_kept_one_or_shows_one() {
+        assert_eq!(parse_ps_args(&[]), Ok(PsArgs::Running));
+        assert_eq!(parse_ps_args(&strings(&["--all"])), Ok(PsArgs::All));
+        assert_eq!(parse_ps_args(&strings(&["-a"])), Ok(PsArgs::All));
         assert_eq!(
-            parse_ps_args(&strings(&["--all"])),
-            Ok(PsArgs { all: true })
+            parse_ps_args(&strings(&["api"])),
+            Ok(PsArgs::One("api".to_owned()))
         );
-        assert_eq!(parse_ps_args(&strings(&["-a"])), Ok(PsArgs { all: true }));
-        assert_eq!(
-            parse_ps_args(&strings(&["--every"])),
-            Err(ParseError::PsUsage)
-        );
+        for wrong in [&["--every"][..], &["api", "web"], &["--all", "api"]] {
+            assert_eq!(parse_ps_args(&strings(wrong)), Err(ParseError::PsUsage));
+        }
     }
 
     #[test]

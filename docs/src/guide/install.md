@@ -16,7 +16,7 @@ Then check the host before anything else:
 wormhole doctor
 ```
 
-It runs nine probes — user namespaces, mount propagation, the pieces a box
+It runs eight probes — user namespaces, mount propagation, the pieces a box
 needs — and says plainly what works, what does not, and what that rules
 out. Exit code 0 means boxes will run.
 

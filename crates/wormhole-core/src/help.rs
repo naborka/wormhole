@@ -65,14 +65,9 @@ const BOXES: &[Line] = &[
         blurb: "its login this once: none, copy or share",
     },
     Line {
-        name: "env",
-        args: "ID|NAME",
-        blurb: "what the box runs under; secrets masked",
-    },
-    Line {
         name: "ps",
-        args: "[--all]",
-        blurb: "what is running; --all adds every idle box too",
+        args: "[--all | ID|NAME]",
+        blurb: "what runs; --all every box; one box, with its env",
     },
     Line {
         name: "attach",
@@ -144,16 +139,6 @@ const REST: &[Line] = &[
         name: "secret",
         args: "list|set NAME|remove NAME",
         blurb: "values `ask` keeps, shared by every box",
-    },
-    Line {
-        name: "run",
-        args: "[--grant PATH]... -- CMD...",
-        blurb: "the boundary on its own, with no manifest",
-    },
-    Line {
-        name: "tui",
-        args: "",
-        blurb: "the panel; same as bare `wormhole`",
     },
     Line {
         name: "help",
@@ -246,13 +231,11 @@ MANIFEST
   [env.SOME_VAR]                    # TERM and friends are built in
   fixed = "1"                       # the box cannot override this
   # default = ""                    # host's value wins when it has one
-  # ask = true                      # asked once, kept for every box
-  # required = true                 # secret = true masks it when printed
+  # ask = true                      # asked once, kept for every box, masked
 
   [runtime]
   rootfs = "copy"                   # or "readonly": no copy, faster, and
                                     # no installing at run time
-  snapshot = true                   # say what the agent changed, on exit
 
 MAKE A ROLE
   The same manifest, kept outside the tree, so one recipe serves any folder.

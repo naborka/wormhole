@@ -62,6 +62,7 @@ wormhole box --new --as <name>  # another box, under a name you pick
 wormhole box --id <id|name>     # that exact box, whenever
 wormhole ps               # running boxes
 wormhole ps --all         # every box this host keeps, running or idle
+wormhole ps <id|name>     # one box, and the environment it runs under
 wormhole attach <id|name> # second terminal into a running box (its agent)
 wormhole attach <id> -- sh
 wormhole box --credentials copy  # this start: your login, copied in once

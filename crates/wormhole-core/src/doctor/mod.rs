@@ -17,12 +17,11 @@ pub enum Probe {
     Overlayfs,
     CgroupDelegation,
     Reflink,
-    MicroVmDevices,
     UidMapOverlap,
 }
 
 impl Probe {
-    pub const ALL: [Probe; 9] = [
+    pub const ALL: [Probe; 8] = [
         Probe::UserNamespaces,
         Probe::MaxUserNamespaces,
         Probe::SubIdRanges,
@@ -30,7 +29,6 @@ impl Probe {
         Probe::Overlayfs,
         Probe::CgroupDelegation,
         Probe::Reflink,
-        Probe::MicroVmDevices,
         Probe::UidMapOverlap,
     ];
 
@@ -43,14 +41,13 @@ impl Probe {
             Probe::Overlayfs => "unprivileged overlayfs",
             Probe::CgroupDelegation => "cgroup v2 delegation",
             Probe::Reflink => "workspace reflink support",
-            Probe::MicroVmDevices => "/dev/kvm and /dev/vhost-vsock",
             Probe::UidMapOverlap => "uid-map overlap",
         }
     }
 }
 
 /// `Fail` blocks wormhole on this host; `Info` records a fact that does
-/// not (stage-2 readiness, diagnostics). The constructors in [`outcome`]
+/// not (diagnostics). The constructors in [`outcome`]
 /// are the only place that chooses between them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -171,14 +168,14 @@ mod tests {
     #[test]
     fn informational_outcome_stays_ok_but_is_recorded() {
         let verdict = evaluate(with_outcome(
-            Probe::MicroVmDevices,
+            Probe::Reflink,
             Outcome::Info("absent".to_owned()),
         ));
         assert_eq!(verdict.status, Status::Ok);
         assert!(
             verdict
                 .to_string()
-                .contains("info /dev/kvm and /dev/vhost-vsock: absent\n")
+                .contains("info workspace reflink support: absent\n")
         );
     }
 

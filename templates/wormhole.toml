@@ -41,6 +41,6 @@ host_ca = true
 
 # A variable reaches the box only when declared here or by --env.
 # `default`: host's value wins when it has one. `fixed`: never overridden.
-# `ask = true`: asked once, kept. `required`, `secret`: refuse, mask.
+# `ask = true`: asked once, kept for every box, and masked.
 [env.SHELL]
 fixed = "/bin/bash"

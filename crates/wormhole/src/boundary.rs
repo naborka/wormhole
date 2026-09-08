@@ -36,14 +36,14 @@ use wormhole_core::limits_cgroup;
 use wormhole_core::mount_plan::{self, BOX_HOSTNAME, MountOp, Root, User, home_in_box};
 use wormhole_core::run::{self, RootMode, RunArgs, WaitOutcome, exit_code, identity_map, root_map};
 
-/// Host side of `wormhole run`. The scratch dir (box root mountpoint)
+/// Host side of a launch. The scratch dir (box root mountpoint)
 /// lives here so it is removed from the host after the box exits.
 /// `env` replaces the box's environment entirely when given, so only what
 /// the manifest declares reaches it. `None` inherits the host's, which is
-/// what bare `wormhole run` does.
+/// what a bare `__run` does.
 /// `home` is the host directory mounted as the box's `$HOME`. `wormhole
 /// box` passes its workspace's kept home; `None` means a throwaway one,
-/// which is what bare `wormhole run` gets.
+/// which is what a bare `__run` gets.
 pub fn run(
     args: &RunArgs,
     env: Option<&BTreeMap<String, String>>,

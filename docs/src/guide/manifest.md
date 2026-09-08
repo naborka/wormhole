@@ -184,7 +184,6 @@ lookup and blame the network.
 ```toml
 [runtime]
 rootfs = "copy"      # or "readonly"
-snapshot = false
 ```
 
 ### `rootfs`
@@ -197,26 +196,6 @@ physical copy of the image on every start.
 seeded from the image over `/etc` and `/var`. There is no copy at all, so
 start time stops scaling with image size. The trade is real: the box can no
 longer `apk add` anything at run time.
-
-### `snapshot`
-
-Takes a reflink copy of the workspace before the box starts and prints
-what changed when it exits:
-
-```
-workspace: 3 files changed
-  added   src/receipt.rs
-  changed Cargo.toml
-  removed notes.txt
-```
-
-An untouched workspace says `workspace: unchanged`. A long list is capped
-at twenty and the rest counted — `… and 5 more` — never truncated in
-silence.
-
-Off by default, and deliberately: where the filesystem cannot reflink, an
-honest snapshot is a full physical copy of your tree on every single box
-start. Wormhole refuses to pay that silently.
 
 ## `[limits]` — what it may use
 
@@ -250,19 +229,18 @@ fixed = "/bin/bash"       # the host's value is ignored
 things that describe the box — your host `SHELL` is a path that does not
 exist in there.
 
-Four more per-variable keys: `required = true` refuses a start while the
-variable has no value; `secret = true` masks the value on every screen;
-and `ask = true` fills it by asking you — once, ever. The first start
-that finds an asked variable empty prompts on the terminal (input
-masked) and keeps the answer in `~/.config/wormhole/secrets.toml`
-(0600), so every later box that declares the same name — any role, any
-workspace — already has it. One `CONTEXT7_API_KEY` typed one time serves
-all ten of your roles. An asked value is always masked, and it never
-comes from the manifest, so a role you fetch cannot carry one. Off a
-terminal nothing can ask: the start says which name is missing and
-points at `wormhole secret set NAME`; whether the gap is fatal stays
-`required`'s decision. `wormhole secret list | set NAME | remove NAME`
-manages the store; values never appear in argv or on any screen.
+One more per-variable key: `ask = true` fills it by asking you — once,
+ever. The first start that finds an asked variable empty prompts on the
+terminal (input masked) and keeps the answer in
+`~/.config/wormhole/secrets.toml` (0600), so every later box that
+declares the same name — any role, any workspace — already has it. One
+`CONTEXT7_API_KEY` typed one time serves all ten of your roles. An asked
+value is a secret: it is masked on every screen wormhole prints, and it
+never comes from the manifest, so a role you fetch cannot carry one. Off
+a terminal nothing can ask: the start says which name is missing, points
+at `wormhole secret set NAME`, and goes on without it. `wormhole secret
+list | set NAME | remove NAME` manages the store; values never appear in
+argv or on any screen.
 
 ```toml
 [env.CONTEXT7_API_KEY]

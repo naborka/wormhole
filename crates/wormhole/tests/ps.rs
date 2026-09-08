@@ -201,3 +201,52 @@ fn a_dead_boxs_entry_is_reaped() {
         "stale entry survived"
     );
 }
+
+/// `ps <id|name>` is the one box: its row, and the environment it runs
+/// under with secrets masked.
+#[test]
+fn one_running_box_shows_its_row_and_its_environment() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let pid = std::process::id();
+    write_entry(temp.path(), pid);
+    let mut baked = wormhole_core::boxenv::BakedEnv::new();
+    baked.insert(
+        "CONTEXT7_API_KEY".to_owned(),
+        wormhole_core::boxenv::Var {
+            value: "hunter2".to_owned(),
+            source: wormhole_core::boxenv::Source::Store,
+            secret: true,
+        },
+    );
+    std::fs::write(
+        wormhole_core::paths::baked_env(&wormhole_core::paths::box_dir(temp.path(), pid)),
+        wormhole_core::boxenv::to_toml(&baked).expect("toml"),
+    )
+    .expect("env written");
+
+    for wanted in ["0123456789ab", "api"] {
+        let output = run_ps(temp.path(), &["ps", wanted]);
+        assert!(output.status.success(), "{output:?}");
+        let shown = String::from_utf8_lossy(&output.stdout);
+        for cell in [
+            "architect",
+            &format!("running {pid}"),
+            "CONTEXT7_API_KEY",
+            "store",
+        ] {
+            assert!(shown.contains(cell), "{wanted}: {shown}");
+        }
+        assert!(!shown.contains("hunter2"), "{shown}");
+    }
+}
+
+#[test]
+fn a_box_nobody_has_is_refused_by_name() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let output = run_ps(temp.path(), &["ps", "ghost"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ghost"),
+        "{output:?}"
+    );
+}

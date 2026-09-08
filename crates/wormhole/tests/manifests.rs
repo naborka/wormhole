@@ -32,3 +32,17 @@ fn every_manifest_this_repo_ships_parses() {
         manifest::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
 }
+
+/// A digest of zeros is a note to fill in later, and a build that reaches
+/// it fails on the download it names. It has no place in a shipped recipe.
+#[test]
+fn no_shipped_manifest_carries_a_placeholder_digest() {
+    for path in shipped_manifests() {
+        let text = std::fs::read_to_string(&path).expect("manifest");
+        assert!(
+            !text.contains(&"0".repeat(64)),
+            "{} has a placeholder digest",
+            path.display()
+        );
+    }
+}

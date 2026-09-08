@@ -16,7 +16,7 @@ fn wormhole(args: &[&str]) -> Output {
         .expect("wormhole binary should spawn")
 }
 
-/// Spawns `wormhole run` with piped stdout and waits for the box to say
+/// Spawns `wormhole __run` with piped stdout and waits for the box to say
 /// `ready` — its command must start with `echo ready`.
 fn spawn_until_ready(args: &[&str]) -> std::process::Child {
     use std::io::{BufRead, BufReader};
@@ -46,20 +46,23 @@ fn run_stdout(args: &[&str]) -> String {
 
 #[test]
 fn true_exits_zero() {
-    assert_eq!(wormhole(&["run", "--", "/bin/true"]).status.code(), Some(0));
+    assert_eq!(
+        wormhole(&["__run", "--", "/bin/true"]).status.code(),
+        Some(0)
+    );
 }
 
 #[test]
 fn false_exits_one() {
     assert_eq!(
-        wormhole(&["run", "--", "/bin/false"]).status.code(),
+        wormhole(&["__run", "--", "/bin/false"]).status.code(),
         Some(1)
     );
 }
 
 #[test]
 fn child_exit_code_propagates() {
-    let output = wormhole(&["run", "--", "sh", "-c", "exit 7"]);
+    let output = wormhole(&["__run", "--", "sh", "-c", "exit 7"]);
     assert_eq!(output.status.code(), Some(7));
 }
 
@@ -69,7 +72,7 @@ fn child_exit_code_propagates() {
 /// the pure test `signal_death_becomes_128_plus_signal`.
 #[test]
 fn pid_one_survives_a_sigkill_from_inside_the_box() {
-    let output = wormhole(&["run", "--", "sh", "-c", "kill -9 $$; echo alive"]);
+    let output = wormhole(&["__run", "--", "sh", "-c", "kill -9 $$; echo alive"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "alive");
 }
@@ -79,7 +82,7 @@ fn pid_one_survives_a_sigkill_from_inside_the_box() {
 /// take the prompt back while the box still held the terminal.
 #[test]
 fn an_interrupt_does_not_kill_wormhole_while_the_box_runs() {
-    let mut child = spawn_until_ready(&["run", "--", "sh", "-c", "echo ready; sleep 1; exit 7"]);
+    let mut child = spawn_until_ready(&["__run", "--", "sh", "-c", "echo ready; sleep 1; exit 7"]);
 
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(child.id()).expect("pid fits")),
@@ -93,26 +96,26 @@ fn an_interrupt_does_not_kill_wormhole_while_the_box_runs() {
 
 #[test]
 fn uid_inside_the_box_is_host_identical() {
-    let inside = run_stdout(&["run", "--", "id", "-u"]);
+    let inside = run_stdout(&["__run", "--", "id", "-u"]);
     let host = nix::unistd::getuid().as_raw().to_string();
     assert_eq!(inside, host);
 }
 
 #[test]
 fn missing_command_exits_127() {
-    let output = wormhole(&["run", "--", "/no/such/binary"]);
+    let output = wormhole(&["__run", "--", "/no/such/binary"]);
     assert_eq!(output.status.code(), Some(127));
 }
 
 #[test]
 fn run_without_separator_is_a_usage_error() {
-    let output = wormhole(&["run", "/bin/true"]);
+    let output = wormhole(&["__run", "/bin/true"]);
     assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
 fn root_shows_exactly_the_plan() {
-    let listing = run_stdout(&["run", "--", "ls", "-a", "/"]);
+    let listing = run_stdout(&["__run", "--", "ls", "-a", "/"]);
     let seen: BTreeSet<&str> = listing.split_whitespace().collect();
     let expected: BTreeSet<&str> = [
         ".", "..", "bin", "dev", "etc", "home", "lib", "lib64", "proc", "run", "sbin", "tmp", "usr",
@@ -123,7 +126,7 @@ fn root_shows_exactly_the_plan() {
 
 #[test]
 fn etc_holds_only_the_synthetic_files() {
-    let listing = run_stdout(&["run", "--", "ls", "-a", "/etc"]);
+    let listing = run_stdout(&["__run", "--", "ls", "-a", "/etc"]);
     let seen: BTreeSet<&str> = listing.split_whitespace().collect();
     let expected: BTreeSet<&str> = [".", "..", "group", "hosts", "passwd", "resolv.conf"].into();
     assert_eq!(seen, expected);
@@ -134,13 +137,13 @@ fn etc_holds_only_the_synthetic_files() {
 #[test]
 fn without_dns_the_box_reads_the_hosts_resolver() {
     let host = std::fs::read_to_string("/etc/resolv.conf").expect("the host has a resolver");
-    let seen = run_stdout(&["run", "--", "cat", "/etc/resolv.conf"]);
+    let seen = run_stdout(&["__run", "--", "cat", "/etc/resolv.conf"]);
     assert_eq!(seen, host.trim());
 }
 
 #[test]
 fn a_named_resolver_is_the_only_one_the_box_sees() {
-    let seen = run_stdout(&["run", "--dns", "1.1.1.1", "--", "cat", "/etc/resolv.conf"]);
+    let seen = run_stdout(&["__run", "--dns", "1.1.1.1", "--", "cat", "/etc/resolv.conf"]);
     assert_eq!(seen, "nameserver 1.1.1.1");
 }
 
@@ -149,7 +152,7 @@ fn workspace_is_visible_at_the_host_identical_path() {
     let cwd = std::env::current_dir().expect("test cwd");
     let manifest = cwd.join("Cargo.toml");
     let inside = run_stdout(&[
-        "run",
+        "__run",
         "--",
         "sh",
         "-c",
@@ -160,20 +163,20 @@ fn workspace_is_visible_at_the_host_identical_path() {
 
 #[test]
 fn usr_is_read_only() {
-    let output = wormhole(&["run", "--", "touch", "/usr/wormhole-probe"]);
+    let output = wormhole(&["__run", "--", "touch", "/usr/wormhole-probe"]);
     assert!(!output.status.success());
     assert!(!std::path::Path::new("/usr/wormhole-probe").exists());
 }
 
 #[test]
 fn host_etc_is_not_visible() {
-    let output = wormhole(&["run", "--", "test", "-e", "/etc/fstab"]);
+    let output = wormhole(&["__run", "--", "test", "-e", "/etc/fstab"]);
     assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
 fn proc_shows_only_this_box() {
-    let listing = run_stdout(&["run", "--", "ls", "/proc"]);
+    let listing = run_stdout(&["__run", "--", "ls", "/proc"]);
     let pids: BTreeSet<&str> = listing
         .split_whitespace()
         .filter(|entry| entry.chars().all(|c| c.is_ascii_digit()))
@@ -183,14 +186,14 @@ fn proc_shows_only_this_box() {
 
 #[test]
 fn the_command_is_pid_one() {
-    assert_eq!(run_stdout(&["run", "--", "sh", "-c", "echo $$"]), "1");
+    assert_eq!(run_stdout(&["__run", "--", "sh", "-c", "echo $$"]), "1");
 }
 
 #[test]
 fn host_processes_are_invisible() {
     let host_pid = std::process::id().to_string();
     let output = wormhole(&[
-        "run",
+        "__run",
         "--",
         "sh",
         "-c",
@@ -202,7 +205,7 @@ fn host_processes_are_invisible() {
 #[test]
 fn the_fixed_device_nodes_are_usable() {
     let output = wormhole(&[
-        "run",
+        "__run",
         "--",
         "sh",
         "-c",
@@ -217,7 +220,7 @@ fn the_fixed_device_nodes_are_usable() {
 
 #[test]
 fn dev_holds_only_the_planned_nodes() {
-    let listing = run_stdout(&["run", "--", "ls", "-a", "/dev"]);
+    let listing = run_stdout(&["__run", "--", "ls", "-a", "/dev"]);
     let seen: BTreeSet<&str> = listing.split_whitespace().collect();
     let expected: BTreeSet<&str> = [
         ".", "..", "full", "null", "pts", "ptmx", "random", "shm", "tty", "urandom", "zero",
@@ -231,7 +234,7 @@ fn dev_holds_only_the_planned_nodes() {
 #[test]
 fn a_pseudo_terminal_can_be_opened_through_ptmx() {
     let listing = run_stdout(&[
-        "run",
+        "__run",
         "--",
         "sh",
         "-c",
@@ -248,7 +251,13 @@ fn a_file_written_in_the_box_lands_on_the_host_with_our_uid() {
     let marker = workspace.join("wormhole-write-probe");
     let _ = std::fs::remove_file(&marker);
 
-    let output = wormhole(&["run", "--", "sh", "-c", "echo boxed > wormhole-write-probe"]);
+    let output = wormhole(&[
+        "__run",
+        "--",
+        "sh",
+        "-c",
+        "echo boxed > wormhole-write-probe",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -269,7 +278,7 @@ fn home_is_set_to_the_box_home() {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .expect("passwd lookup")
         .expect("passwd entry");
-    let inside = run_stdout(&["run", "--", "sh", "-c", "echo $HOME"]);
+    let inside = run_stdout(&["__run", "--", "sh", "-c", "echo $HOME"]);
     assert_eq!(inside, format!("/home/{}", user.name));
 }
 
@@ -278,7 +287,7 @@ fn home_is_set_to_the_box_home() {
 /// neither `mkdir` nor `apk`.
 #[test]
 fn path_is_the_boxs_own_not_the_hosts() {
-    let inside = run_stdout(&["run", "--", "sh", "-c", "echo $PATH"]);
+    let inside = run_stdout(&["__run", "--", "sh", "-c", "echo $PATH"]);
     assert!(
         inside.ends_with(wormhole_core::mount_plan::BOX_PATH),
         "{inside}"
@@ -288,13 +297,13 @@ fn path_is_the_boxs_own_not_the_hosts() {
 
 #[test]
 fn hostname_is_wormhole() {
-    assert_eq!(run_stdout(&["run", "--", "uname", "-n"]), "wormhole");
+    assert_eq!(run_stdout(&["__run", "--", "uname", "-n"]), "wormhole");
 }
 
 #[test]
 fn tmp_and_home_are_writable() {
     let output = wormhole(&[
-        "run",
+        "__run",
         "--",
         "sh",
         "-c",
@@ -314,7 +323,7 @@ fn a_granted_path_is_readable_and_writable_in_the_box() {
     std::fs::write(dir.path().join("in"), "granted\n").expect("write");
 
     let seen = run_stdout(&[
-        "run",
+        "__run",
         "--grant",
         path,
         "--",
@@ -331,13 +340,13 @@ fn a_granted_path_is_readable_and_writable_in_the_box() {
 fn an_ungranted_host_path_stays_invisible() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().to_str().expect("utf-8 temp path");
-    let output = wormhole(&["run", "--", "test", "-e", path]);
+    let output = wormhole(&["__run", "--", "test", "-e", path]);
     assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
 fn a_relative_grant_is_refused() {
-    let output = wormhole(&["run", "--grant", "relative/path", "--", "/bin/true"]);
+    let output = wormhole(&["__run", "--grant", "relative/path", "--", "/bin/true"]);
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("grant must be an absolute path"),
@@ -352,13 +361,13 @@ const BOX_ID: &str = "0123456789ab";
 
 /// `attach` joins a running box's namespaces by its box id and runs a
 /// command inside: same hostname, same isolated pid view. The registry
-/// entry is laid out by hand around a bare `run --pidfile`, which is
+/// entry is laid out by hand around a bare `__run --pidfile`, which is
 /// exactly what `wormhole box` writes for real.
 #[test]
 fn attach_joins_a_running_box() {
     let temp = tempfile::tempdir().expect("temp dir");
     let mut running = spawn_until_ready(&[
-        "run",
+        "__run",
         "--pidfile",
         &temp.path().join("init.pid").display().to_string(),
         "--",
@@ -403,13 +412,13 @@ fn attach_joins_a_running_box() {
     running.wait().expect("box should exit");
 }
 
-/// Only `wormhole box` keeps a home per workspace (N5). Bare `run` is the
+/// Only `wormhole box` keeps a home per workspace (N5). Bare `__run` is the
 /// boundary on its own, and everything it makes stays throwaway.
 #[test]
 fn bare_run_home_is_throwaway() {
-    let first = wormhole(&["run", "--", "sh", "-c", "touch \"$HOME/marker\""]);
+    let first = wormhole(&["__run", "--", "sh", "-c", "touch \"$HOME/marker\""]);
     assert!(first.status.success());
-    let second = wormhole(&["run", "--", "sh", "-c", "test ! -e \"$HOME/marker\""]);
+    let second = wormhole(&["__run", "--", "sh", "-c", "test ! -e \"$HOME/marker\""]);
     assert!(second.status.success());
 }
 

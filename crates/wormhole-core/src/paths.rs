@@ -67,9 +67,8 @@ pub fn is_box_id(text: &str) -> bool {
 
 /// What names a box on disk: its workspace's basename, so a person can
 /// find it by eye, and its id, so several boxes in one workspace stay
-/// apart. One body, because a box's home, the lock that guards it and the
-/// snapshot its receipt is measured against must never disagree about
-/// which box they are.
+/// apart. One body, because a box's home and the lock that guards it
+/// must never disagree about which box they are.
 pub fn box_key(workspace: &Path, id: &str) -> String {
     let name = workspace.file_name().map_or_else(
         || "workspace".to_owned(),
@@ -196,24 +195,9 @@ pub fn box_dir(data_home: &Path, pid: u32) -> PathBuf {
 }
 
 /// The baked env a start writes beside the box's pid; what `attach`
-/// refreshes and `wormhole env` shows.
+/// refreshes and `wormhole ps <id>` shows.
 pub fn baked_env(box_dir: &Path) -> PathBuf {
     box_dir.join("env.toml")
-}
-
-/// The undo point: a reflink copy of the workspace as it was before this
-/// box started. One per box, replaced on that box's every start.
-///
-/// Per box and not per workspace, because the receipt is a diff against
-/// it: sharing one snapshot between two boxes in a workspace would have
-/// each box's receipt measured against whenever the *other* one last
-/// started, and report the other's edits as its own.
-///
-/// Outside the box directory on purpose. That directory is thrown away
-/// when the box exits, and a snapshot that dies with the box it was
-/// protecting you from is not an undo point at all.
-pub fn snapshot_dir(data_home: &Path, key: &str) -> PathBuf {
-    data_home.join("wormhole/snapshots").join(key)
 }
 
 /// The file whose lock means "this process is building the thing that
@@ -362,10 +346,10 @@ mod tests {
         assert!(!lock_file(data, &key(0)).starts_with(home_dir(data, &key(0))));
     }
 
-    /// The home, the lock and the snapshot answer the same question —
-    /// which box is this — so they are named by one key and cannot drift.
+    /// The home and the lock answer the same question — which box is
+    /// this — so they are named by one key and cannot drift.
     #[test]
-    fn the_lock_and_the_snapshot_agree_with_the_home_on_which_box_they_are() {
+    fn the_lock_agrees_with_the_home_on_which_box_it_is() {
         let data = Path::new("/data");
         let home = home_dir(data, &key(0));
         let named = home.file_name().expect("name").to_string_lossy();
@@ -373,18 +357,6 @@ mod tests {
             lock_file(data, &key(0)).file_name().expect("name"),
             std::ffi::OsStr::new(&format!("{named}.lock"))
         );
-        assert_eq!(
-            snapshot_dir(data, &key(0)).file_name().expect("name"),
-            std::ffi::OsStr::new(&*named)
-        );
-    }
-
-    /// A receipt is a diff against this box's own snapshot. Sharing one
-    /// between boxes would report the other box's edits as this one's.
-    #[test]
-    fn two_boxes_in_one_workspace_never_share_a_snapshot() {
-        let data = Path::new("/data");
-        assert_ne!(snapshot_dir(data, &key(0)), snapshot_dir(data, &key(1)));
     }
 
     #[test]

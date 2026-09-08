@@ -192,15 +192,6 @@ pub struct Runtime {
     /// and cannot install a package at run time, which is the trade.
     #[serde(default)]
     pub rootfs: crate::run::RootMode,
-    /// Takes a reflink copy of the workspace before the box starts, and
-    /// prints what changed when it exits. The workspace is the box's whole
-    /// remaining local blast radius, so this is the undo point and the
-    /// proof — but only on a filesystem that can reflink. Off by default:
-    /// on one that cannot, an honest snapshot is a full physical copy of
-    /// your tree on every box start, which is a cost nobody should pay
-    /// without asking for it.
-    #[serde(default)]
-    pub snapshot: bool,
 }
 
 /// Where the preflight hook is seeded, relative to the box home. The
@@ -219,14 +210,9 @@ pub struct EnvVar {
     /// `/usr/bin/zsh` does not exist in here.
     #[serde(default)]
     pub fixed: Option<String>,
-    /// The box refuses to start until the variable has a value.
-    #[serde(default)]
-    pub required: bool,
-    /// The value is masked wherever wormhole prints it.
-    #[serde(default)]
-    pub secret: bool,
     /// With no value anywhere, a start on a terminal asks for one, once,
-    /// and keeps the answer host-side for every box. Implies `secret`.
+    /// and keeps the answer host-side for every box. A credential by
+    /// nature, so it is masked wherever wormhole prints it.
     #[serde(default)]
     pub ask: bool,
 }
@@ -328,7 +314,7 @@ pub enum ManifestError {
     /// An artifact in a recipe with no build line at all.
     ArtifactWithNoBuild(String),
     UnknownAgent(String),
-    /// A fixed variable that also carries `default` or `required`.
+    /// A fixed variable that also carries `default`.
     EnvFixedConflict(String),
     /// `ask` beside a value that is never missing.
     EnvAskConflict(String),
@@ -392,8 +378,8 @@ impl fmt::Display for ManifestError {
             ),
             ManifestError::EnvFixedConflict(name) => write!(
                 f,
-                "[env.{name}] is fixed, so `default` and `required` \
-                 could never act; drop them or drop `fixed`"
+                "[env.{name}] is fixed, so `default` could never act; \
+                 drop one of them"
             ),
             ManifestError::NoAgent => write!(f, "no agent named, so there is nothing to run"),
             ManifestError::Removed(key) => write!(
@@ -510,7 +496,7 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         return Err(ManifestError::UnknownAgent(name.clone()));
     }
     for (name, var) in &manifest.env {
-        if var.fixed.is_some() && (var.required || !var.default.is_empty()) {
+        if var.fixed.is_some() && !var.default.is_empty() {
             return Err(ManifestError::EnvFixedConflict(name.clone()));
         }
         if var.ask && (var.fixed.is_some() || !var.default.is_empty()) {
@@ -1136,24 +1122,27 @@ mod tests {
         assert_eq!(env.get("SHELL").map(String::as_str), Some("/bin/bash"));
     }
 
+    /// A fixed value already answers the question `default` asks, so a
+    /// manifest combining them is confused, not flexible.
     #[test]
-    fn a_variable_can_be_required_and_secret() {
-        let manifest = full("[env.SENTRY_TOKEN]\nrequired = true\nsecret = true\n");
-        let var = &manifest.env["SENTRY_TOKEN"];
-        assert!(var.required);
-        assert!(var.secret);
+    fn a_fixed_variable_takes_no_default() {
+        let extra = "[env.SHELL]\nfixed = \"/bin/bash\"\ndefault = \"/bin/sh\"\n";
+        assert!(
+            matches!(parse(&text(extra)), Err(ManifestError::EnvFixedConflict(_))),
+            "{extra}"
+        );
     }
 
-    /// A fixed value already answers every question the other fields ask,
-    /// so a manifest combining them is confused, not flexible.
+    /// The keys the broker era added and nothing used. Refused by name
+    /// rather than read and ignored.
     #[test]
-    fn a_fixed_variable_takes_no_default_and_no_required() {
+    fn required_and_secret_are_no_longer_keys() {
         for extra in [
-            "[env.SHELL]\nfixed = \"/bin/bash\"\nrequired = true\n",
-            "[env.SHELL]\nfixed = \"/bin/bash\"\ndefault = \"/bin/sh\"\n",
+            "[env.SENTRY_TOKEN]\nrequired = true\n",
+            "[env.SENTRY_TOKEN]\nsecret = true\n",
         ] {
             assert!(
-                matches!(parse(&text(extra)), Err(ManifestError::EnvFixedConflict(_))),
+                matches!(parse(&text(extra)), Err(ManifestError::Syntax(_))),
                 "{extra}"
             );
         }
@@ -1381,7 +1370,7 @@ mod tests {
             "name = \"decorated\"\n",
             "[agent]\nrun = \"claude\"\n",
             "[access]\ngrants = [\"~/.ssh\"]\ndns = \"9.9.9.9\"\nhost_ca = true\n",
-            "[runtime]\nsnapshot = true\n",
+            "[runtime]\nrootfs = \"readonly\"\n",
             "[limits]\ncpu = \"1\"\n",
             "[env.X]\ndefault = \"1\"\n",
         ));

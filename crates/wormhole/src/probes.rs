@@ -3,7 +3,6 @@
 //! lives in `wormhole_core::doctor::outcome`.
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 use wormhole_core::doctor::{Outcome, Probe, ProbeResult, outcome};
@@ -29,7 +28,6 @@ fn run(probe: Probe) -> Outcome {
         }
         Probe::CgroupDelegation => cgroup_delegation(),
         Probe::Reflink => outcome::reflink(reflink_copy()),
-        Probe::MicroVmDevices => microvm_devices(),
         Probe::UidMapOverlap => outcome::uid_map_overlap(
             self_probe(ChildProbe::UidMap),
             nix::unistd::geteuid().is_root(),
@@ -89,8 +87,8 @@ fn cgroup_delegation() -> Outcome {
     read_and_check(&path, outcome::cgroup_delegation)
 }
 
-/// `cp --reflink=always` in the invocation directory tells us whether the
-/// workspace filesystem can do instant snapshots (stage-2 feasibility).
+/// `cp --reflink=always` in the invocation directory tells us whether a
+/// box root copy here is free or a full copy of the image.
 fn reflink_copy() -> Result<bool, String> {
     let dir = tempfile::tempdir_in(".").map_err(|e| format!("cannot create temp dir here: {e}"))?;
     let src = dir.path().join("src");
@@ -102,14 +100,6 @@ fn reflink_copy() -> Result<bool, String> {
         .output()
         .map_err(|e| format!("cannot run cp: {e}"))?;
     Ok(output.status.success())
-}
-
-fn microvm_devices() -> Outcome {
-    let missing: Vec<&str> = ["/dev/kvm", "/dev/vhost-vsock"]
-        .into_iter()
-        .filter(|p| !Path::new(p).exists())
-        .collect();
-    outcome::microvm_devices(&missing)
 }
 
 fn which(bin: &str) -> bool {
