@@ -39,8 +39,6 @@ pub struct Var {
     pub source: Source,
     #[serde(default)]
     pub secret: bool,
-    #[serde(default)]
-    pub required: bool,
 }
 
 impl Var {
@@ -106,10 +104,8 @@ pub fn resolve(
                 Var {
                     value,
                     source,
-                    // An asked value is a credential by nature; it is
-                    // masked whether or not the manifest said so.
-                    secret: var.secret || var.ask,
-                    required: var.required,
+                    // An asked value is a credential, so it is masked.
+                    secret: var.ask,
                 },
             )
         })
@@ -125,7 +121,6 @@ pub fn resolve(
                 value,
                 source,
                 secret: false,
-                required: false,
             },
         );
     }
@@ -169,7 +164,6 @@ pub fn refresh(
                     value,
                     source,
                     secret: false,
-                    required: false,
                 });
                 changes.push(Change::Set(arg.name.clone()));
             }
@@ -213,16 +207,6 @@ pub fn to_ask<'a>(declared: &'a BTreeMap<String, EnvVar>, env: &BakedEnv) -> Vec
         .iter()
         .filter(|(_, var)| var.ask)
         .filter(|(name, _)| !env.get(*name).is_some_and(Var::is_set))
-        .map(|(name, _)| name.as_str())
-        .collect()
-}
-
-/// The names of every required variable still without a value — what a
-/// start or attach refuses over.
-#[must_use]
-pub fn missing_required(env: &BakedEnv) -> Vec<&str> {
-    env.iter()
-        .filter(|(_, var)| var.required && !var.is_set())
         .map(|(name, _)| name.as_str())
         .collect()
 }
@@ -309,7 +293,7 @@ pub fn diff_line(changes: &[Change]) -> Option<String> {
     Some(format!("env: {}", parts.join(", ")))
 }
 
-/// The `wormhole env` table: everything about every variable except a
+/// The `wormhole ps <id>` table: everything about every variable except a
 /// secret's value.
 #[must_use]
 pub fn table(env: &BakedEnv) -> String {
@@ -359,8 +343,6 @@ mod tests {
         EnvVar {
             default: String::new(),
             fixed: None,
-            required: false,
-            secret: false,
             ask: false,
         }
     }
@@ -458,8 +440,7 @@ mod tests {
         assert_eq!(env["C"].source, Source::Unset);
     }
 
-    /// An asked value is a credential whether or not the manifest said
-    /// `secret`; it is masked everywhere.
+    /// An asked value is a credential, so it is masked everywhere.
     #[test]
     fn an_asked_variable_is_masked_without_being_told() {
         let vars = declared(&[(
@@ -505,22 +486,6 @@ mod tests {
     fn an_empty_host_value_is_no_value() {
         let env = bake(&declared(&[("A", plain())]), &[], &host(&[("A", "")]));
         assert_eq!(env["A"].source, Source::Unset);
-        assert_eq!(missing_required(&env), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn a_required_variable_without_a_value_is_reported_missing() {
-        let vars = declared(&[(
-            "SENTRY_TOKEN",
-            EnvVar {
-                required: true,
-                ..plain()
-            },
-        )]);
-        let env = bake(&vars, &[], &host(&[]));
-        assert_eq!(missing_required(&env), vec!["SENTRY_TOKEN"]);
-        let filled = bake(&vars, &[spelled("SENTRY_TOKEN", "t")], &host(&[]));
-        assert_eq!(missing_required(&filled), Vec::<&str>::new());
     }
 
     #[test]
@@ -529,8 +494,7 @@ mod tests {
             &declared(&[(
                 "KEY",
                 EnvVar {
-                    secret: true,
-                    required: true,
+                    ask: true,
                     ..plain()
                 },
             )]),
@@ -634,7 +598,7 @@ mod tests {
             &declared(&[(
                 "KEY",
                 EnvVar {
-                    secret: true,
+                    ask: true,
                     ..plain()
                 },
             )]),

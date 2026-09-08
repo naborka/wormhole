@@ -183,7 +183,7 @@ pub fn by_id<'a>(records: &'a [Record], wanted: &str) -> Option<&'a Record> {
 
 /// A box a lifecycle command is about to act on.
 ///
-/// The key is what every store path is built from — home, lock, snapshot
+/// The key is what every store path is built from — home and lock
 /// — and it is the home directory's own name, so it is known even when
 /// nothing inside that directory can be read. The record is what the box
 /// says about itself, and a box that can say nothing is still a box.
@@ -336,8 +336,8 @@ pub fn free_ordinal(taken: &[String], workspace: &Path) -> u32 {
 }
 
 /// One box as a surface shows it: the box, and the pid running it when one
-/// is. `wormhole ps --all` and the panel both list these, so both are
-/// looking at the same thing.
+/// is. `wormhole ps` and the panel both list these, so both are looking
+/// at the same thing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
     pub record: Record,
@@ -354,12 +354,76 @@ pub struct Scan {
     pub problems: Vec<String>,
 }
 
-/// Every box this host holds, running or not. An idle box is listed with
-/// what it would resume as, because the whole point of keeping it is that
-/// it can be resumed.
+/// Every box this host holds, paired with the pid running it: the kept
+/// records, most recently used first, plus any running box whose record
+/// could not be read. The registry is what says a box is running, so a
+/// box it names is listed whatever its home says — from the entry, which
+/// carries everything a row needs.
+pub fn scan(mut kept: Vec<Record>, live: &[crate::registry::Entry]) -> Vec<Listing> {
+    let running: std::collections::BTreeMap<&str, u32> = live
+        .iter()
+        .map(|entry| (entry.box_id.as_str(), entry.pid))
+        .collect();
+    let recorded: std::collections::BTreeSet<&str> =
+        kept.iter().map(|record| record.id.as_str()).collect();
+    let unrecorded: Vec<Record> = live
+        .iter()
+        .filter(|entry| !recorded.contains(entry.box_id.as_str()))
+        .map(Record::from_entry)
+        .collect();
+    kept.extend(unrecorded);
+    kept.sort_by(|a, b| {
+        b.started_unix
+            .cmp(&a.started_unix)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    kept.into_iter()
+        .map(|record| Listing {
+            running: running.get(record.id.as_str()).copied(),
+            record,
+        })
+        .collect()
+}
+
+impl Record {
+    /// What a running box's registry entry says about it, for a box whose
+    /// home record cannot be read. It names no role: the entry does not
+    /// carry one.
+    fn from_entry(entry: &crate::registry::Entry) -> Record {
+        Record {
+            id: entry.box_id.clone(),
+            workspace: entry.workspace.clone(),
+            role: None,
+            source: None,
+            alias: entry.alias.clone(),
+            name: entry.name.clone(),
+            agent: entry.agent.clone(),
+            created_unix: entry.started_unix,
+            started_unix: entry.started_unix,
+        }
+    }
+}
+
+/// The box among these that `wanted` names: its id from anywhere, or the
+/// alias somebody gave it.
+pub fn listed<'a>(boxes: &'a [Listing], wanted: &str) -> Option<&'a Listing> {
+    boxes
+        .iter()
+        .find(|listing| answers_to(&listing.record.id, listing.record.alias.as_deref(), wanted))
+}
+
+/// What a listing with no rows says, so `ps --all` and the panel cannot
+/// drift by a word.
+pub const NO_BOXES_YET: &str = "no boxes yet";
+pub const NO_BOXES_RUNNING: &str = "no boxes running";
+
+/// The one table every listing draws: `ps`, `ps --all`, `ps <id>` and
+/// the panel. An idle box is listed with what it would resume as, because
+/// the whole point of keeping it is that it can be resumed. Nothing
+/// renders as nothing; the caller says so in its own words.
 pub fn list(boxes: &[Listing], now_unix: u64) -> String {
     if boxes.is_empty() {
-        return "no boxes yet\n".to_owned();
+        return String::new();
     }
     let mut rows = vec![
         [
@@ -763,9 +827,56 @@ mod tests {
         assert_eq!(free_ordinal(&taken, workspace), 1);
     }
 
+    /// Nothing renders as nothing; the surface with nothing to show says so
+    /// in its own words, and `ps` and `ps --all` have different words.
     #[test]
-    fn nothing_kept_says_so_plainly() {
-        assert_eq!(list(&[], 0), "no boxes yet\n");
+    fn nothing_kept_renders_nothing() {
+        assert_eq!(list(&[], 0), "");
+    }
+
+    fn entry(id: &str, pid: u32, started: u64) -> crate::registry::Entry {
+        crate::registry::Entry {
+            pid,
+            box_id: id.to_owned(),
+            workspace: PathBuf::from("/w/proj"),
+            image: "/data/img".to_owned(),
+            agent: Some("claude".to_owned()),
+            name: Some("architect".to_owned()),
+            alias: Some("api".to_owned()),
+            started_unix: started,
+        }
+    }
+
+    /// One scan behind `ps`, `ps --all` and the panel: every kept box with
+    /// the pid running it, most recently used first.
+    #[test]
+    fn a_scan_pairs_every_kept_box_with_the_pid_running_it() {
+        let kept = vec![
+            record("aaaaaaaaaaaa", "/w/proj", None, 100),
+            record("bbbbbbbbbbbb", "/w/proj", None, 300),
+        ];
+        let boxes = scan(kept, &[entry("aaaaaaaaaaaa", 4242, 100)]);
+        let ids: Vec<(&str, Option<u32>)> = boxes
+            .iter()
+            .map(|b| (b.record.id.as_str(), b.running))
+            .collect();
+        assert_eq!(ids, [("bbbbbbbbbbbb", None), ("aaaaaaaaaaaa", Some(4242))]);
+    }
+
+    /// The registry is what says a box is running. A running box whose
+    /// home record cannot be read is still running, so it is still listed —
+    /// from the entry, which carries everything the row needs.
+    #[test]
+    fn a_running_box_with_no_readable_record_is_still_listed() {
+        let boxes = scan(Vec::new(), &[entry("aaaaaaaaaaaa", 4242, 100)]);
+        assert_eq!(boxes.len(), 1);
+        let shown = &boxes[0];
+        assert_eq!(shown.running, Some(4242));
+        assert_eq!(shown.record.id, "aaaaaaaaaaaa");
+        assert_eq!(shown.record.alias.as_deref(), Some("api"));
+        assert_eq!(shown.record.name.as_deref(), Some("architect"));
+        assert_eq!(shown.record.workspace, PathBuf::from("/w/proj"));
+        assert_eq!(shown.record.started_unix, 100);
     }
 
     #[test]

@@ -60,26 +60,16 @@ pub fn cgroup_delegation(content: &str) -> Outcome {
 }
 
 /// `copied` is whether `cp --reflink=always` succeeded; `Err` is a
-/// failure to run the experiment at all. Informational either way —
-/// reflink only decides stage-2 snapshot feasibility.
+/// failure to run the experiment at all. Informational either way:
+/// without reflink a box still starts, from a full copy of its image.
 pub fn reflink(copied: Result<bool, String>) -> Outcome {
     match copied {
         Ok(true) => Outcome::Pass,
         Ok(false) => Outcome::Info(
-            "this filesystem does not support reflink; stage-2 snapshots would copy".to_owned(),
+            "this filesystem does not support reflink; every box start copies its whole image"
+                .to_owned(),
         ),
         Err(e) => Outcome::Info(format!("probe could not run: {e}")),
-    }
-}
-
-pub fn microvm_devices(missing: &[&str]) -> Outcome {
-    if missing.is_empty() {
-        Outcome::Pass
-    } else {
-        Outcome::Info(format!(
-            "missing: {} — MicroVM boundary unavailable",
-            missing.join(", ")
-        ))
     }
 }
 
@@ -185,15 +175,6 @@ mod tests {
         assert_eq!(reflink(Ok(true)), Outcome::Pass);
         assert!(matches!(reflink(Ok(false)), Outcome::Info(_)));
         assert!(matches!(reflink(Err("no cp".to_owned())), Outcome::Info(_)));
-    }
-
-    #[test]
-    fn microvm_devices_reports_what_is_missing_as_info() {
-        assert_eq!(microvm_devices(&[]), Outcome::Pass);
-        assert_eq!(
-            microvm_devices(&["/dev/kvm"]),
-            Outcome::Info("missing: /dev/kvm — MicroVM boundary unavailable".to_owned())
-        );
     }
 
     #[test]

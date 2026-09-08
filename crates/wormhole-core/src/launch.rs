@@ -3,6 +3,7 @@
 //! never a warning — the agent is assumed hostile (CONCEPT.md §8).
 
 use core::fmt;
+
 use std::path::PathBuf;
 
 /// What the pre-launch probes observed about the box about to start.
@@ -216,65 +217,29 @@ pub fn retained_capabilities(status: &str) -> Vec<String> {
         .collect()
 }
 
-/// Which boundary stage this box runs behind. The banner names it on
-/// every launch — a staged boundary that does not say which stage it is
-/// in is a lie (CONCEPT.md §1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Boundary {
-    Namespaces,
-    MicroVm,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Banner {
-    pub boundary: Boundary,
-    pub egress: Vec<String>,
-    pub grant_count: usize,
-}
-
-impl Banner {
-    /// The banner for a box behind the `Namespaces` boundary, read off the
-    /// whole launch rather than a few fields of it.
-    ///
-    /// Taking `RunArgs` is the point. Assembling the banner from hand-picked
-    /// fields is how a new way out, or a new host path bound in, gets
-    /// added without the banner being told. Every way out and every host
-    /// path bound in is decided here, so the next one cannot be added
-    /// without passing through this function.
-    pub fn for_run(args: &crate::run::RunArgs) -> Self {
-        let egress = vec![match args.dns {
-            Some(dns) => format!("host network (dns {dns})"),
-            None => "host network (host resolver)".to_owned(),
-        }];
-        Banner {
-            boundary: Boundary::Namespaces,
-            egress,
-            // A CA bundle and a shared credential are host paths bound in
-            // exactly like a grant.
-            grant_count: args.grants.len()
-                + usize::from(args.ca.is_some())
-                + args.shared_credentials.len(),
-        }
+/// The line a start prints about what it was handed beyond the baseline —
+/// the workspace read-write, the host's own resolver, a copied root — or
+/// nothing when that is everything, so a line on the screen always means
+/// something was.
+///
+/// Read off the whole launch rather than a few fields of it. Assembling
+/// the line from hand-picked fields is how a new host path bound in gets
+/// added without the banner being told: every host path bound in — a
+/// grant, the CA bundle, a shared login — is counted here, so the next
+/// one cannot be added without passing through this function.
+pub fn banner(args: &crate::run::RunArgs) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(dns) = args.dns {
+        parts.push(format!("dns: {dns}"));
     }
-}
-
-impl fmt::Display for Banner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let boundary = match self.boundary {
-            Boundary::Namespaces => "namespaces (host kernel SHARED)",
-            Boundary::MicroVm => "microvm (separate guest kernel)",
-        };
-        let egress = if self.egress.is_empty() {
-            "none".to_owned()
-        } else {
-            self.egress.join(",")
-        };
-        write!(
-            f,
-            "boundary: {boundary} · egress: {egress} · workspace: rw · grants: {}",
-            self.grant_count
-        )
+    if args.root == crate::run::RootMode::Readonly {
+        parts.push("root: readonly".to_owned());
     }
+    let grants = args.grants.len() + usize::from(args.ca.is_some()) + args.shared_credentials.len();
+    if grants > 0 {
+        parts.push(format!("grants: {grants}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 #[cfg(test)]
@@ -442,62 +407,26 @@ mod tests {
         );
     }
 
+    /// The banner says what a start was handed beyond the baseline —
+    /// the workspace, the host's own resolver, a copied root — and says
+    /// nothing at all when that is everything, so a line on the screen
+    /// always means something was.
     #[test]
-    fn banner_snapshot_namespaces_no_grants() {
-        let banner = Banner {
-            boundary: Boundary::Namespaces,
-            egress: vec!["model-api".into()],
-            grant_count: 0,
-        };
-        assert_eq!(
-            banner.to_string(),
-            "boundary: namespaces (host kernel SHARED) · egress: model-api · workspace: rw · grants: 0"
-        );
+    fn a_baseline_start_has_no_banner() {
+        assert_eq!(banner(&run_args()), None);
     }
 
     #[test]
-    fn banner_snapshot_microvm_multiple_egress_and_grants() {
-        let banner = Banner {
-            boundary: Boundary::MicroVm,
-            egress: vec!["model-api".into(), "git".into(), "github-api".into()],
-            grant_count: 3,
-        };
-        assert_eq!(
-            banner.to_string(),
-            "boundary: microvm (separate guest kernel) · egress: model-api,git,github-api · workspace: rw · grants: 3"
-        );
-    }
-
-    /// A box is on the host's network and reaches everything the host
-    /// does. The banner exists to stop the boundary overstating itself,
-    /// so that must never render as `none`, and the resolver it was given
-    /// is named.
-    #[test]
-    fn a_namespaces_banner_says_host_network_and_which_resolver() {
+    fn the_banner_names_only_what_differs_from_the_baseline() {
         let mut args = run_args();
-        let without = Banner::for_run(&args);
-        assert_eq!(
-            without.to_string(),
-            "boundary: namespaces (host kernel SHARED) · egress: host network (host resolver) · workspace: rw · grants: 0"
-        );
         args.dns = Some("1.1.1.1".parse().expect("address"));
+        assert_eq!(banner(&args).as_deref(), Some("dns: 1.1.1.1"));
+        args.root = crate::run::RootMode::Readonly;
         args.grants = vec!["/home/n/.ssh".to_owned(), "/home/n/.gnupg".to_owned()];
-        let with = Banner::for_run(&args);
-        assert!(with.to_string().contains("dns 1.1.1.1"), "{with}");
-        assert!(with.to_string().ends_with("grants: 2"), "{with}");
-        for banner in [without, with] {
-            assert!(!banner.to_string().contains("egress: none"), "{banner}");
-        }
-    }
-
-    #[test]
-    fn banner_with_no_egress_says_none() {
-        let banner = Banner {
-            boundary: Boundary::Namespaces,
-            egress: vec![],
-            grant_count: 1,
-        };
-        assert!(banner.to_string().contains("egress: none"));
+        assert_eq!(
+            banner(&args).as_deref(),
+            Some("dns: 1.1.1.1 · root: readonly · grants: 2")
+        );
     }
 
     fn run_args() -> crate::run::RunArgs {
@@ -522,11 +451,11 @@ mod tests {
         let mut args = run_args();
         args.grants = vec!["/home/n/.ssh".to_owned()];
         args.ca = Some("/etc/ssl/certs/ca-certificates.crt".to_owned());
-        assert_eq!(Banner::for_run(&args).grant_count, 2);
+        assert_eq!(banner(&args).as_deref(), Some("grants: 2"));
         args.shared_credentials = vec![(
             "/home/n/.claude/.credentials.json".to_owned(),
             ".claude/.credentials.json".to_owned(),
         )];
-        assert_eq!(Banner::for_run(&args).grant_count, 3);
+        assert_eq!(banner(&args).as_deref(), Some("grants: 3"));
     }
 }

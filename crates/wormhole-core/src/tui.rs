@@ -258,8 +258,12 @@ impl Tui {
     /// could not read, then the key hints.
     pub fn view(&self, now_unix: u64) -> String {
         let mut screen = String::new();
+        if self.boxes.is_empty() {
+            screen.push_str(crate::home::NO_BOXES_YET);
+            screen.push('\n');
+        }
         for (row, line) in crate::home::list(&self.boxes, now_unix).lines().enumerate() {
-            screen.push_str(cursor(!self.boxes.is_empty() && row == self.selected + 1));
+            screen.push_str(cursor(row == self.selected + 1));
             screen.push_str(line);
             screen.push('\n');
         }

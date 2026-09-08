@@ -30,14 +30,11 @@ fn remove_takes_the_home_and_everything_in_it() {
     let ws = workspace(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, None));
-    let snapshot = paths::snapshot_dir(data, &paths::box_key(&ws, &id));
-    std::fs::create_dir_all(&snapshot).expect("snapshot");
 
     let output = wormhole(data, &ws, &["remove", &id]);
     assert!(output.status.success(), "{}", said(&output));
     assert!(said(&output).contains(&format!("box {id} removed")));
     assert!(!home.exists(), "the home survived");
-    assert!(!snapshot.exists(), "the snapshot survived");
 }
 
 /// The name is what a person types, so it is what `remove` has to take.

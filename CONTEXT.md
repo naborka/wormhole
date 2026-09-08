@@ -63,7 +63,7 @@ _Avoid_: home volume, state dir
 ### A box's life
 
 **Key**:
-What a box's store entries are named by: its workspace's basename and its id, `proj-a3f9c1e40b2d`. One string behind the home, the lock and the snapshot, so those three can never disagree about which box they are. A key carries the id, which is why a box whose record cannot be read can still be named by one.
+What a box's store entries are named by: its workspace's basename and its id, `proj-a3f9c1e40b2d`. One string behind the home and the lock, so the two can never disagree about which box they are. A key carries the id, which is why a box whose record cannot be read can still be named by one.
 _Avoid_: slug, path, dirname
 
 **Claim**:
@@ -79,7 +79,7 @@ Emptying a box's home while keeping the box: same id, same alias, same workspace
 _Avoid_: clear, wipe, reinit
 
 **Remove**:
-Taking a box away for good — its home and its snapshot. Never done on wormhole's own initiative: `gc` reclaims only what it can prove, and "finished with" is not something anything can prove.
+Taking a box away for good — its home. Never done on wormhole's own initiative: `gc` reclaims only what it can prove, and "finished with" is not something anything can prove.
 _Avoid_: delete, destroy, prune
 
 ### What `gc` can prove
@@ -118,12 +118,12 @@ The host-side process that once held the credential and handed the box a socket 
 _Avoid_: using it for anything current
 
 **Declared variable**:
-An environment variable named in the manifest's `[env]` or by `--env`. The only kind that reaches a box; an undeclared host variable never crosses. Per variable: `fixed` is the manifest's own value and never moves, `default` fills in when the host has none, `required` refuses a start without a value, `secret` masks the value on every screen.
+An environment variable named in the manifest's `[env]` or by `--env`. The only kind that reaches a box; an undeclared host variable never crosses. Per variable: `fixed` is the manifest's own value and never moves, `default` fills in when the host has none, `ask` is asked for once, kept host-side, and masked on every screen.
 _Avoid_: passed variable, env override
 
 **Baked env**:
-The environment a start computes and writes beside the box's pid — the box's own, for its whole life. What `wormhole env` shows and what every session starts from.
-_Avoid_: snapshot (that word is the workspace copy), cached env
+The environment a start computes and writes beside the box's pid — the box's own, for its whole life. What `wormhole ps <id>` shows and what every session starts from.
+_Avoid_: snapshot, cached env
 
 **Refresh**:
 What every attach does to the baked env: a value the attaching shell exports wins, the baked one survives where it exports none, `fixed` never moves. Reaches new sessions only — Linux writes no other process's environment, so PID 1's tree keeps its start values.
@@ -150,12 +150,12 @@ A check run before the terminal is handed over. Failure is refusal to start, nev
 _Avoid_: health check, precondition warning
 
 **Banner**:
-What every start prints about the box it is starting — boundary, network, grants, image. What makes a staged boundary honest.
+The last line a start prints, naming what the box got beyond the baseline — a named resolver, a read-only root, host paths bound in. Silent when nothing was, so a line always means something.
 _Avoid_: status line, header
 
-**Receipt**:
-What the agent changed in your workspace, measured on the way out against a snapshot taken before the start. A fact rather than a promise.
-_Avoid_: diff, summary, report
+**Receipt** (_retired_):
+The list of what the agent changed in the workspace, measured against a snapshot taken before the start. Built, then removed on 2026-09-08 with `[runtime] snapshot`; version control is the undo point.
+_Avoid_: using it for anything current
 
 **Panel**:
 The box list reached by running `wormhole` with no arguments. Starts, joins and stops boxes, and shows the full permission preview before anything starts.

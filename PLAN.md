@@ -37,8 +37,7 @@ Probes, each with its own specific failure message:
 - Landlock ABI version available
 - unprivileged `overlayfs` mount works, else `fuse-overlayfs` present
 - cgroup v2 delegation available for resource limits
-- workspace filesystem supports reflink (records stage-2 snapshot feasibility)
-- `/dev/kvm` and `/dev/vhost-vsock` present — **records `MicroVM` readiness, assumption #6**
+- workspace filesystem supports reflink (whether a box root copy is free or a full copy)
 - the uid-map overlap probe from **assumption #1**, run as a diagnostic rather than asserted
 
 **Tests (pure):** table-driven — a set of fake probe results maps to an expected verdict, exit code, and message set. The probe *execution* is a thin trait; the *verdict* is pure and is what the tests cover.
@@ -76,7 +75,7 @@ Every assertion from CONCEPT.md §8 exists first as a pure verdict: probe result
 
 **Tests (pure):**
 - each of: digest mismatch · a readable credential path · an unplanned rw host mount · a retained capability · a held lockfile → maps to refusal with its own distinct error
-- the banner renders the live boundary, the resolver, and the grant count — grants, CA bundle, shared credential — from data; pure function, snapshot-tested
+- the banner renders what a start got beyond the baseline — the resolver, a read-only root, the grant count (grants, CA bundle, shared credential) — from data; pure function, snapshot-tested
 
 Step 6 wires these verdicts to real probes; nothing about the decisions changes there.
 
@@ -131,7 +130,7 @@ The pure verdicts from Step 2 get real probes. Refusal, not a warning; each viol
 
 **Tests (integration):**
 - each Step 2 verdict fires from a real violated precondition
-- the banner is emitted on **every** launch, including `--role` and non-interactive paths
+- the banner is emitted on every start that got anything beyond the baseline, including `--role` and non-interactive paths
 - launch refusals print to stderr before any PTY exists — no panel is needed for them, by construction
 
 This step is the ratchet. Nothing after it can quietly regress an invariant.
@@ -294,7 +293,7 @@ VT screen model, `Ctrl-\` toggle, grants list.
 | A reaper for `checkouts/`, `bases/` and `images/` | `gc` reclaims kept homes only; all three caches grow forever. One rule for all three, not one for each |
 | N sessions with per-session PID/mount/net namespaces | the multi-agent goal (§4) |
 | Reflink checkpoint and restore | undo for `rm -rf`, without giving up transparency |
-| `MicroVM` boundary | the host-kernel row of the §1 table — blocked on `/dev/kvm` and libkrun #329 |
+| A guest kernel | the host-kernel row of the §1 table — not planned; would need `/dev/kvm` and libkrun #329 closed |
 | Crate extraction (`boundary`, `rootfs`, `term` out of the binary crate) | compile time or reuse, if either ever hurts — mechanical, no design change |
 
 ---

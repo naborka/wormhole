@@ -17,7 +17,7 @@ One command in the directory you work in. No daemon to install. No container run
 Three consequences, and they are not the ones people expect:
 
 1. **Most of the protection is the filesystem, not the sandbox boundary.** Your other files are protected by not existing in the box. Your logins are protected by not being handed over unless you say so — and once handed over, they are the box's. Both are *userspace* design and work identically behind any boundary. The network is not a protection: the box is on the host's network and reaches what the host reaches (§2).
-2. **The boundary's unique contribution is the host kernel.** That is one row in the table below, not the whole table. Naming it honestly is what lets the boundary be staged.
+2. **The boundary's unique contribution is the host kernel.** That is one row in the table below, not the whole table, and it is the one row wormhole does not fill.
 3. **The live workspace mount is a deliberate hole and the biggest one.** §6, risk 1.
 
 | Protection | Provided by | Needs a separate kernel? |
@@ -27,24 +27,21 @@ Three consequences, and they are not the ones people expect:
 | Exfil / C2 | **not protected** — the box has the host's network (§2) | — |
 | Remote repo destruction | only what the login you handed over can reach; nothing else of yours is mounted | no |
 | Host filesystem outside the workspace | mount namespace — unmounted paths do not exist | no |
-| **Host kernel compromise** | **separate guest kernel** | **yes — only this** |
+| **Host kernel compromise** | **not protected** — only a separate guest kernel would, and wormhole has none | **yes — only this** |
 
-### Why the boundary is staged, and why that is not a compromise
+### One boundary, and why that is not a compromise
 
-wormhole define a `Boundary` port. Two implementations:
+wormhole has one boundary, `Namespaces`: our own `clone` + `unshare` + `pivot_root` + `mount` + seccomp + Landlock. Linux only.
 
-- **`Namespaces`** — our own `clone` + `unshare` + `pivot_root` + `mount` + seccomp + Landlock. Linux. Ships first.
-- **`MicroVM`** — separate guest kernel. Ships second.
+A guest kernel is not built and not planned. It is the only thing that would fill the kernel row, and it is a different program: a hypervisor, a virtio-fs server, a guest image. §13 keeps the record of what it would need (`/dev/kvm`, libkrun issue #329) in case that ever changes.
 
-Everything above the port — credentials, roles, layers, mount planning, control plane, assertions — is written once and boundary-independent. Ordering is not "container because cheaper." It is: 80% of the design is boundary-independent, so build it against a boundary that runs on this machine today, then add the kernel row.
-
-**Non-negotiable condition.** Every launch prints its live boundary:
+**Non-negotiable condition.** A start prints what it got beyond the baseline: the named resolver, a read-only root, and the count of host paths bound in — grants, the CA bundle, a shared login. A baseline start prints nothing.
 
 ```
-boundary: namespaces (host kernel SHARED) · egress: host network (host resolver) · workspace: rw · grants: 0
+dns: 1.1.1.1 · grants: 2
 ```
 
-A staged boundary that does not say which stage it is in is a lie. The banner is what makes staging honest instead of dishonest.
+The count is read off the whole launch, not assembled from hand-picked fields, so no host path can be bound in without the line saying so.
 
 ### The boundary ladder, and where each rung actually sits
 
@@ -53,9 +50,9 @@ A staged boundary that does not say which stage it is in is a lie. The banner is
 | Rootful Docker | one kernel LPE, or a runc CVE (three shipped Nov 2025: CVE-2025-31133, -52565, -52881) |
 | **`Namespaces` — userns + own mount/pid ns + seccomp + Landlock** | **kernel LPE reachable from an unprivileged user namespace** |
 | gVisor (`runsc`) | Sentry escape, *then* a kernel bug — 5–15× syscall latency, fatal for builds |
-| **`MicroVM` — separate guest kernel** | **hypervisor escape** |
+| MicroVM — separate guest kernel (libkrun, Firecracker) | hypervisor escape |
 
-Rung 2 is where wormhole starts and it is honestly weaker than rung 4. It is also at least as strong as what agent-sandbox tools ship today at the filesystem, which is where the box's protection lives.
+Rung 2 is where wormhole sits and it is honestly weaker than rung 4. It is also at least as strong as what agent-sandbox tools ship today at the filesystem, which is where the box's protection lives.
 
 ### Docker-in-Docker is not a security mechanism
 
@@ -392,7 +389,7 @@ Every decision lives in a headless core the TUI renders. `--role X` bypasses the
 | Arbitrary C2 / exfil | **none** — the box has the host's network | by choice |
 | Remote repo destruction | bounded by the login handed over; nothing else of yours is reachable | as strong as the account's scope |
 | Host filesystem outside the workspace | unmounted paths do not exist in the box's mount namespace | strong; Landlock as a second layer |
-| Host root compromise | `Namespaces`: unprivileged userns — **weak**. `MicroVM`: VMX/EPT — hypervisor bug required | **stage-dependent; the banner says which** |
+| Host root compromise | unprivileged userns; a kernel LPE reachable from it defeats the box | **weak, by construction** |
 | Runaway resource use | cgroup limits, host-side ceiling | enforced |
 
 ### What wormhole does not protect — accepted risks
@@ -407,7 +404,7 @@ A pre-session reflink snapshot (`cp -a --reflink=always`, instant on btrfs and x
 
 **3. The login you handed over.** `copy` and `share` put your credential where the agent reads it, with every capability the account has — hosted connectors included, which execute server-side and never cross the box at all. If a box must not reach something, the account you hand it must not have it.
 
-**4. `Namespaces` shares the host kernel.** A kernel LPE reachable from an unprivileged user namespace defeats it. This is the stage-1 boundary being honestly weaker than stage 2, and it is why the banner exists.
+**4. `Namespaces` shares the host kernel.** A kernel LPE reachable from an unprivileged user namespace defeats it. Only a guest kernel would close this, and there is none (§1).
 
 **5. Guest disk and inode exhaustion through the workspace mount.** Quotas required, portable enforcement unproven — assumption #5.
 
@@ -427,13 +424,13 @@ With our own mount namespace, a path that is not mounted does not exist, so ther
 
 TDD needs seams. Three ports drive the entire core with in-memory fakes:
 
-- **`Boundary`** — create a box, run a process in it, get an fd pair. `Namespaces` and `MicroVM` implement it; the fake implements it for every core test.
+- **`Boundary`** — create a box, run a process in it, get an fd pair. `Namespaces` implements it; the fake implements it for every core test.
 - **`RootFs`** — resolve a layer by digest or version. Fake serves fixtures; real pulls and verifies.
 - **`Terminal`** — bytes in, bytes out. Fake is a byte vector.
 
 Unit-testable without any kernel: mount-plan computation from cwd plus grants, role manifest parsing and `files` precedence, grant persistence, layer resolution, credential mode decisions, VT screen model and restoration, lockfile semantics.
 
-**The seams exist for testability, not for hypothetical backends.** `Boundary` is the one exception and it is not hypothetical — the microVM implementation is a stated deliverable.
+**The seams exist for testability, not for hypothetical backends.** `Boundary` included: it has one real implementation and a fake, and a second backend is not planned.
 
 A small set of integration tests boot a real box and assert what only a real kernel can prove:
 
@@ -457,7 +454,7 @@ Linux. `Namespaces` boundary. Workspace is the cwd. `debian:13-slim` by digest, 
 
 ### Explicitly not in MVP
 
-- **`MicroVM` boundary.** Stage 2. Requires `/dev/kvm` (assumption #6) and closing libkrun issue #329 (§13).
+- **A guest kernel.** Not planned. It would need `/dev/kvm` (assumption #6) and libkrun issue #329 closed (§13).
 - **Multiple sessions.** The shape is preserved (§4); the count is one.
 - **Live mount injection.** Mount grants are launch-time; changing them restarts the box. No `setns` in MVP. Revisit only if dogfooding shows real restart friction.
 - **A ceiling on what a role may ask for.** §7 describes it; nothing enforces it. A fetched role is confirmed by a person before it runs, and that confirm is the whole defence.
@@ -467,7 +464,7 @@ Linux. `Namespaces` boundary. Workspace is the cwd. `debian:13-slim` by digest, 
 
 ### Size
 
-No daemon, no container runtime, nothing to install separately, no userspace TCP/IP stack and no broker. The old estimate was 12–18k LOC. Deleting `smoltcp`, NAT, DNS, the image builder, the base-image pipeline, the workspace registry and then the broker removes most of it. `MicroVM` adds it back only for the parts a hypervisor genuinely needs.
+No daemon, no container runtime, nothing to install separately, no userspace TCP/IP stack and no broker. The old estimate was 12–18k LOC. Deleting `smoltcp`, NAT, DNS, the image builder, the base-image pipeline, the workspace registry and then the broker removes most of it.
 
 The claim that survives is not "one static binary" — it is **no daemon, no external runtime, nothing for you to install**. `vt100` and a registry client (or `skopeo`) are dependencies.
 
@@ -483,7 +480,7 @@ The claim that survives is not "one static binary" — it is **no daemon, no ext
 | 3 | ~~Claude Code functions with no `/etc/resolv.conf` and no route~~ — closed the hard way: it did not, reliably, and §2 gave the box the host's network | — |
 | 4 | `debian:13-slim` plus an npm-installed `claude` runs — glibc and Node versions satisfied | The agent layer needs a Node it brings itself, or the base is not slim. |
 | 5 | Per-workspace disk and inode quotas are enforceable portably | Exhaustion ships as a documented gap. |
-| 6 | This host can run `MicroVM` at all | Stage 2 is undogfoodable here. §8's earlier draft recorded this machine reporting `vmx` and `nested=Y` with **no `/dev/kvm` and no `/dev/vhost-vsock`** — unverified since. |
+| 6 | This host can run a guest kernel at all | Only matters if a guest kernel is ever built; it could not be dogfooded here. §8's earlier draft recorded this machine reporting `vmx` and `nested=Y` with **no `/dev/kvm` and no `/dev/vhost-vsock`** — unverified since. |
 | 7 | The `vt100` crate is maintained enough to depend on | Vendor it, or use a fork (`vt100-ctt`, `vt100-psmux`), or write the screen model. The API is proven; the upstream's health is not. |
 | 8 | A `setup` list is reproducible enough that a cached layer stays valid | Layer cache invalidation becomes a correctness problem, not a performance one. See spike #13 — every unpinned input in a role makes this false. |
 | 9 | `anthropic-beta: oauth-2025-04-20` is actually required when injecting an OAuth bearer | Harmless either way — spike #14 sent it unconditionally and got a 200. Worth isolating so the header set is minimal and understood rather than cargo-culted. |
@@ -495,17 +492,17 @@ Each entry keeps only the evidence that produced a decision. The resulting desig
 
 Spikes #14 and #15 below proved the model-API broker and its token refresh; both are kept as record of a component that was later removed. It was removed because its proxy shape broke the agent in daily use — concurrent `CONNECT` tunnels it served one at a time, and endpoints it could not inject a credential into — and because the user chose an autonomous agent over the exfil protection the broker bought (§2).
 
-**#1 — TSI filtering: falsified.** libkrun's whole TSI control surface is `krun_add_vsock(ctx_id, tsi_features)` with two flags. Filtering would require forking the VMM. Led to owning a network stack — which §2 then deleted entirely by removing the box's route. Relevant only to `MicroVM`.
+**#1 — TSI filtering: falsified.** libkrun's whole TSI control surface is `krun_add_vsock(ctx_id, tsi_features)` with two flags. Filtering would require forking the VMM. Led to owning a network stack — which §2 then deleted entirely by removing the box's route. Relevant only to a guest kernel.
 
-**#2 — macOS/HVF parity: confirmed, then descoped.** Every libkrun device wormhole would need is gated by cargo feature, not `target_os`; only `krun_add_net_tap` is Linux-only and wormhole does not use it. Kept for stage 2. v1 is Linux, so parity is not a v1 constraint.
+**#2 — macOS/HVF parity: confirmed, then descoped.** Every libkrun device wormhole would need is gated by cargo feature, not `target_os`; only `krun_add_net_tap` is Linux-only and wormhole does not use it. Kept for the record; wormhole is Linux only.
 
-**#7 — macOS virtio-fs permissions: falsified.** APFS cannot represent Linux ownership, so libkrun's macOS virtio-fs synthesises it via xattrs; host-created files carry none. The failing axis was non-root-vs-root *inside* the guest, and the document's own uid-matching rule put the agent in the broken configuration — **the document proposed the bug.** Host-side ownership is determined by the identity of the virtio-fs server process, not by the guest process uid, so matching uids bought nothing. Relevant to stage 2 only; on Linux `Namespaces`, a userns map gives host-correct ownership directly.
+**#7 — macOS virtio-fs permissions: falsified.** APFS cannot represent Linux ownership, so libkrun's macOS virtio-fs synthesises it via xattrs; host-created files carry none. The failing axis was non-root-vs-root *inside* the guest, and the document's own uid-matching rule put the agent in the broken configuration — **the document proposed the bug.** Host-side ownership is determined by the identity of the virtio-fs server process, not by the guest process uid, so matching uids bought nothing. Relevant to a guest kernel only; on Linux `Namespaces`, a userns map gives host-correct ownership directly.
 
 **#8 — host confinement on macOS: falsified.** No `pivot_root` on Darwin; `chroot(2)` requires root; Seatbelt is deprecated and warns on every run; App Sandbox is compatible but needs an app bundle. Confinement cannot be primary defence on macOS. Moot for v1.
 
-**#9 — raw virtio queue reachability: holds.** libkrun puts devices on the MMIO bus, not PCI, so the PCI-BAR-mmap literature is inapplicable. Shipped libkrunfw has `CONFIG_MODULES`, `CONFIG_VFIO`, `CONFIG_UIO`, `CONFIG_PCI` unset; `CONFIG_IO_STRICT_DEVMEM` is set on aarch64 and **not** on x86_64, leaving `mmap` of `/dev/mem` at a virtio-mmio address open there. Closed by dropping `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, `CAP_SYS_MODULE` from the bounding set. Generalises: two of the three mitigations previously proposed here did not exist — `kernel.modules_disabled=1` is meaningless when `CONFIG_MODULES` is off, and lockdown cannot be enabled without the LSM compiled in. Both were written from generic hardening habit rather than from *this* kernel's config. Stage 2.
+**#9 — raw virtio queue reachability: holds.** libkrun puts devices on the MMIO bus, not PCI, so the PCI-BAR-mmap literature is inapplicable. Shipped libkrunfw has `CONFIG_MODULES`, `CONFIG_VFIO`, `CONFIG_UIO`, `CONFIG_PCI` unset; `CONFIG_IO_STRICT_DEVMEM` is set on aarch64 and **not** on x86_64, leaving `mmap` of `/dev/mem` at a virtio-mmio address open there. Closed by dropping `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, `CAP_SYS_MODULE` from the bounding set. Generalises: two of the three mitigations previously proposed here did not exist — `kernel.modules_disabled=1` is meaningless when `CONFIG_MODULES` is off, and lockdown cannot be enabled without the LSM compiled in. Both were written from generic hardening habit rather than from *this* kernel's config. Guest kernel only.
 
-**#10 — libkrun issue #329: open, and it is stage 2's blocker.** The virtio-fs server trusts the guest to send filenames: *"we basically trust the guest kernel that when it gives us a filename it is actually a filename and not a path."* A guest embedding `/` or `..` writes **outside the shared directory**, on the host, as the wormhole process user — a host filesystem write primitive that never touches the hypervisor boundary. The fix is to validate filenames, not to contain the consequences: ~20 lines in `passthrough.rs`, upstreamable, and wormhole would already build libkrun from source. **`MicroVM` does not ship before this is closed.** `Namespaces` is unaffected — a bind mount into a mount namespace has no filename-parsing server in the path.
+**#10 — libkrun issue #329: open, and it blocks any guest kernel.** The virtio-fs server trusts the guest to send filenames: *"we basically trust the guest kernel that when it gives us a filename it is actually a filename and not a path."* A guest embedding `/` or `..` writes **outside the shared directory**, on the host, as the wormhole process user — a host filesystem write primitive that never touches the hypervisor boundary. The fix is to validate filenames, not to contain the consequences: ~20 lines in `passthrough.rs`, upstreamable, and wormhole would already build libkrun from source. **No guest kernel ships before this is closed.** `Namespaces` is unaffected — a bind mount into a mount namespace has no filename-parsing server in the path.
 
 **#11 — nested namespaces inside a runtime-managed container: falsified, and it decided §4.** Observed inside a Docker container with the default seccomp profile:
 

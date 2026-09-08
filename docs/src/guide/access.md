@@ -60,17 +60,19 @@ connection, and nothing pretends to. The line that holds is the
 filesystem one above — what the box can *read* and *write* of your
 machine — plus what it logs in as, which is the next section.
 
-Every launch prints what it got:
+Every launch prints what it got beyond the baseline — the workspace, the
+host's own resolver, a copied root:
 
 ```
-boundary: namespaces (host kernel SHARED) · egress: host network (host resolver) · workspace: rw · grants: 1
+dns: 1.1.1.1 · grants: 1
 ```
 
-That line is not decoration. A staged boundary that does not say which
-stage it is in is a lie, so it is the last thing printed before the agent
-takes the terminal. The grant count includes every host path bound in —
-a `[access] grants` entry, the CA bundle `host_ca` mounts, and a shared
-credential file — so a login handed over never goes uncounted.
+A start that got nothing beyond the baseline prints no such line, so a
+line on the screen always means something was handed over. It is the
+last thing printed before the agent takes the terminal. The grant count
+includes every host path bound in — a `[access] grants` entry, the CA
+bundle `host_ca` mounts, and a shared credential file — so a login handed
+over never goes uncounted.
 
 ## What it can use of the machine
 
@@ -82,10 +84,9 @@ to prevent.
 
 ## What it changed
 
-The workspace is the box's whole remaining local blast radius.
-`[runtime] snapshot = true` takes a reflink copy before the box starts and
-prints what changed on the way out — the difference between trusting a
-report and having one.
+The workspace is the box's whole remaining local blast radius, and it is
+a live read-write mount: `rm -rf` and `git reset --hard` reach your real
+tree. Keep it under version control and commit before you hand it over.
 
 ## TLS trust and `host_ca`
 

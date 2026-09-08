@@ -11,7 +11,6 @@ pub mod limits_cgroup;
 pub mod manifest;
 pub mod mount_plan;
 pub mod paths;
-pub mod receipt;
 pub mod registry;
 pub mod run;
 pub mod secrets;

@@ -40,8 +40,8 @@ The rest of the commands:
 | | |
 |---|---|
 | `wormhole help` | the whole tool on one page — start here |
-| `wormhole doctor` | nine host probes and a plain verdict — run this first |
-| `wormhole ps [--all]` / `attach <id\|name>` | what is running or kept, and a second terminal into it |
+| `wormhole doctor` | eight host probes and a plain verdict — run this first |
+| `wormhole ps [--all \| <id\|name>]` / `attach <id\|name>` | what is running or kept, one box with its environment, and a second terminal into it |
 | `wormhole stop <id\|name>` | end a running box, from anywhere |
 | `wormhole rename <id\|name> <new>` | call a box something else, without starting it |
 | `wormhole reset <id\|name>` | keep the box, empty its home |

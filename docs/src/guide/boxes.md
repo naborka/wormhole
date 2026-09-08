@@ -146,7 +146,7 @@ wormhole remove <id|name> [<id|name>...]
 ```
 
 Takes the box away: its home, and with it the history, the logins and
-whatever the agent installed. Its snapshot goes too. This cannot be
+whatever the agent installed. This cannot be
 undone, so it is the one thing wormhole never does on its own — `gc`
 removes only what it can *prove* is dead, and a box you are simply
 finished with is not something anything can prove.
@@ -172,11 +172,9 @@ have.
 |---|---|
 | `$HOME` — history, logins, toolchain, caches | `~/.local/share/wormhole/homes/<workspace>-<id>/` |
 | Its claim, so the same box cannot start twice | `~/.local/share/wormhole/locks/<workspace>-<id>.lock` |
-| Its snapshot, and the receipt measured against it | `~/.local/share/wormhole/snapshots/<workspace>-<id>/` |
 
-Two boxes never share any of those. One shared `$HOME` would be two agents
-writing one history, one config and one instructions file at the same time;
-one shared snapshot would have each box's receipt report the other's edits.
+Two boxes never share either. One shared `$HOME` would be two agents
+writing one history, one config and one instructions file at the same time.
 
 The image is shared, because it is read-only in effect: a box gets a
 throwaway copy and deletes it on exit.
