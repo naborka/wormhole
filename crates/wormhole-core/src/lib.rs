@@ -1,14 +1,12 @@
 //! Pure core: every decision, no syscalls, no I/O.
 
 pub mod boxenv;
-pub mod broker;
 pub mod ca;
 pub mod doctor;
 pub mod gc;
 pub mod help;
 pub mod home;
 pub mod launch;
-pub mod limits;
 pub mod limits_cgroup;
 pub mod manifest;
 pub mod mount_plan;

@@ -132,7 +132,7 @@ wormhole reset <id|name>
 
 Empties the box's home and keeps the box. Same id, same name, same
 workspace, same role — nothing the agent put there. The next start seeds
-the instructions, the first-run answers and the status line again, and the
+the instructions and the first-run answers again, and the
 agent logs in again.
 
 This is the difference between starting over and starting *somewhere

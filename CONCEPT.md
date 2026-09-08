@@ -2,7 +2,7 @@
 
 **Isolated box for AI coding agents running with all permissions granted.**
 
-Want run agent with `--dangerously-skip-permissions` and not think. `wormhole` make safe: agent see one directory and nothing else of your machine, hold no credential you own, reach no host except ones you allow.
+Want run agent with `--dangerously-skip-permissions` and not think. `wormhole` make safe: agent see one directory and nothing else of your machine, and only the login you chose to hand it.
 
 One command in the directory you work in. No daemon to install. No container runtime.
 
@@ -16,15 +16,16 @@ One command in the directory you work in. No daemon to install. No container run
 
 Three consequences, and they are not the ones people expect:
 
-1. **Most of the protection is not the sandbox boundary.** Credentials are protected by never entering the box. Remote repos are protected by there being no push path. Exfil is protected by there being no route. All three are *userspace* design and work identically behind any boundary.
+1. **Most of the protection is the filesystem, not the sandbox boundary.** Your other files are protected by not existing in the box. Your logins are protected by not being handed over unless you say so — and once handed over, they are the box's. Both are *userspace* design and work identically behind any boundary. The network is not a protection: the box is on the host's network and reaches what the host reaches (§2).
 2. **The boundary's unique contribution is the host kernel.** That is one row in the table below, not the whole table. Naming it honestly is what lets the boundary be staged.
 3. **The live workspace mount is a deliberate hole and the biggest one.** §6, risk 1.
 
 | Protection | Provided by | Needs a separate kernel? |
 |---|---|---|
-| Credential theft | host-side broker; no secret in box | no |
-| Remote repo destruction | no push path exists | no |
-| Exfil / C2 | no route; host-side proxy is the only egress | no |
+| Theft of credentials you did not hand over | absent from the box — unmounted paths do not exist | no |
+| Theft of the login you did hand over | **not protected** — `credentials = "none"` hands over nothing | — |
+| Exfil / C2 | **not protected** — the box has the host's network (§2) | — |
+| Remote repo destruction | only what the login you handed over can reach; nothing else of yours is mounted | no |
 | Host filesystem outside the workspace | mount namespace — unmounted paths do not exist | no |
 | **Host kernel compromise** | **separate guest kernel** | **yes — only this** |
 
@@ -35,12 +36,12 @@ wormhole define a `Boundary` port. Two implementations:
 - **`Namespaces`** — our own `clone` + `unshare` + `pivot_root` + `mount` + seccomp + Landlock. Linux. Ships first.
 - **`MicroVM`** — separate guest kernel. Ships second.
 
-Everything above the port — broker, egress, roles, layers, mount planning, control plane, assertions — is written once and boundary-independent. Ordering is not "container because cheaper." It is: 80% of the design is boundary-independent, so build it against a boundary that runs on this machine today, then add the kernel row.
+Everything above the port — credentials, roles, layers, mount planning, control plane, assertions — is written once and boundary-independent. Ordering is not "container because cheaper." It is: 80% of the design is boundary-independent, so build it against a boundary that runs on this machine today, then add the kernel row.
 
 **Non-negotiable condition.** Every launch prints its live boundary:
 
 ```
-boundary: namespaces (host kernel SHARED) · egress: model-api · workspace: rw · grants: 0
+boundary: namespaces (host kernel SHARED) · egress: host network (host resolver) · workspace: rw · grants: 0
 ```
 
 A staged boundary that does not say which stage it is in is a lie. The banner is what makes staging honest instead of dishonest.
@@ -50,11 +51,11 @@ A staged boundary that does not say which stage it is in is a lie. The banner is
 | Rung | Escape requires |
 |---|---|
 | Rootful Docker | one kernel LPE, or a runc CVE (three shipped Nov 2025: CVE-2025-31133, -52565, -52881) |
-| **`Namespaces` — userns + own mount/pid/net ns + seccomp + Landlock** | **kernel LPE reachable from an unprivileged user namespace** |
+| **`Namespaces` — userns + own mount/pid ns + seccomp + Landlock** | **kernel LPE reachable from an unprivileged user namespace** |
 | gVisor (`runsc`) | Sentry escape, *then* a kernel bug — 5–15× syscall latency, fatal for builds |
 | **`MicroVM` — separate guest kernel** | **hypervisor escape** |
 
-Rung 2 is where wormhole starts and it is honestly weaker than rung 4. It is also strictly stronger than what agent-sandbox tools ship today, because those put your credentials inside the box and give it a route.
+Rung 2 is where wormhole starts and it is honestly weaker than rung 4. It is also at least as strong as what agent-sandbox tools ship today at the filesystem, which is where the box's protection lives.
 
 ### Docker-in-Docker is not a security mechanism
 
@@ -64,63 +65,37 @@ wormhole never uses a container runtime, so there is no socket to mount and no p
 
 ---
 
-## 2. Egress: no route, only brokers
+## 2. Network and credentials
 
-**The box has no network route. Loopback only.** No default gateway, no DNS, no `/etc/resolv.conf`. This is not a firewall — it is the absence of a path.
+**The box is on the host's network.** User, mount, UTS and PID namespaces; no network namespace. Every route the host has, the box has, and it speaks to the model API — and to everything else — for itself. `/etc/resolv.conf` is the manifest's `dns` address when one is named, otherwise the host's own file bound read-only.
 
-Egress is one host-side process reached over a unix socket passed into the box. A ~100-line in-box forwarder listens on `127.0.0.1` and relays to that socket. Three services on it:
+This is a deliberate reversal. An earlier design gave the box no route and put a host-side broker in front of the API and a `CONNECT` proxy in front of everything else (spikes #14 and #15, kept in §13). It was proven and it shipped, and it broke real client behaviour every day: the agent opens several `CONNECT` tunnels at once and holds one for its whole life; it reaches endpoints the broker could not inject a credential into — bootstrap flags, usage, the MCP registry — and each of those degraded or failed in ways that looked like the network. The user of this tool wants autonomous agents, and a boundary that makes the agent unreliable is paid for every hour and defends against a threat the same user has chosen to accept. So the route is open and the question is only which login the box speaks with.
 
-| Service | Shape | Secret |
+### Three answers, all yours
+
+`[access] credentials` in the manifest, or `--credentials` on a start, which wins:
+
+| Mode | What the box gets | What happens on refresh |
 |---|---|---|
-| **Model API** | reverse proxy. Box gets `ANTHROPIC_BASE_URL` pointing at the forwarder plus a **dummy** `ANTHROPIC_API_KEY`; broker strips it and injects the real credential | never in box |
-| **Git HTTPS** | reverse proxy. Box-local `url.<broker>.insteadOf` rewrite; broker adds the token, scoped to this workspace's remotes; **fetch and clone only** | never in box |
-| **GitHub API** | reverse proxy, **`GET` only**. Reads issues, PRs, actions, private code. Everything else refused | never in box |
-| **General HTTPS** | HTTP `CONNECT` forward proxy with a hostname allowlist. `cargo`, `npm`, `apt`, `pip` all honor `HTTPS_PROXY` | n/a |
+| `none` (default) | a clean box home; `/login` inside the box makes whatever login the agent makes | the box's own; the host is never read |
+| `copy` | the host's credential files copied into the box home once, where absent | the box refreshes its own copy; the host copy is never written |
+| `share` | the host's credential files bound read-write at the same place in the box home | lands on the host; one login, refreshed by whoever runs next |
 
-### One policy for every outward action
+The files are the agent's own: `~/.claude/.credentials.json` for `claude`, `~/.codex/auth.json` for `codex`. For `claude`, `copy` and `share` also carry the account fields from the host's `.claude.json` into the box's, only where the box has none — a token without its account is half a login.
 
-`GET`-only on the GitHub API is not caution, it is consistency. Without it, forbidding `git push` accomplishes nothing: `PUT /repos/O/R/contents/path` creates a commit, `POST /repos/O/R/git/refs` creates a branch, and `POST /gists` is an exfiltration channel with arbitrary content. A rule that blocks one transport and leaves the same capability on another is decoration.
+`share` names one race honestly: the refresh token rotates on every use, so the host agent and a box refreshing the same file can invalidate each other. Cost is one `/login`. Not defended, named.
 
-So: **the box may read anything it is allowed to reach, and may change nothing.** One sentence, no exceptions to remember.
+A copied or shared login is a grant like any other and the banner counts it: it is the one host secret a box can be handed, and the preview screen says which mode it got.
 
-### Allowlist rules
+### What is not protected, said plainly
 
-- **The baseline is empty.** Every host is allowed by a role's `egress` request or by an explicit grant. There are no hosts that are simply reachable.
-- Entries are **exact names** or **one-level subdomain wildcards** — `*.crates.io` covers `static.crates.io`, not `a.b.crates.io`.
-- **`*.X` is accepted only if `X` is itself explicitly allowed.** This removes the public-suffix hazard without shipping a Public Suffix List: `*.github.io` would require `github.io` as a target in its own right, which nobody ever wants. Zero external data, nothing to keep updated, one rule, exhaustively testable. It does not protect you from writing both lines yourself — that is what the role diff is for.
-- GitHub is enumerated, never derived from a wildcard: `github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`. **Not `api.github.com`** — the API's only path is the broker, so no second route exists. **Not `gist.github.com`.** A `*.github.com` wildcard would have quietly granted both.
-- A blocked host is refused and surfaced in the control panel, where one keystroke grants it. Never a silent failure, never an indefinite hang.
+With the route open and a login in the box, nothing in wormhole stops the agent from sending anything it can read to anywhere it can reach, or from acting as the account you handed it with everything that account can do. With `none` the exposure is whatever the agent logs in as, on its own. The protection that remains is the filesystem: the workspace, granted paths and the box's own home exist in the box; nothing else of your machine does (§5). No capability, a disposable root, and a login you chose.
 
-### The model-API broker is proven, and it imposes two requirements
+### Builds still run in a throwaway box
 
-Spike #14 ran the real thing end to end: Claude Code with no credential in its environment, plaintext HTTP to loopback, a broker swapping a dummy `x-api-key` for a subscription OAuth bearer. Upstream 200, real answer returned. Two non-negotiable consequences fell out of it:
-
-- **The broker streams.** Interactive Claude Code uses server-sent events. A broker that buffers the response body makes the agent's TUI look frozen until the whole reply arrives. Relay chunks as they arrive; never read-to-end.
-- **The broker owns token refresh, and it is the only writer.** Spike #15 performed a live refresh: it works, and **the refresh token rotates on every use.** That makes single-writer a correctness requirement, not a preference — two refreshers means the second one presents a dead token and the credential chain breaks. The broker takes an exclusive `flock` on the credential file, re-reads it under the lock, refreshes only if still needed, and writes back atomically. Access tokens live exactly eight hours.
-
-**Accepted race:** running Claude Code on the host at the same time as a box defeats the lock, because the host agent knows nothing about it. Cost is one `/login`. Not defended, named.
-
-**Accepted cost, measured:** setting `ANTHROPIC_API_KEY` — even a dummy — makes Claude Code print `claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login`. Connectors hosted by claude.ai do not load. Locally-launched MCP servers are unaffected. Brokering a claude.ai connector's own OAuth is a separate problem: that flow needs a browser and a redirect URI, so the credential is minted by the agent, not handed to it. Out of scope, named rather than hidden.
-
-### This deletes the largest component the old design had
-
-The previous concept owned a userspace TCP/IP stack — `smoltcp` plus NAT plus a DNS server — and named it the largest single component after the TUI, with its own accepted risk for parsing hostile guest frames. **It is gone.** Reverse proxies for the two services that need credential injection, and a `CONNECT` proxy for the rest. Nothing parses guest-controlled Ethernet frames because the box has no NIC.
-
-### No TLS interception, anywhere
-
-Injecting a credential does not require a MITM. The client is *configured* to treat the broker as its origin — `ANTHROPIC_BASE_URL`, `insteadOf` — so the broker is an endpoint, not an interceptor. No wormhole CA in the box's trust store. Certificate pinning is not broken because nothing is intercepted.
-
-### Build-time egress and run-time egress are different policies
-
-Preparing an agent layer needs `registry.npmjs.org`. Preparing a role layer needs whatever that role installs. Neither is reachable from a *running* box.
-
-Preparation happens in a **throwaway box** with its own narrow, explicitly-declared allowlist; its output is frozen read-only; the working box never has those hosts reachable. Conflating the two policies is how "the sandbox has npm because the installer needed it" happens.
+Preparing an image needs `registry.npmjs.org` or whatever the recipe installs. Preparation happens in a **throwaway box** on the host's network; its output is frozen read-only. Everything a recipe *can* pin is an `[[image.artifact]]`, fetched and proved on the host and bound in read-only, so a build opens as few connections of its own as the recipe allows.
 
 **Preparation never runs on the host.** `npm i -g` executes arbitrary postinstall scripts. Running those on the machine wormhole exists to protect is self-defeating.
-
-### What is not solved
-
-Exfiltration through an allowlisted host wormhole does not terminate — `cargo publish`, a paste to an allowed service. Closing it needs TLS interception. **Not claimed, not implemented.** Git is not in this category: the broker already terminates git HTTPS in order to inject a token, so repo scoping is a policy check on data already in hand.
 
 ---
 
@@ -164,11 +139,10 @@ The goal: several agents, one tree, cooperating through files.
 
 If the agent is hostile, co-residency needs a boundary *between* agents, or one injected session owns every other one — it can read their memory, kill them, rewrite their persona mid-run, and spend their credential grants.
 
-**The mechanism is namespaces, not uids.** Each session gets its own PID, mount, and net namespace; all run as the same uid, so every file any of them writes on the host is yours.
+**The mechanism is namespaces, not uids.** Each session gets its own PID and mount namespace; all run as the same uid, so every file any of them writes on the host is yours.
 
 - PID namespace — session A cannot see, `ptrace`, or kill B.
-- Mount namespace — A cannot *name* B's home or B's broker socket. Isolation by non-existence, same principle as §5.
-- Net namespace — per-session forwarder, so per-session egress policy and per-session credential grants.
+- Mount namespace — A cannot *name* B's home, and so not B's login either. Isolation by non-existence, same principle as §5.
 
 Uid-per-agent was considered and is probably impossible: `mappings_overlap()` in `kernel/user_namespace.c` rejects overlapping ranges on both the inside and the outside side of a uid map, so N inside uids give N *different* host uids, of which at most one can be yours — transparency then holds for one agent only. Recorded as open assumption #1 with the exact test, because it was not executed.
 
@@ -188,12 +162,11 @@ Uid-per-agent was considered and is probably impossible: `mappings_overlap()` in
 | `/tmp`, `/dev/shm`, `/run` | rw | tmpfs, ephemeral |
 | `/etc/passwd`, `/etc/group` | ro | synthetic — your user only |
 | `/etc/hosts` | ro | synthetic — `127.0.0.1 localhost` and the box's own hostname, nothing else |
+| `/etc/resolv.conf` | ro | the manifest's `dns`, or the host's own file |
 | `/dev/{null,zero,random,urandom,tty,pts}` | rw | minimal devtmpfs |
 | everything else on the host | **absent** | — |
 
-Not mounted, ever, without an explicit grant: your home directory, other repositories, `~/.ssh`, `~/.gitconfig`, `~/.aws`, `~/.claude`, `/etc/shadow`, `/mnt`, `/media`. No credential file is reachable from inside the box — asserted on every launch (§8).
-
-**`/etc/resolv.conf` is absent on purpose.** There is no route and no resolver. Anything that needs DNS fails loudly rather than silently reaching somewhere.
+Not mounted, ever, without an explicit grant: your home directory, other repositories, `~/.ssh`, `~/.gitconfig`, `~/.aws`, `~/.claude`, `/etc/shadow`, `/mnt`, `/media`. The one exception is the login `credentials` names (§2), which lands in the box's *own* home and is counted as a grant.
 
 ### Host-identical paths
 
@@ -203,7 +176,7 @@ The workspace is mounted at the same absolute path it has on the host. Absolute 
 
 `--mount <path>` adds one host path, read-only unless `:rw`. Grants persist in `~/.config/wormhole` keyed by workspace path, and the full active set prints on every launch, so a grant you forgot cannot be silently in effect.
 
-**Mount revocation is provably incomplete.** `umount` does not invalidate already-open file descriptors and Linux offers no way to revoke one. A hostile agent that opened an fd keeps that access after you revoke the mount. Mount grants are therefore one-way within a session; revoking means restarting the box. Credential grants have no such problem — the broker stops honoring them, and that *is* retroactive.
+**Mount revocation is provably incomplete.** `umount` does not invalidate already-open file descriptors and Linux offers no way to revoke one. A hostile agent that opened an fd keeps that access after you revoke the mount. Mount grants are therefore one-way within a session; revoking means restarting the box. A shared login is a mount grant and has the same limit; a copied one is the box's own until its home is reset.
 
 ---
 
@@ -226,11 +199,11 @@ A digest mismatch refuses to boot. Cached layers are reused offline; the network
 
 ### The agent layer is shared and version-keyed
 
-`claude` is ~262 MB installed and is in no base image. It is installed **once ever**, in a throwaway box with the build-time allowlist (§2), into a read-only layer keyed by version, shared by every workspace and every role. Boots stay instant. The version is explicit and pinnable. A running box has no route to npm.
+`claude` is ~262 MB installed and is in no base image. It is installed **once ever**, in a throwaway box on the host's network (§2), into a read-only layer keyed by version, shared by every workspace and every role. Boots stay instant. The version is explicit and pinnable. A running box has no route to npm.
 
 ### Role layers, no Containerfile parser
 
-Build a role layer: boot the base read-only with a fresh empty upper, run the role's `setup` steps behind the build allowlist, freeze the upper. That upper *is* the role layer.
+Build a role layer: boot the base read-only with a fresh empty upper, run the role's `setup` steps in a throwaway box on the host's network, freeze the upper. That upper *is* the role layer.
 
 `setup` covers everything `RUN` does; `files/` covers `COPY`; `env` and `workdir` are already fields. A Dockerfile *subset* would be worse than either — familiar syntax that silently rejects `COPY --from`, multi-stage, heredocs, `ARG`. Better an obviously smaller thing than a familiar thing that lies.
 
@@ -284,8 +257,6 @@ setup = [
   "rustup toolchain install 1.96 --profile minimal -c clippy,rustfmt",
 ]
 
-egress = ["crates.io", "static.crates.io", "index.crates.io", "docs.rs"]
-
 [agents.claude]
 argv    = ["claude", "--dangerously-skip-permissions"]
 workdir = "{{workspace}}"
@@ -323,11 +294,11 @@ This is the correction of a load-bearing bug in the previous design, kept in §9
 
 ### Requests are never grants
 
-`egress`, `cpus`, `memory` are requests. `~/.config/wormhole` holds the effective ceiling.
+`grants`, `credentials`, `cpus`, `memory` are requests. `~/.config/wormhole` holds the effective ceiling.
 
 **A role's request is confirmed by diff, from the first day, including your own local roles.** The panel shows what the role asks for, you approve once, and the decision lands in the workspace config; a changed role produces a new diff. No exemption for local roles — an unconfirmed path would be a second code path that your daily use never exercises, so it would be broken the day git-sourced roles arrive and start using it. Confirming your own role also means you read it the way a stranger would.
 
-A role cannot widen its own allowlist or claim your RAM — the same hole §3 refuses for workspace definitions, one layer down.
+A role cannot hand itself your login or claim your RAM — the same hole §3 refuses for workspace definitions, one layer down.
 
 **Not built. Said plainly because it is load-bearing:** nothing bounds what a role asks for. `grants` is checked for shape — absolute, no `..`, not a symlink, no workspace overlap — and then mounted as written. A role asking for `~` gets your whole home read-write if you approve it. The confirm below is the whole of the defence today; the ceiling this section describes is the fix and is not in the code.
 
@@ -353,8 +324,7 @@ Before the PTY is handed over, and refusing to start if any assertion fails:
 
 - host prerequisites present — unprivileged `user.max_user_namespaces` non-zero, `unshare(CLONE_NEWUSER)` succeeds, Landlock ABI available
 - base rootfs digest matches its pin
-- no credential file is readable inside the box
-- no network route exists; the broker socket is the only reachable peer
+- no credential file is readable inside the box beyond the one `credentials` handed over
 - the workspace is the only host path mounted rw, plus explicitly granted ones
 - capability bounding set dropped and not reacquirable
 - the workspace lockfile was acquired
@@ -381,7 +351,7 @@ No subcommand takes a workspace argument. The workspace is where you are.
 
 ### The control plane is the TUI, and it stays alive
 
-The TUI is not a launcher that exits. It is the live control plane: **`Ctrl-\` toggles** between the agent and a panel that shows the active grants, lets you revoke a credential or approve an egress host *while the agent runs*, and answers blocked-host prompts. Revoking a credential is retroactive. Mount grants are launch-time only: changing them means restarting the box — which honest revocation already required, since open fds survive `umount` (§5). Live mount injection is post-MVP.
+The TUI is not a launcher that exits. It is the live control plane: **`Ctrl-\` toggles** between the agent and a panel that shows the active grants *while the agent runs*. Grants — the login included — are launch-time only: changing them means restarting the box — which honest revocation already required, since open fds survive `umount` (§5). Live mount injection is post-MVP.
 
 `Ctrl-\` and not `Ctrl-A`: that is tmux's and screen's prefix, and agent users live in tmux. `Ctrl-\` is unclaimed by tmux, screen, vim, and emacs; it normally sends `SIGQUIT`, which we already intercept in raw mode. Nests without configuration.
 
@@ -417,9 +387,10 @@ Every decision lives in a headless core the TUI renders. `--role X` bypasses the
 
 | Threat | Mechanism | Strength |
 |---|---|---|
-| Credential theft | secret never enters the box; broker is a separate process | strong — bounded by the broker process boundary |
-| Remote repo destruction | no outward write exists: git is fetch/clone, GitHub API is `GET` | absolute while that holds |
-| Arbitrary C2 / exfil to unknown hosts | no route; the broker socket is the only peer | architectural |
+| Theft of credentials not handed over | they do not exist in the box's mount namespace | strong |
+| Theft of the login handed over | **none** — `credentials = "none"` is the only defence, and it hands over nothing | by choice |
+| Arbitrary C2 / exfil | **none** — the box has the host's network | by choice |
+| Remote repo destruction | bounded by the login handed over; nothing else of yours is reachable | as strong as the account's scope |
 | Host filesystem outside the workspace | unmounted paths do not exist in the box's mount namespace | strong; Landlock as a second layer |
 | Host root compromise | `Namespaces`: unprivileged userns — **weak**. `MicroVM`: VMX/EPT — hypervisor bug required | **stage-dependent; the banner says which** |
 | Runaway resource use | cgroup limits, host-side ceiling | enforced |
@@ -428,13 +399,13 @@ Every decision lives in a headless core the TUI renders. `--role X` bypasses the
 
 **1. Your working tree.** The workspace is a live read-write bind mount. No snapshot, no shadow ref, no clone. Chosen deliberately: live co-editing in your own IDE, warm build caches, no sync step. Price: `rm -rf`, `git reset --hard`, and `git clean -xfd` reach your actual repository. **This is the entire remaining local blast radius and it is wide open by design.**
 
-One thing narrows it: the box holds no credential that can reach your remotes, so damage is local. **Recoverable from `origin` only for work that is committed *and pushed*.** Uncommitted edits and untracked files have no copy anywhere and are simply gone. The previous version of this document said "recoverable from `origin`" without that qualifier, which was false.
+One thing narrows it: with `credentials = "none"` the box holds no login of yours that reaches your remotes, so damage is local. **Recoverable from `origin` only for work that is committed *and pushed*.** Uncommitted edits and untracked files have no copy anywhere and are simply gone. The previous version of this document said "recoverable from `origin`" without that qualifier, which was false.
 
 A pre-session reflink snapshot (`cp -a --reflink=always`, instant on btrfs and xfs, a full copy on ext4) would give a real undo point without giving up transparency. Deliberately not in MVP; the accepted position is loss.
 
-**2. Exfiltration through an allowlisted host.** §2.
+**2. Exfiltration, anywhere.** §2. The route is open by design.
 
-**3. Anything wormhole's own broker gets wrong.** Owning the broker means owning its bugs — a parsing flaw in the HTTP path is reachable by a hostile box. Far smaller than owning a TCP/IP stack, and it holds no kernel-level privilege, but it is new surface that a naked `docker run -e KEY=...` would not have had. It is also the only place your tokens live at run time.
+**3. The login you handed over.** `copy` and `share` put your credential where the agent reads it, with every capability the account has — hosted connectors included, which execute server-side and never cross the box at all. If a box must not reach something, the account you hand it must not have it.
 
 **4. `Namespaces` shares the host kernel.** A kernel LPE reachable from an unprivileged user namespace defeats it. This is the stage-1 boundary being honestly weaker than stage 2, and it is why the banner exists.
 
@@ -442,9 +413,9 @@ A pre-session reflink snapshot (`cp -a --reflink=always`, instant on btrfs and x
 
 **6. Open file descriptors survive mount revocation.** §5. Not fixable at the mount layer.
 
-**7. Credential revocation is per box, not global.** One broker per box, so revoking a grant in one box's panel does not touch another box. A global kill would need a shared host daemon, which §12 declines. Say "this box" in the panel, never "revoked".
+**7. A handed-over login is not revocable from wormhole.** A copied file lives on in the box home until `reset`; a shared one is the host's own. Revoking means logging out at the provider.
 
-**8. Refresh races with a host-side agent.** §2. Cost is one `/login`. Accepted, not defended.
+**8. `share` races with a host-side agent.** §2. Cost is one `/login`. Accepted, not defended.
 
 ### Landlock is a second layer, not a load-bearing one
 
@@ -454,22 +425,21 @@ With our own mount namespace, a path that is not mounted does not exist, so ther
 
 ## 11. Testing
 
-TDD needs seams. Four ports drive the entire core with in-memory fakes:
+TDD needs seams. Three ports drive the entire core with in-memory fakes:
 
 - **`Boundary`** — create a box, run a process in it, get an fd pair. `Namespaces` and `MicroVM` implement it; the fake implements it for every core test.
 - **`RootFs`** — resolve a layer by digest or version. Fake serves fixtures; real pulls and verifies.
-- **`Broker`** — the egress endpoint. Fake asserts what was requested and with which credential.
 - **`Terminal`** — bytes in, bytes out. Fake is a byte vector.
 
-Unit-testable without any kernel: mount-plan computation from cwd plus grants, role manifest parsing and `files` precedence, grant persistence, layer resolution, broker policy decisions, VT screen model and restoration, lockfile semantics.
+Unit-testable without any kernel: mount-plan computation from cwd plus grants, role manifest parsing and `files` precedence, grant persistence, layer resolution, credential mode decisions, VT screen model and restoration, lockfile semantics.
 
 **The seams exist for testability, not for hypothetical backends.** `Boundary` is the one exception and it is not hypothetical — the microVM implementation is a stated deliverable.
 
 A small set of integration tests boot a real box and assert what only a real kernel can prove:
 
-- only the workspace and explicit grants are visible; no credential file is readable
+- only the workspace, explicit grants and the box's home are visible; no host credential beyond the one `credentials` named is readable
 - a file written in the box lands on the host owned by your uid, at the host-identical path
-- no route exists; a connection to any host fails; the broker socket works
+- the box reads the host's resolver, or the named one, and nothing else of `/etc`
 - capability bounding set is dropped and cannot be reacquired
 - `unshare(CLONE_NEWUSER)` from the supervisor produces sibling namespaces per session
 - these hold for the **role-build box** as well as the working box, since that is where untrusted `setup` runs
@@ -483,22 +453,21 @@ A small set of integration tests boot a real box and assert what only a real ker
 
 ### MVP
 
-Linux. `Namespaces` boundary. Workspace is the cwd. `debian:13-slim` by digest, own registry client, shared agent layer, roles from a local directory or a git commit. Broker: model API with refresh, git fetch/clone, GitHub API `GET`, `CONNECT` proxy with an empty baseline allowlist. One session. TUI control plane with `Ctrl-\`, arriving after the first runnable — launch refusals print to stderr before any PTY exists, broker errors reach the agent as HTTP responses, and the panel's first real customer is the blocked-host prompt of the `CONNECT` proxy. Launch assertions and banner.
+Linux. `Namespaces` boundary. Workspace is the cwd. `debian:13-slim` by digest, own registry client, shared agent layer, roles from a local directory or a git commit. Host network, `credentials` in three modes. One session. TUI control plane with `Ctrl-\`, arriving after the first runnable — launch refusals print to stderr before any PTY exists. Launch assertions and banner.
 
 ### Explicitly not in MVP
 
 - **`MicroVM` boundary.** Stage 2. Requires `/dev/kvm` (assumption #6) and closing libkrun issue #329 (§13).
-- **Any outward write.** No `git push`, no GitHub API mutation. You push from the host after reading the diff.
 - **Multiple sessions.** The shape is preserved (§4); the count is one.
 - **Live mount injection.** Mount grants are launch-time; changing them restarts the box. No `setns` in MVP. Revisit only if dogfooding shows real restart friction.
 - **A ceiling on what a role may ask for.** §7 describes it; nothing enforces it. A fetched role is confirmed by a person before it runs, and that confirm is the whole defence.
 - **Workspace snapshots.** §10, risk 1.
-- **TLS interception.** §2.
+- **Any network policy.** No allowlist, no proxy, no interception. §2 says why.
 - **A role registry.** Roles are directories and git URLs; both have shipped. A registry is a distribution problem and stays out.
 
 ### Size
 
-No daemon, no container runtime, nothing to install separately, and no userspace TCP/IP stack. The old estimate was 12–18k LOC. Deleting `smoltcp`, NAT, DNS, the image builder, the base-image pipeline, and the workspace registry removes most of it. `MicroVM` adds it back only for the parts a hypervisor genuinely needs.
+No daemon, no container runtime, nothing to install separately, no userspace TCP/IP stack and no broker. The old estimate was 12–18k LOC. Deleting `smoltcp`, NAT, DNS, the image builder, the base-image pipeline, the workspace registry and then the broker removes most of it. `MicroVM` adds it back only for the parts a hypervisor genuinely needs.
 
 The claim that survives is not "one static binary" — it is **no daemon, no external runtime, nothing for you to install**. `vt100` and a registry client (or `skopeo`) are dependencies.
 
@@ -511,18 +480,20 @@ The claim that survives is not "one static binary" — it is **no daemon, no ext
 | # | Assumption | If false |
 |---|---|---|
 | 1 | A uid map may not point two inside uids at one outside uid | Uid-per-agent becomes available as an alternative to §4's namespace separation. Test: `sudo unshare -U sh -c 'printf "0 1000 1\n1 1000 1\n" > /proc/self/uid_map; echo rc=$?'` — needs root because the parent must hold `CAP_SETUID`, or a different EPERM teaches nothing. |
-| 3 | Claude Code and its plugin machinery function with no `/etc/resolv.conf` and no route | Either a stub resolver that answers nothing, or the `CONNECT` proxy is pulled into MVP earlier than planned. |
+| 3 | ~~Claude Code functions with no `/etc/resolv.conf` and no route~~ — closed the hard way: it did not, reliably, and §2 gave the box the host's network | — |
 | 4 | `debian:13-slim` plus an npm-installed `claude` runs — glibc and Node versions satisfied | The agent layer needs a Node it brings itself, or the base is not slim. |
 | 5 | Per-workspace disk and inode quotas are enforceable portably | Exhaustion ships as a documented gap. |
 | 6 | This host can run `MicroVM` at all | Stage 2 is undogfoodable here. §8's earlier draft recorded this machine reporting `vmx` and `nested=Y` with **no `/dev/kvm` and no `/dev/vhost-vsock`** — unverified since. |
 | 7 | The `vt100` crate is maintained enough to depend on | Vendor it, or use a fork (`vt100-ctt`, `vt100-psmux`), or write the screen model. The API is proven; the upstream's health is not. |
 | 8 | A `setup` list is reproducible enough that a cached layer stays valid | Layer cache invalidation becomes a correctness problem, not a performance one. See spike #13 — every unpinned input in a role makes this false. |
 | 9 | `anthropic-beta: oauth-2025-04-20` is actually required when injecting an OAuth bearer | Harmless either way — spike #14 sent it unconditionally and got a 200. Worth isolating so the header set is minimal and understood rather than cargo-culted. |
-| 10 | `gh` honors a base-URL override cleanly enough to route the GitHub API through the broker | Either a shim in front of `gh`, or the agent uses plain `curl` against the broker and loses `gh`'s ergonomics. |
+| 10 | ~~`gh` honors a base-URL override cleanly enough to route the GitHub API through the broker~~ — moot: there is no broker, `gh` reaches GitHub directly with the token `[env]` asks for | — |
 
 ### Spike record
 
 Each entry keeps only the evidence that produced a decision. The resulting design lives in the section named, not here.
+
+Spikes #14 and #15 below proved the model-API broker and its token refresh; both are kept as record of a component that was later removed. It was removed because its proxy shape broke the agent in daily use — concurrent `CONNECT` tunnels it served one at a time, and endpoints it could not inject a credential into — and because the user chose an autonomous agent over the exfil protection the broker bought (§2).
 
 **#1 — TSI filtering: falsified.** libkrun's whole TSI control surface is `krun_add_vsock(ctx_id, tsi_features)` with two flags. Filtering would require forking the VMM. Led to owning a network stack — which §2 then deleted entirely by removing the box's route. Relevant only to `MicroVM`.
 

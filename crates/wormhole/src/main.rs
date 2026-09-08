@@ -1,10 +1,8 @@
 mod boundary;
-mod broker;
 mod image;
 mod panel;
 mod probes;
 mod terminfo;
-mod usage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,23 +19,6 @@ const MANIFEST: &str = "wormhole.toml";
 /// The instructions every box hands its agent, whatever the role. Baked
 /// into the binary so every workspace gets them without carrying a copy.
 const DEFAULT_INSTRUCTIONS: &str = include_str!("../../../AGENT.md");
-
-const STATUSLINE_SEED: &str = ".claude/wormhole-statusline.sh";
-
-/// The status line the agent draws during conversation. It only reads the
-/// limits file wormhole keeps fresh from the host — no credential and no
-/// network inside the box. Seeded fresh on every start, like the preflight
-/// hook, so a wormhole upgrade updates it.
-fn statusline_script() -> String {
-    format!(
-        "#!/bin/sh\n\
-         # Seeded by wormhole on every box start. Claude Code draws this line\n\
-         # while you talk to the agent; wormhole refreshes the file from the\n\
-         # host about once a minute.\n\
-         cat \"$HOME/{limits}\" 2>/dev/null || printf 'LIMITS: unknown'\n",
-        limits = usage::LIMITS_FILE,
-    )
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,18 +44,16 @@ fn main() {
         Some("rename") => rename_cmd(&args[1..]),
         Some("gc") => gc_cmd(&args[1..]),
         Some("ps") => ps(&args[1..]),
-        Some("usage") => account_usage(),
         Some("attach") => attach(&args[1..]),
         Some("env") => env_cmd(&args[1..]),
         Some("secret") => secret_cmd(&args[1..]),
-        Some("allow") => egress_cmd(&args[1..], EgressEdit::Allow),
-        Some("deny") => egress_cmd(&args[1..], EgressEdit::Deny),
         Some("tui") | None => tui(),
         // The banner is not `box`'s: §1 says every launch says which stage
         // its boundary is in, and a bare `run` is a launch.
         Some("run") => match run::parse_args(&args[1..]) {
             Ok(run_args) => {
-                println!("{}", launch::Banner::for_run(&run_args));
+                // stderr: a bare `run` pipes its command's output.
+                eprintln!("{}", launch::Banner::for_run(&run_args));
                 std::process::exit(boundary::run(
                     &run_args,
                     None,
@@ -84,9 +63,6 @@ fn main() {
             }
             Err(e) => usage(&e.to_string()),
         },
-        // The host half: holds the credential, reaches the API and the
-        // allowed hosts, and is the only thing that does any of it.
-        Some("broker") => broker::broker_cmd(&args[1..]),
         Some("__boxed") => boundary::boxed_child(&args[1..]),
         Some("__build") => boundary::boxed_build(&args[1..]),
         Some("__probe") => match args.get(1) {
@@ -654,7 +630,7 @@ fn run_box(args: &[String]) -> ! {
 
     let command = match parsed.command {
         None => manifest::launch_command(&manifest).unwrap_or_else(|e| fail(&e.to_string())),
-        Some(command) => manifest::brokered_command(&manifest, command),
+        Some(command) => command,
     };
 
     // One directory per box, named by the process that owns it, so two
@@ -690,19 +666,11 @@ fn run_box(args: &[String]) -> ! {
     );
     seed_instructions(&manifest, &manifest_dir, &home);
     seed_preflight(&manifest, &manifest_dir, &home);
-    seed_agent_config(&manifest, &workspace, &home);
-    seed_statusline(&manifest, &home);
-
-    // Keeps the limits file in the box home fresh for the status line.
-    // The thread dies with this process, which is the box's lifetime.
-    // `home` here is the box home; the host's own home — where the
-    // credential lives — is the function, shadowed by that binding.
-    // Only where the feed applies: it polls an Anthropic endpoint with
-    // the host's claude credential, which is claude's business alone.
-    if manifest::usage_feed(&manifest) {
-        let (data_home, host_home, box_home) =
-            (data_home.clone(), crate::host_home(), home.clone());
-        std::thread::spawn(move || usage::feed_box(&data_home, &host_home, &box_home));
+    let credentials = parsed.credentials.unwrap_or(manifest.access.credentials);
+    seed_agent_config(&manifest, &workspace, &home, credentials);
+    let shared_credentials = seed_credentials(credentials, &manifest, &home);
+    if manifest.access.dns.is_none() && !Path::new("/etc/resolv.conf").exists() {
+        fail("the host has no /etc/resolv.conf; set [access] dns");
     }
 
     // The undo point, and what the receipt is measured against. Taken
@@ -731,31 +699,6 @@ fn run_box(args: &[String]) -> ! {
         }
     };
 
-    // Brokering needs exactly two things in the box: the socket to speak
-    // to, and the binary that speaks to it. Both read-only, neither of
-    // them a credential — that stays on this side. The broker itself is
-    // the box's own: spawned here with this manifest's allowlist, its
-    // socket in this box's directory, killed when the box ends. Nothing
-    // to start by hand, and one box's revocation never touches another's.
-    // What this box may reach through the broker: the manifest's hosts
-    // plus the box's own kept additions, one list feeding the live file,
-    // the broker and the banner alike — so the banner can never
-    // understate what an earlier `wormhole allow` opened.
-    let egress = wormhole_core::broker::effective_egress(
-        &manifest.access.egress,
-        &read_hosts(&kept_egress(&home)),
-    );
-    let broker_child = manifest::brokers(&manifest).then(|| {
-        spawn_broker(
-            &box_dir,
-            &egress,
-            box_alias.as_deref().unwrap_or(&box_id),
-        )
-    });
-    let broker_socket = broker_child
-        .as_ref()
-        .map(|_| paths::box_broker_socket(&box_dir).display().to_string());
-
     let run_args = run::RunArgs {
         grants: manifest
             .access
@@ -763,14 +706,12 @@ fn run_box(args: &[String]) -> ! {
             .iter()
             .map(|g| expand_home(g))
             .collect(),
-        broker: broker_socket,
-        egress,
-        dns: manifest::runtime_dns(&manifest),
+        shared_credentials,
+        dns: manifest.access.dns,
         image: Some(root.display().to_string()),
         pidfile: Some(box_dir.join("init.pid").display().to_string()),
         ca: host_ca(&manifest).inspect(|bundle| println!("trusting host CA bundle {bundle}")),
         artifacts: Vec::new(),
-        network: manifest.access.network,
         root: manifest.runtime.rootfs,
         command,
     };
@@ -786,13 +727,6 @@ fn run_box(args: &[String]) -> ! {
         Some(&home),
         &manifest.limits,
     );
-    // The broker dies with its box: a socket nothing listens on is what
-    // the next start would otherwise trip over, and a broker that
-    // outlives its box holds a credential open for nobody.
-    if let Some(mut child) = broker_child {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
     // The receipt, before the box directory that holds the snapshot goes.
     // Proof of what happened, which is the part trust alone never gives.
     if let Some(before) = before {
@@ -950,10 +884,8 @@ fn holder(data_home: &Path, key: &str) -> String {
 /// pid so a refusal can name who holds it. `Ok(None)` means someone else
 /// has it.
 ///
-/// One body behind every claim wormhole makes on shared host state: a
-/// workspace, and the one poll that may ask for the account's usage
-/// windows. The kernel ends both when their holder ends, which is the
-/// whole reason neither needs reaping.
+/// One body behind every claim wormhole makes on shared host state. The
+/// kernel ends the lock when its holder ends, so nothing needs reaping.
 pub(crate) fn try_lock(file: &Path) -> Result<Option<Flock<std::fs::File>>, String> {
     match Flock::lock(open_lock(file)?, FlockArg::LockExclusiveNonblock) {
         Ok(lock) => Ok(Some(stamp(lock, file))),
@@ -1130,7 +1062,7 @@ fn register_box(
 
 /// Replaces a file in one step: write beside it, then `rename(2)` over it.
 /// The one body behind every file another process reads while we write it
-/// — a registry entry, a usage reading, a compiled terminal description.
+/// — a registry entry, a compiled terminal description.
 /// The partial is named by the writing process, so two writers never share
 /// one.
 pub(crate) fn replace_file(file: &Path, content: impl AsRef<[u8]>) -> Result<(), String> {
@@ -1384,31 +1316,6 @@ fn ps(args: &[String]) -> ! {
         report_problems(&problems);
     }
     std::process::exit(0);
-}
-
-/// What is left of the account's usage windows, fetched now. The windows
-/// belong to the subscription, not to a box, so this asks the host's own
-/// credential and says so plainly.
-fn account_usage() -> ! {
-    match usage::refresh(&data_home(), &host_home()) {
-        Ok(limits) => {
-            println!(
-                "{}",
-                wormhole_core::limits::render(Some(&limits), now_unix())
-            );
-            std::process::exit(0);
-        }
-        // A failed fetch still has something true to say if a reading is
-        // cached: its numbers, with their age.
-        Err(e) => {
-            eprintln!("wormhole: {e}");
-            println!(
-                "{}",
-                wormhole_core::limits::render(usage::cached(&data_home()).as_ref(), now_unix())
-            );
-            std::process::exit(1);
-        }
-    }
 }
 
 /// Now as unix seconds; a clock before 1970 reads as zero rather than a
@@ -2078,137 +1985,6 @@ fn read_baked_env(box_dir: &Path) -> Option<boxenv::BakedEnv> {
     Some(boxenv::parse(&text).unwrap_or_else(|e| fail(&e)))
 }
 
-use wormhole_core::broker::EgressEdit;
-
-/// `wormhole allow <box> <host>...` / `wormhole deny <box> <host>...`:
-/// change what a running box may reach, effective on its very next
-/// tunnel — the broker reads the live file per `CONNECT`, so nothing
-/// restarts, not the box and not the broker. The change is also kept in
-/// the box's home, so the next start of the same box remembers it. Only
-/// a person on the host can type this; nothing inside a box can widen
-/// its own list.
-///
-/// `deny` closes new tunnels only: one already open lives until either
-/// side hangs up, the same honesty `umount` owed to open fds.
-fn egress_cmd(args: &[String], edit: EgressEdit) -> ! {
-    let verb = match edit {
-        EgressEdit::Allow => "allow",
-        EgressEdit::Deny => "deny",
-    };
-    let [wanted, hosts @ ..] = args else {
-        usage(&format!("usage: wormhole {verb} <id|name> <host>..."));
-    };
-    if hosts.is_empty() {
-        usage(&format!("usage: wormhole {verb} {wanted} <host>..."));
-    }
-    let data_home = data_home();
-    let entry = running_box(&data_home, wanted);
-    let live = paths::egress_file(&paths::box_dir(&data_home, entry.pid));
-    if !live.exists() {
-        fail(&format!(
-            "box {wanted} has no live egress list; it does not broker, \
-             so there is nothing to {verb} on"
-        ));
-    }
-    // A deny is judged against what the box may actually reach — the
-    // live list — before anything is edited, so it can name the box.
-    if edit == EgressEdit::Deny {
-        let current = read_hosts(&live);
-        for host in hosts {
-            if !current.contains(host) {
-                fail(&format!(
-                    "{host} is not on box {wanted}'s list; nothing to deny"
-                ));
-            }
-        }
-    }
-    // The same edit lands twice: on the live file the broker reads per
-    // tunnel, and on the kept file the next start of this box reads.
-    edit_hosts(&live, hosts, edit).unwrap_or_else(|e| fail(&e));
-    let home = paths::home_dir(&data_home, &paths::box_key(&entry.workspace, &entry.box_id));
-    edit_hosts(&home.join(home::KEPT_EGRESS), hosts, edit).unwrap_or_else(|e| fail(&e));
-    for host in hosts {
-        match edit {
-            EgressEdit::Allow => println!("{host} allowed for box {wanted}, effective now"),
-            EgressEdit::Deny => println!(
-                "{host} denied for box {wanted}: new tunnels refused now; \
-                 one already open lives until it closes"
-            ),
-        }
-    }
-    std::process::exit(0)
-}
-
-/// One host-list file edited under the one rule body core owns. A deny
-/// of a host the file never had is fine here: the kept file holds only
-/// the person's own additions, and the live file was checked first.
-fn edit_hosts(file: &Path, hosts: &[String], edit: EgressEdit) -> Result<(), String> {
-    let current = read_hosts(file);
-    let edited = match wormhole_core::broker::apply_egress_edit(&current, hosts, edit) {
-        Ok(edited) => edited,
-        Err(_) if edit == EgressEdit::Deny => {
-            let mut kept = current;
-            kept.retain(|host| !hosts.contains(host));
-            kept
-        }
-        Err(e) => return Err(e),
-    };
-    replace_file(file, wormhole_core::broker::render_egress_file(&edited))
-}
-
-/// The hosts a list file holds, an absent file being an empty list.
-fn read_hosts(file: &Path) -> Vec<String> {
-    std::fs::read_to_string(file)
-        .map(|text| wormhole_core::broker::parse_egress_file(&text))
-        .unwrap_or_default()
-}
-
-/// Where a box's kept egress additions live — `wormhole allow` writes
-/// there so the same box remembers across restarts.
-fn kept_egress(home: &Path) -> PathBuf {
-    home.join(home::KEPT_EGRESS)
-}
-
-/// Starts this box's broker: the effective allowlist written where the
-/// broker re-reads it per tunnel, a socket in the box's own directory,
-/// stdout dropped (its one line is ours to say) and stderr kept — a
-/// broker's complaint belongs on the terminal that owns the box. Returns
-/// once the socket accepts, so the box never races its own way out.
-fn spawn_broker(box_dir: &Path, egress: &[String], name: &str) -> std::process::Child {
-    let socket = paths::box_broker_socket(box_dir);
-    let egress_file = paths::egress_file(box_dir);
-    replace_file(
-        &egress_file,
-        wormhole_core::broker::render_egress_file(egress),
-    )
-    .unwrap_or_else(|e| fail(&e));
-    let exe = std::env::current_exe()
-        .unwrap_or_else(|e| fail(&format!("cannot find wormhole itself: {e}")));
-    let mut broker = std::process::Command::new(exe);
-    broker
-        .args(["broker", "--socket"])
-        .arg(&socket)
-        .arg("--egress-file")
-        .arg(&egress_file)
-        .args(["--name", name])
-        .stdout(std::process::Stdio::null());
-    let mut child = broker
-        .spawn()
-        .unwrap_or_else(|e| fail(&format!("cannot start the broker: {e}")));
-    for _ in 0..100 {
-        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-            return child;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    fail(&format!(
-        "the broker never came up on {}; its error is above",
-        socket.display()
-    ));
-}
-
 /// `wormhole secret list|set|remove`: the host-side store of values a
 /// manifest's `ask` fills once. Names print; values never do. `set` reads
 /// the value masked from the terminal, or from a piped stdin — never from
@@ -2269,8 +2045,7 @@ fn read_secrets() -> wormhole_core::secrets::Store {
 
 fn write_secrets(store: &wormhole_core::secrets::Store) {
     let text = wormhole_core::secrets::to_toml(store).unwrap_or_else(|e| fail(&e));
-    replace_file_private(&paths::secrets_file(&config_home()), text)
-        .unwrap_or_else(|e| fail(&e));
+    replace_file_private(&paths::secrets_file(&config_home()), text).unwrap_or_else(|e| fail(&e));
 }
 
 /// Asks for every `ask` variable still without a value, once ever: the
@@ -2320,7 +2095,10 @@ fn prompt_secret(name: &str) -> Option<String> {
         .write(true)
         .open("/dev/tty")
         .ok()?;
-    let _ = write!(tty, "{name} (asked once, kept for every box; empty skips): ");
+    let _ = write!(
+        tty,
+        "{name} (asked once, kept for every box; empty skips): "
+    );
     let _ = tty.flush();
     let quiet = nix::sys::termios::tcgetattr(&tty).ok().inspect(|original| {
         let mut masked = original.clone();
@@ -2444,8 +2222,14 @@ fn seed_preflight(manifest: &manifest::Manifest, manifest_dir: &Path, home: &Pat
 /// Answers the agent's first-run questions in its own config file —
 /// merged, never overwritten, so logins and the agent's own choices in
 /// the kept home survive. Which file and which format is the registry's
-/// answer, not a string compared here.
-fn seed_agent_config(manifest: &manifest::Manifest, workspace: &Path, home: &Path) {
+/// answer, not a string compared here. A login handed over carries the
+/// host's account fields along, where the box has none of its own.
+fn seed_agent_config(
+    manifest: &manifest::Manifest,
+    workspace: &Path,
+    home: &Path,
+    credentials: manifest::Credentials,
+) {
     let Some(kind) = manifest::config_seed(manifest) else {
         return;
     };
@@ -2453,18 +2237,16 @@ fn seed_agent_config(manifest: &manifest::Manifest, workspace: &Path, home: &Pat
         manifest::ConfigSeed::ClaudeJson => ".claude.json",
         manifest::ConfigSeed::CodexToml => ".codex/config.toml",
     });
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)
-            .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", parent.display())));
-    }
-    let existing = match std::fs::read_to_string(&file) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => fail(&format!("cannot read {}: {e}", file.display())),
-    };
+    let existing = read_if_present(&file);
     let workspace = workspace.display().to_string();
     let config = match kind {
-        manifest::ConfigSeed::ClaudeJson => seed::claude_config(existing.as_deref(), &workspace),
+        manifest::ConfigSeed::ClaudeJson => {
+            let host_login = match credentials {
+                manifest::Credentials::None => None,
+                _ => read_if_present(&host_home().join(".claude.json")),
+            };
+            seed::claude_config(existing.as_deref(), &workspace, host_login.as_deref())
+        }
         manifest::ConfigSeed::CodexToml => seed::codex_config(
             existing.as_deref(),
             &workspace,
@@ -2472,31 +2254,62 @@ fn seed_agent_config(manifest: &manifest::Manifest, workspace: &Path, home: &Pat
         ),
     }
     .unwrap_or_else(|e| fail(&e));
-    std::fs::write(&file, config)
-        .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", file.display())));
+    replace_file(&file, config).unwrap_or_else(|e| fail(&e));
 }
 
-/// Plants the status-line script and points Claude Code's settings at it,
-/// so the account's usage windows show during conversation. The script is
-/// re-seeded every start; the settings entry is merged, and a status line
-/// the user configured themselves wins. Tied to the usage feed — the
-/// script renders the file that feed keeps fresh, and both read Anthropic.
-fn seed_statusline(manifest: &manifest::Manifest, home: &Path) {
-    if !manifest::usage_feed(manifest) {
-        return;
-    }
-    seed_file(home, STATUSLINE_SEED, &statusline_script());
-    let file = home.join(".claude/settings.json");
-    let existing = match std::fs::read_to_string(&file) {
+/// A file's text, `None` when there is no such file.
+fn read_if_present(file: &Path) -> Option<String> {
+    match std::fs::read_to_string(file) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => fail(&format!("cannot read {}: {e}", file.display())),
-    };
-    let command = format!("sh \"$HOME/{STATUSLINE_SEED}\"");
-    let settings =
-        seed::claude_settings(existing.as_deref(), &command).unwrap_or_else(|e| fail(&e));
-    std::fs::write(&file, settings)
-        .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", file.display())));
+    }
+}
+
+/// Hands the box the login this start asked for. Returns the host files a
+/// `share` binds read-write, as `(host file, path in the box home)`; the
+/// bind is the boundary's, the mount point is made here.
+///
+/// A `copy` is once: a box that already has the file keeps it. A host
+/// with no login to give is refused by name.
+fn seed_credentials(
+    mode: manifest::Credentials,
+    manifest: &manifest::Manifest,
+    home: &Path,
+) -> Vec<(String, String)> {
+    if mode == manifest::Credentials::None {
+        return Vec::new();
+    }
+    let host = host_home();
+    let mut shared = Vec::new();
+    for file in manifest::credential_files(manifest) {
+        let source = host.join(file);
+        if !source.is_file() {
+            fail(&format!(
+                "credentials = \"{mode}\", but the host has no {}; \
+                 log in on the host first, or start with --credentials none",
+                source.display()
+            ));
+        }
+        let target = home.join(file);
+        if mode == manifest::Credentials::Share {
+            println!("credentials: sharing {} read-write", source.display());
+            shared.push((source.display().to_string(), (*file).to_owned()));
+        }
+        if target.exists() {
+            continue;
+        }
+        let seed = match mode {
+            manifest::Credentials::Copy => {
+                println!("credentials: copied {} into the box home", source.display());
+                std::fs::read(&source)
+                    .unwrap_or_else(|e| fail(&format!("cannot read {}: {e}", source.display())))
+            }
+            _ => Vec::new(),
+        };
+        replace_file_private(&target, seed).unwrap_or_else(|e| fail(&e));
+    }
+    shared
 }
 
 /// The host's CA bundle, when the manifest asks to trust it: the first of

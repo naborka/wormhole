@@ -7,8 +7,9 @@ including the one thing a mount plan cannot show.
 
 ## The boundary
 
-A box is user, mount, UTS and PID namespaces — and, when the manifest asks
-for one, a network namespace too. Inside:
+A box is user, mount, UTS and PID namespaces. No network namespace: the
+box is on the host's network, which is the one thing here that is not
+default deny — see [what it can dial](#what-it-can-dial). Inside:
 
 - **Root filesystem** — a writable, throwaway copy of the image. Deleted
   on exit; nothing the agent does survives into the next box or back into
@@ -25,14 +26,13 @@ for one, a network namespace too. Inside:
 - **Home** — a kept directory per box under
   `~/.local/share/wormhole/homes/`, mounted as the box's `$HOME`. Logins
   and history survive between boxes. Wormhole also writes into it: the
-  agent's instructions and, for a `claude` box, once a minute
-  `.claude/wormhole-limits` — the account's usage windows, rendered on
-  the host so the box needs no credential and no extra network reach to
-  show them. The feed reads an Anthropic endpoint, so other agents do
-  not get one.
+  agent's instructions, the preflight hook, and — only in the
+  `credentials` mode you named — your login. See
+  [credentials](credentials.md).
 - **Environment** — only declared variables. An undeclared host variable
   never reaches the box.
-- **DNS** — the one named resolver, or none.
+- **DNS** — the manifest's named resolver, or the host's own
+  `/etc/resolv.conf` bound read-only.
 
 Four things hold that are not mounts, and none of them can be turned off:
 
@@ -54,30 +54,23 @@ Four things hold that are not mounts, and none of them can be turned off:
 
 ## What it can dial
 
-By default: nothing it was not given. The box gets a network namespace
-of its own holding only loopback — there is **no route** off the
-machine, rather than a filter in front of one — and reaches out through
-the broker alone: the model API with no credential in the box, and the
-manifest's `egress` hosts over `CONNECT`, resolved and dialed host-side.
-See [the broker](broker.md).
+Anything the host can. The box shares the host's network: every route,
+every resolver the host reaches. Nothing in wormhole filters a
+connection, and nothing pretends to. The line that holds is the
+filesystem one above — what the box can *read* and *write* of your
+machine — plus what it logs in as, which is the next section.
 
-```toml
-[access]
-network = "host"     # the opt-out: every route the host has
-```
-
-With `network = "host"` the box can open connections wherever the host
-can; the resolver line and default-deny grants bound what it can *find*
-and *read*, not what it can *dial*. Every launch prints which of these
-it got:
+Every launch prints what it got:
 
 ```
-boundary: namespaces (host kernel SHARED) · egress: model api + 5 allowed hosts via the broker · workspace: rw · grants: 0
+boundary: namespaces (host kernel SHARED) · egress: host network (host resolver) · workspace: rw · grants: 1
 ```
 
 That line is not decoration. A staged boundary that does not say which
 stage it is in is a lie, so it is the last thing printed before the agent
-takes the terminal — and it names every way out the box actually has.
+takes the terminal. The grant count includes every host path bound in —
+a `[access] grants` entry, the CA bundle `host_ca` mounts, and a shared
+credential file — so a login handed over never goes uncounted.
 
 ## What it can use of the machine
 
@@ -198,10 +191,10 @@ Check what actually made it in:
 grep -c CERTIFICATE /etc/ssl/certs/ca-certificates.crt
 ```
 
-## What a credential grant really carries
+## What a credential really carries
 
-A grant is a file, but what the file *unlocks* travels with it. The
-canonical example: granting `~/.claude/.credentials.json` gives the boxed
+A login is a file, but what the file *unlocks* travels with it. The
+canonical example: `credentials = "copy"` or `"share"` gives the boxed
 Claude Code your claude.ai login — and everything attached to that
 account.
 
@@ -209,18 +202,17 @@ That includes hosted MCP connectors (Atlassian JIRA and Confluence,
 Slack, Gmail, Google Drive, ...). Ask the boxed agent whether it can reach
 JIRA and it truthfully answers yes. No JIRA traffic crosses the box
 boundary: the agent asks Anthropic's servers, and the connector runs
-server-side against the account's authorization. Neither the mount plan
-nor [the broker](broker.md) can see or stop it, because from the box it is
-just the same API endpoint the agent already needs for inference. The
-broker moving the credential to the host does not narrow this: it is the
-account's reach, not the box's.
+server-side against the account's authorization. The mount plan cannot
+see or stop it, because from the box it is just the same API endpoint the
+agent already needs for inference.
 
-So read a credentials grant as: **the box may act as this account** —
+So read a handed-over login as: **the box may act as this account** —
 with every capability the account has, wherever that capability actually
-executes. The preview shows the file; the account's connector list lives
+executes. The preview shows the mode; the account's connector list lives
 outside wormhole's sight. If a box must not reach JIRA, the account you
-hand it must not have JIRA attached: use a separate agent account for
-boxed work, or detach connectors from the one you grant.
+hand it must not have JIRA attached: log in inside the box with a
+separate account (`credentials = "none"`), or detach connectors from the
+one you copy or share.
 
-The same reading applies to any credential: `~/.ssh` is not a directory,
-it is every host those keys open.
+The same reading applies to any grant: `~/.ssh` is not a directory, it
+is every host those keys open.

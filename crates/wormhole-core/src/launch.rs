@@ -12,8 +12,6 @@ pub struct LaunchFacts {
     pub base_digest_mismatch: Option<DigestMismatch>,
     /// Credential paths that turned out readable from inside the box.
     pub readable_credentials: Vec<PathBuf>,
-    /// Network routes that exist besides the broker socket.
-    pub unexpected_routes: Vec<String>,
     /// Host paths mounted rw that the mount plan did not put there.
     pub unplanned_rw_mounts: Vec<PathBuf>,
     /// Capabilities still in the bounding set that must be gone.
@@ -34,7 +32,6 @@ pub struct DigestMismatch {
 pub enum Violation {
     BaseDigestMismatch { expected: String, actual: String },
     CredentialReadable(PathBuf),
-    RouteExists(String),
     UnplannedRwMount(PathBuf),
     CapabilityRetained(String),
     WorkspaceLocked { pid: u32 },
@@ -52,9 +49,6 @@ impl fmt::Display for Violation {
                 "credential file {} is readable inside the box",
                 p.display()
             ),
-            Violation::RouteExists(r) => {
-                write!(f, "network route exists beyond the broker: {r}")
-            }
             Violation::UnplannedRwMount(p) => write!(
                 f,
                 "host path {} is mounted rw but is not in the plan",
@@ -83,9 +77,6 @@ pub fn assert_launch(facts: &LaunchFacts) -> Result<(), Vec<Violation>> {
     }
     for p in &facts.readable_credentials {
         violations.push(Violation::CredentialReadable(p.clone()));
-    }
-    for r in &facts.unexpected_routes {
-        violations.push(Violation::RouteExists(r.clone()));
     }
     for p in &facts.unplanned_rw_mounts {
         violations.push(Violation::UnplannedRwMount(p.clone()));
@@ -246,42 +237,23 @@ impl Banner {
     /// whole launch rather than a few fields of it.
     ///
     /// Taking `RunArgs` is the point. Assembling the banner from hand-picked
-    /// fields is what let a brokered box print `egress: none` while it was
-    /// reaching the model API through the broker's socket — a new way out
-    /// was added and the banner was not told. Every way out and every host
+    /// fields is how a new way out, or a new host path bound in, gets
+    /// added without the banner being told. Every way out and every host
     /// path bound in is decided here, so the next one cannot be added
     /// without passing through this function.
     pub fn for_run(args: &crate::run::RunArgs) -> Self {
-        let mut egress = Vec::new();
-        // Mediated and narrow, but a way out: the box speaks to a socket
-        // the host serves, and what comes back is the model API — plus
-        // every host the allowlist tunnels, counted so the banner never
-        // understates what the box can reach.
-        if args.broker.is_some() {
-            egress.push(match args.egress.len() {
-                0 => "model api via the broker".to_owned(),
-                n => format!("model api + {n} allowed hosts via the broker"),
-            });
-        }
-        match (args.network, args.dns) {
-            // A namespace of its own with nothing but loopback in it takes
-            // no route away that the box still has — it adds nothing to the
-            // list, and an empty list is the one honest `none`.
-            (crate::run::Network::None, _) => {}
-            (crate::run::Network::Host, Some(dns)) => {
-                egress.push(format!("host network (dns {dns})"))
-            }
-            (crate::run::Network::Host, None) => {
-                egress.push("host network (no resolver)".to_owned())
-            }
-        }
+        let egress = vec![match args.dns {
+            Some(dns) => format!("host network (dns {dns})"),
+            None => "host network (host resolver)".to_owned(),
+        }];
         Banner {
             boundary: Boundary::Namespaces,
             egress,
-            // A CA bundle is a host path bound into the box exactly like a
-            // grant, and a count that leaves it out understates what was
-            // handed in.
-            grant_count: args.grants.len() + usize::from(args.ca.is_some()),
+            // A CA bundle and a shared credential are host paths bound in
+            // exactly like a grant.
+            grant_count: args.grants.len()
+                + usize::from(args.ca.is_some())
+                + args.shared_credentials.len(),
         }
     }
 }
@@ -420,13 +392,6 @@ mod tests {
             ),
             (
                 LaunchFacts {
-                    unexpected_routes: vec!["default via 10.0.0.1".into()],
-                    ..Default::default()
-                },
-                Violation::RouteExists("default via 10.0.0.1".into()),
-            ),
-            (
-                LaunchFacts {
                     unplanned_rw_mounts: vec![PathBuf::from("/etc")],
                     ..Default::default()
                 },
@@ -503,17 +468,17 @@ mod tests {
         );
     }
 
-    /// A box in the host's network namespace reaches everything the host
-    /// does. The banner exists to stop the boundary overstating itself, so
-    /// that case must never render as `none`.
+    /// A box is on the host's network and reaches everything the host
+    /// does. The banner exists to stop the boundary overstating itself,
+    /// so that must never render as `none`, and the resolver it was given
+    /// is named.
     #[test]
-    fn a_namespaces_banner_never_claims_an_egress_the_box_does_not_have() {
+    fn a_namespaces_banner_says_host_network_and_which_resolver() {
         let mut args = run_args();
-        args.network = crate::run::Network::Host;
         let without = Banner::for_run(&args);
         assert_eq!(
             without.to_string(),
-            "boundary: namespaces (host kernel SHARED) · egress: host network (no resolver) · workspace: rw · grants: 0"
+            "boundary: namespaces (host kernel SHARED) · egress: host network (host resolver) · workspace: rw · grants: 0"
         );
         args.dns = Some("1.1.1.1".parse().expect("address"));
         args.grants = vec!["/home/n/.ssh".to_owned(), "/home/n/.gnupg".to_owned()];
@@ -523,23 +488,6 @@ mod tests {
         for banner in [without, with] {
             assert!(!banner.to_string().contains("egress: none"), "{banner}");
         }
-    }
-
-    /// And the one case where `none` is the truth: a network namespace of
-    /// the box's own, holding nothing but loopback. There is no route to
-    /// take, rather than a filter in front of one — which is why this is
-    /// the only shape allowed to say so.
-    #[test]
-    fn a_box_with_its_own_network_namespace_says_none_because_it_is_true() {
-        let mut args = run_args();
-        args.grants = vec!["/home/n/.ssh".to_owned()];
-        let alone = Banner::for_run(&args);
-        assert!(alone.to_string().contains("egress: none"), "{alone}");
-        // A resolver named for a box that has no route to it is noise.
-        args.grants.clear();
-        args.dns = Some("1.1.1.1".parse().expect("address"));
-        let ignored = Banner::for_run(&args);
-        assert!(!ignored.to_string().contains("1.1.1.1"), "{ignored}");
     }
 
     #[test]
@@ -560,55 +508,25 @@ mod tests {
             pidfile: None,
             ca: None,
             artifacts: Vec::new(),
-            broker: None,
-            egress: Vec::new(),
-            network: crate::run::Network::None,
+            shared_credentials: Vec::new(),
             root: crate::run::RootMode::default(),
             command: vec!["sh".to_owned()],
         }
     }
 
-    /// The pairing the design aims at — no network namespace of its own,
-    /// the broker as the only way out — is exactly the one the banner used
-    /// to call `none`. The box reaches the model API through that socket,
-    /// so `none` is as false here as it is on the host network.
-    #[test]
-    fn a_brokered_box_names_the_one_way_out_it_has() {
-        let mut args = run_args();
-        args.broker = Some("/data/wormhole/broker.sock".to_owned());
-        let banner = Banner::for_run(&args);
-        assert!(!banner.to_string().contains("egress: none"), "{banner}");
-        assert!(
-            banner.to_string().contains("model api via the broker"),
-            "{banner}"
-        );
-    }
-
-    /// A broker does not take the host network away. A box that has both
-    /// says both, in the order that puts the wider reach last.
-    #[test]
-    fn a_brokered_box_on_the_host_network_says_both() {
-        let mut args = run_args();
-        args.broker = Some("/data/wormhole/broker.sock".to_owned());
-        args.network = crate::run::Network::Host;
-        args.dns = Some("1.1.1.1".parse().expect("address"));
-        assert_eq!(
-            Banner::for_run(&args).egress,
-            vec![
-                "model api via the broker".to_owned(),
-                "host network (dns 1.1.1.1)".to_owned()
-            ]
-        );
-    }
-
     /// Every host path bound into the box counts, not just the ones the
     /// manifest calls `grants`: a CA bundle is a host path the box can
-    /// read.
+    /// read, and a shared credential is one it can write.
     #[test]
     fn the_grant_count_covers_every_host_path_bound_in() {
         let mut args = run_args();
         args.grants = vec!["/home/n/.ssh".to_owned()];
         args.ca = Some("/etc/ssl/certs/ca-certificates.crt".to_owned());
         assert_eq!(Banner::for_run(&args).grant_count, 2);
+        args.shared_credentials = vec![(
+            "/home/n/.claude/.credentials.json".to_owned(),
+            ".claude/.credentials.json".to_owned(),
+        )];
+        assert_eq!(Banner::for_run(&args).grant_count, 3);
     }
 }

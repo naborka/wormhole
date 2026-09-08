@@ -9,7 +9,7 @@
 - [The manifest](guide/manifest.md)
 - [Boxes](guide/boxes.md)
 - [Roles](guide/roles.md)
-- [The broker](guide/broker.md)
+- [Credentials](guide/credentials.md)
 - [What the box can reach](guide/access.md)
 - [What every box tells its agent](agent.md)
 - [What changed](changelog.md)

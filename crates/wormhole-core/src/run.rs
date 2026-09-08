@@ -6,14 +6,13 @@ use std::fmt;
 use std::net::IpAddr;
 
 /// Command line after the `run` subcommand:
-/// `[--grant <path>]... [--dns <address>] [--image <dir>] -- <command> [args...]`.
+/// `[--grant <path>]... [--dns <address>] [--image <dir>] [--share <file> <home path>]... -- <command> [args...]`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RunArgs {
     /// Host paths to bind read-write into the box, as the user typed them.
     pub grants: Vec<String>,
-    /// The one resolver the box may use. `None` means no DNS at all, which
-    /// is the default: a box with no resolver fails loudly instead of
-    /// quietly reaching somewhere. Interim until the broker (Step 8).
+    /// The one resolver the box may use. `None` means the host's own
+    /// `/etc/resolv.conf`, bound read-only.
     pub dns: Option<IpAddr>,
     /// A built image directory to use as the box's root. Absent means the
     /// interim host `/usr`, which goes away when layers land.
@@ -29,17 +28,10 @@ pub struct RunArgs {
     /// `(host file, path in the box)`, bound read-only. How a build box
     /// gets the recipe's artifacts without opening a connection itself.
     pub artifacts: Vec<(String, String)>,
-    /// The host-side broker's socket. Bound read-only at a fixed box
-    /// path, together with wormhole's own binary, so the box can reach the
-    /// API without a credential or a route.
-    pub broker: Option<String>,
-    /// Every host the broker's `CONNECT` leg admits for this box — the
-    /// manifest's plus the kept additions. On the struct the banner is
-    /// computed from, so a way out can never bypass the line that
-    /// promises to name every way out. The child process ignores it;
-    /// enforcement is the broker's, host-side.
-    pub egress: Vec<String>,
-    pub network: Network,
+    /// `(host file, path relative to the box home)`, bound read-write:
+    /// `credentials = "share"`. On the struct the banner is computed from,
+    /// so a host path handed in can never go uncounted.
+    pub shared_credentials: Vec<(String, String)>,
     pub root: RootMode,
     pub command: Vec<String>,
 }
@@ -72,31 +64,6 @@ impl fmt::Display for RootMode {
     }
 }
 
-/// What the box can reach at the network layer.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Network {
-    /// The host's network namespace: every route the host has, the box
-    /// has. The opt-in escape hatch (`--network host`), no longer any
-    /// default: the broker is how a box reaches out now.
-    Host,
-    /// A network namespace of the box's own, holding nothing but loopback.
-    /// `connect()` to anything off the machine fails because there is no
-    /// route, not because something filtered it. The default everywhere —
-    /// default deny is the whole design, said once here.
-    #[default]
-    None,
-}
-
-impl fmt::Display for Network {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Network::Host => write!(f, "host"),
-            Network::None => write!(f, "none"),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
     MissingSeparator,
@@ -109,9 +76,9 @@ pub enum ParseError {
     PidfileWithoutPath,
     CaWithoutPath,
     ArtifactWithoutPaths,
-    BrokerWithoutPath,
-    NetworkWithoutMode,
-    NetworkNotAMode(String),
+    ShareWithoutPaths,
+    CredentialsWithoutMode,
+    CredentialsNotAMode(String),
     RootWithoutMode,
     RootNotAMode(String),
     AttachUsage,
@@ -151,14 +118,18 @@ impl fmt::Display for ParseError {
                 f,
                 "--artifact needs the host file and the path it takes in the box"
             ),
-            ParseError::BrokerWithoutPath => write!(f, "--broker needs a socket path"),
-            ParseError::NetworkWithoutMode => write!(f, "--network needs host or none"),
+            ParseError::ShareWithoutPaths => {
+                write!(f, "--share needs a host file and a box path")
+            }
+            ParseError::CredentialsWithoutMode => {
+                write!(f, "--credentials needs none, copy or share")
+            }
             ParseError::RootWithoutMode => write!(f, "--root needs copy or readonly"),
             ParseError::RootNotAMode(value) => {
                 write!(f, "--root wants copy or readonly, not {value}")
             }
-            ParseError::NetworkNotAMode(value) => {
-                write!(f, "--network wants host or none, not {value}")
+            ParseError::CredentialsNotAMode(value) => {
+                write!(f, "--credentials wants none, copy or share, not {value}")
             }
             ParseError::AttachUsage => {
                 write!(
@@ -216,8 +187,7 @@ pub fn parse_args(args: &[String]) -> Result<RunArgs, ParseError> {
     let mut pidfile = None;
     let mut ca = None;
     let mut artifacts = Vec::new();
-    let mut broker = None;
-    let mut network = Network::default();
+    let mut shared_credentials = Vec::new();
     let mut root = RootMode::default();
     let mut flags = before.iter();
     while let Some(flag) = flags.next() {
@@ -251,14 +221,6 @@ pub fn parse_args(args: &[String]) -> Result<RunArgs, ParseError> {
                 let target = flags.next().ok_or(ParseError::ArtifactWithoutPaths)?;
                 artifacts.push((source.clone(), target.clone()));
             }
-            "--network" => {
-                let value = flags.next().ok_or(ParseError::NetworkWithoutMode)?;
-                network = match value.as_str() {
-                    "host" => Network::Host,
-                    "none" => Network::None,
-                    other => return Err(ParseError::NetworkNotAMode(other.to_owned())),
-                };
-            }
             "--root" => {
                 let value = flags.next().ok_or(ParseError::RootWithoutMode)?;
                 root = match value.as_str() {
@@ -267,9 +229,10 @@ pub fn parse_args(args: &[String]) -> Result<RunArgs, ParseError> {
                     other => return Err(ParseError::RootNotAMode(other.to_owned())),
                 };
             }
-            "--broker" => {
-                let path = flags.next().ok_or(ParseError::BrokerWithoutPath)?;
-                broker = Some(path.clone());
+            "--share" => {
+                let source = flags.next().ok_or(ParseError::ShareWithoutPaths)?;
+                let target = flags.next().ok_or(ParseError::ShareWithoutPaths)?;
+                shared_credentials.push((source.clone(), target.clone()));
             }
             other => return Err(ParseError::UnknownFlag(other.to_owned())),
         }
@@ -281,10 +244,7 @@ pub fn parse_args(args: &[String]) -> Result<RunArgs, ParseError> {
         pidfile,
         ca,
         artifacts,
-        broker,
-        // A bare `run` spawns no broker, so there is nothing to admit.
-        egress: Vec::new(),
-        network,
+        shared_credentials,
         root,
         command: command.to_vec(),
     })
@@ -321,14 +281,13 @@ pub fn to_argv(args: &RunArgs) -> Vec<String> {
         argv.push(source.clone());
         argv.push(target.clone());
     }
-    if let Some(broker) = &args.broker {
-        argv.push("--broker".to_owned());
-        argv.push(broker.clone());
+    for (source, target) in &args.shared_credentials {
+        argv.push("--share".to_owned());
+        argv.push(source.clone());
+        argv.push(target.clone());
     }
     argv.push("--root".to_owned());
     argv.push(args.root.to_string());
-    argv.push("--network".to_owned());
-    argv.push(args.network.to_string());
     argv.push("--".to_owned());
     argv.extend(args.command.iter().cloned());
     argv
@@ -354,6 +313,9 @@ pub struct BoxArgs {
     pub command: Option<Vec<String>>,
     /// Variables declared on the command line, on top of the manifest's.
     pub env: Vec<EnvArg>,
+    /// Where this start's agent login comes from, when typed; `None`
+    /// takes the manifest's answer.
+    pub credentials: Option<crate::manifest::Credentials>,
 }
 
 /// One `--env` flag: a variable named with the host's value (`NAME`) or
@@ -396,12 +358,22 @@ pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
     let mut new = false;
     let mut alias = None;
     let mut env = Vec::new();
+    let mut credentials = None;
     let mut flags = before.iter();
     while let Some(flag) = flags.next() {
         match flag.as_str() {
             "--env" => env.push(parse_env_arg(
                 flags.next().ok_or(ParseError::EnvWithoutName)?,
             )?),
+            "--credentials" => {
+                let mode = flags.next().ok_or(ParseError::CredentialsWithoutMode)?;
+                credentials = Some(match mode.as_str() {
+                    "none" => crate::manifest::Credentials::None,
+                    "copy" => crate::manifest::Credentials::Copy,
+                    "share" => crate::manifest::Credentials::Share,
+                    other => return Err(ParseError::CredentialsNotAMode(other.to_owned())),
+                });
+            }
             "--role" => role = Some(flags.next().ok_or(ParseError::RoleWithoutName)?.clone()),
             "--as" => {
                 let wanted = flags.next().ok_or(ParseError::AliasWithoutName)?;
@@ -432,6 +404,7 @@ pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
         alias,
         command,
         env,
+        credentials,
     })
 }
 
@@ -638,9 +611,10 @@ mod tests {
                     "/tmp/two".to_owned(),
                 ),
             ],
-            broker: Some("/data/wormhole/broker.sock".to_owned()),
-            egress: Vec::new(),
-            network: Network::None,
+            shared_credentials: vec![(
+                "/home/me/.claude/.credentials.json".to_owned(),
+                ".claude/.credentials.json".to_owned(),
+            )],
             root: RootMode::Readonly,
             command: strings(&["sh", "-c", "ls -a"]),
         };
@@ -653,9 +627,7 @@ mod tests {
             pidfile: None,
             ca: None,
             artifacts: Vec::new(),
-            broker: None,
-            egress: Vec::new(),
-            network: Network::default(),
+            shared_credentials: Vec::new(),
             root: RootMode::default(),
             command: strings(&["/bin/true"]),
         };
@@ -674,9 +646,7 @@ mod tests {
                 pidfile: None,
                 ca: None,
                 artifacts: Vec::new(),
-                broker: None,
-                egress: Vec::new(),
-                network: Network::default(),
+                shared_credentials: Vec::new(),
                 root: RootMode::default(),
                 command: strings(&["/bin/true"])
             })
@@ -695,9 +665,7 @@ mod tests {
                 pidfile: None,
                 ca: None,
                 artifacts: Vec::new(),
-                broker: None,
-                egress: Vec::new(),
-                network: Network::default(),
+                shared_credentials: Vec::new(),
                 root: RootMode::default(),
                 command: strings(&["ls", "-a", "/"])
             })
@@ -716,9 +684,7 @@ mod tests {
                 pidfile: None,
                 ca: None,
                 artifacts: Vec::new(),
-                broker: None,
-                egress: Vec::new(),
-                network: Network::default(),
+                shared_credentials: Vec::new(),
                 root: RootMode::default(),
                 command: strings(&["sh", "--", "-c"])
             })
@@ -760,9 +726,7 @@ mod tests {
                 pidfile: None,
                 ca: None,
                 artifacts: Vec::new(),
-                broker: None,
-                egress: Vec::new(),
-                network: Network::default(),
+                shared_credentials: Vec::new(),
                 root: RootMode::default(),
                 command: strings(&["/bin/true"]),
             })
@@ -801,9 +765,7 @@ mod tests {
                 pidfile: None,
                 ca: None,
                 artifacts: Vec::new(),
-                broker: None,
-                egress: Vec::new(),
-                network: Network::default(),
+                shared_credentials: Vec::new(),
                 root: RootMode::default(),
                 command: strings(&["/bin/true"]),
             })
@@ -838,9 +800,7 @@ mod tests {
                 pidfile: None,
                 ca: None,
                 artifacts: Vec::new(),
-                broker: None,
-                egress: Vec::new(),
-                network: Network::default(),
+                shared_credentials: Vec::new(),
                 root: RootMode::default(),
                 command: strings(&["sh", "--grant", "/x"]),
             })
@@ -889,7 +849,8 @@ mod tests {
                 new: false,
                 alias: None,
                 command: None,
-                env: Vec::new()
+                env: Vec::new(),
+                credentials: None,
             })
         );
     }
@@ -904,7 +865,8 @@ mod tests {
                 new: false,
                 alias: None,
                 command: Some(strings(&["sh"])),
-                env: Vec::new()
+                env: Vec::new(),
+                credentials: None,
             })
         );
         assert_eq!(
@@ -915,7 +877,8 @@ mod tests {
                 new: false,
                 alias: None,
                 command: None,
-                env: Vec::new()
+                env: Vec::new(),
+                credentials: None,
             })
         );
     }
@@ -940,6 +903,34 @@ mod tests {
                 .expect("valid")
                 .id,
             Some("0123456789ab".to_owned())
+        );
+    }
+
+    /// `--credentials` names one of the three answers and refuses
+    /// anything else, so a typo cannot fall back to sharing a login.
+    #[test]
+    fn a_box_takes_its_login_mode_by_name() {
+        for (spelled, wanted) in [
+            ("none", crate::manifest::Credentials::None),
+            ("copy", crate::manifest::Credentials::Copy),
+            ("share", crate::manifest::Credentials::Share),
+        ] {
+            assert_eq!(
+                parse_box_args(&strings(&["--credentials", spelled])).map(|args| args.credentials),
+                Ok(Some(wanted))
+            );
+        }
+        assert_eq!(
+            parse_box_args(&strings(&[])).map(|args| args.credentials),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_box_args(&strings(&["--credentials"])),
+            Err(ParseError::CredentialsWithoutMode)
+        );
+        assert_eq!(
+            parse_box_args(&strings(&["--credentials", "borrow"])),
+            Err(ParseError::CredentialsNotAMode("borrow".to_owned()))
         );
     }
 
@@ -1064,7 +1055,7 @@ mod tests {
             Ok(AttachArgs {
                 id: "0123456789ab".to_owned(),
                 command: None,
-                env: Vec::new()
+                env: Vec::new(),
             })
         );
     }
@@ -1076,7 +1067,7 @@ mod tests {
             Ok(AttachArgs {
                 id: "0123456789ab".to_owned(),
                 command: Some(strings(&["claude", "-r"])),
-                env: Vec::new()
+                env: Vec::new(),
             })
         );
     }

@@ -13,6 +13,17 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// What every box is told about its terminal unless the manifest says
+/// otherwise. `TERM` falls back to a name every image's ncurses carries,
+/// for when there was no host description to carry across; the other
+/// three pass the host's value through and describe what `TERM` does not.
+pub const ENV_DEFAULTS: [(&str, &str); 4] = [
+    ("TERM", "xterm-256color"),
+    ("COLORTERM", ""),
+    ("TERM_PROGRAM", ""),
+    ("TERM_PROGRAM_VERSION", ""),
+];
+
 /// Where the box reads descriptions it was given. ncurses searches this
 /// before any system directory and without being told to, so nothing in
 /// the box needs configuring.

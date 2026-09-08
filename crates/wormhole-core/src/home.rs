@@ -16,12 +16,6 @@ use crate::table;
 /// Where a box's record sits, relative to its home.
 pub const RECORD: &str = ".wormhole/box.toml";
 
-/// The box's kept egress additions, relative to its home: what
-/// `wormhole allow` appended, surviving the box's restarts the way its
-/// history does. The manifest stays the role's word; this is the
-/// person's, for this one box.
-pub const KEPT_EGRESS: &str = ".wormhole/egress-extra";
-
 /// What wormhole wrote there before boxes had ids: the workspace path,
 /// alone. Still read, so a home from before this change is picked up as
 /// its workspace's first box rather than orphaned.

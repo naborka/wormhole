@@ -5,7 +5,7 @@ Update this file in the same commit as the change it records.
 `CONCEPT.md` says what and why, `PLAN.md` says in what order and with which tests. This file only tracks state.
 `AGENT.md` holds the default instructions every box hands its agent, baked into the binary and seeded into the box home on every start.
 
-Tests today: **499** (`cargo test`: 394 pure, 105 binary), **31 kernel** (`cargo test -p wormhole --features kernel-tests`, real host only). The 17 in `tests/build.rs` fetch a rootfs through `curl`, so they need one on the host; everything else runs anywhere.
+Tests today: `cargo test --workspace` green (pure core plus the binary's suites), **33 kernel** (`cargo test -p wormhole --features kernel-tests`, real host only) of which 31 pass — see the two build-box tests under known gaps. The 17 in `tests/build.rs` fetch a rootfs through `curl`, so they need one on the host; everything else runs anywhere.
 
 ## Done — an agent runs in a box today
 
@@ -26,26 +26,24 @@ from `wormhole.toml`, with permissions bypassed, and it holds the terminal.
 | `wormhole env <id\|name>` — every variable the box runs under: value, source (`fixed`/`cli`/`host`/`default`/`unset`) and refresh rule, secrets masked. The baked env is computed at start from `[env]` plus `--env NAME[=VALUE]` flags (bare `NAME` carries the host's value, keeping secrets out of shell history), written to `boxes/<pid>/env.toml` (0600), and refused loudly when a `required` variable has no value or `--env NAME` names nothing the host has. Every start prints one line counting set and unset | `cargo run -p wormhole -- env a3f9c1e40b2d` |
 | `wormhole secret list \| set NAME \| remove NAME` — the host-side store behind `[env.NAME] ask = true`: a start that finds an asked variable empty prompts once on the terminal (input masked, `/dev/tty`, never argv) and keeps the answer in `~/.config/wormhole/secrets.toml` (0600), where every later box of every role finds it — one CONTEXT7 key typed once serves ten roles. `set` reads masked from the terminal or from a piped stdin; values print nowhere. Off a terminal a start names the gap and the `secret set` that fills it; `required` still decides whether the gap refuses | `cargo run -p wormhole -- secret list` |
 | `wormhole.toml` naming a role — `role = "<dir\|ref>"` as the whole file, so a project says which role it uses once and nobody types `--role`. Refused beside `[image]`: `role` names the recipe instead of carrying one, never merged with it. A launch still fetches nothing and asks nobody | `printf 'version = 1\nrole = "github:you/r@<sha>"\n' > wormhole.toml` |
+| `wormhole box --credentials none\|copy\|share` — how this start's agent logs in, beating the manifest's `[access] credentials`. `none`: a clean box home and `/login` inside the box. `copy`: the agent's credential files (`~/.claude/.credentials.json` for claude, `~/.codex/auth.json` for codex) copied into the box home once, where absent, and the box refreshes its own copy from then on. `share`: the host file bound read-write at the same place in the box home, counted in the banner's grant count. Both carry Claude Code's `oauthAccount` from the host's `.claude.json` where the box has none | `cargo run -p wormhole -- box --credentials copy` |
 | `wormhole box --role <name\|dir\|ref>` — a role's manifest, instructions and preflight from `~/.config/wormhole/roles/<name>/`, or any directory when the argument has a `/`, or a pinned commit when it starts with a transport. An explicit `--role` beats the workspace's own manifest. **Which of the three you type never decides which box you get**: a role is identified by where it comes from — the canonical directory of a local one, the repository URL of a fetched one — so every spelling of one role is one box, and a re-pin keeps the box you were working in | `cargo run -p wormhole -- box --role alphaca` |
 | `wormhole role add <dir> [--as <name>]` — name a role you wrote. Symlinked, never copied, so the directory you edit stays the role. Nothing is fetched and nothing is approved: there is no commit here to approve, and a directory can change a second after any answer. Prints the recipe instead | `cargo run -p wormhole -- role add ./roles/alphaca` |
 | `wormhole role add <url>@<sha> [--as <name>]` — a role that lives in a git repository, pinned to a commit and never a branch. `git` verifies every object against its own hash, so the commit id is the proof and no digest of ours is kept. Fetches it, shows the whole recipe — grants, env, hooks, **and** the base, the packages and every `[image] build` line — and asks. One approval per commit, host-wide; a changed pin shows old sha → new sha and asks again. The pointer goes to config, the checkout to `~/.local/share/wormhole/checkouts/<sha>`. A bare path counts as a repository only when it carries a pin, which is what tells `/srv/mirror@<sha>` from a folder of files | `cargo run -p wormhole -- role add github:you/role@<sha>` |
 | `wormhole role list \| show <name\|dir> \| remove <name>` — what is installed and whether it can start; the whole recipe without installing it; and taking a name back. `remove` unlinks the name and never follows it, so removing an installed local role leaves the directory you work in alone | `cargo run -p wormhole -- role list` |
-| `wormhole usage` — what is left of the account's usage windows: session, weekly, and the scoped weekly one that binds first, with reset countdowns. During conversation the same reading shows in Claude Code's status bar as `SESSION: 13%  FABLE: 78%  WEEKLY: 47%`, kept fresh from the host — the box holds no credential and makes no call for it | `cargo run -p wormhole -- usage` |
 | bare `wormhole` — the panel: every box, running and idle, most recently used first. Enter does the one thing that row allows — join a running box's agent, or start an idle one again in its own workspace. `n` makes another box here: it picks a source (workspace manifest or an installed role), previews everything the box will see, then starts it; `d` stops the selected box and says so, and on a box that is not running says *that* instead of redrawing an unchanged screen; `x` removes a box and `r` resets one, both asking first with `y` as the only key that answers and every other key — `q` included — cancelling; `q` quits | `cargo run -p wormhole` |
 | `wormhole rename <id\|name> <new name>` — what a box answers to besides its id, set without starting it. Scoped to the box's workspace and refused where another box there already answers to it; refused while the box runs, because its registry entry carries the name it started under and nothing rewrites that in flight | `cargo run -p wormhole -- rename a3f9c1e40b2d api` |
 | `wormhole reset <id\|name>` — empties a box's home and keeps the box: same id, name, workspace and role, nothing the agent put there. The difference between starting over and starting somewhere else | `cargo run -p wormhole -- reset api` |
 | `wormhole remove <id\|name>...` — takes boxes away: the home each kept and the snapshot beside it. Several at once, every name resolved before any box goes, so a typo at the end refuses the line rather than leaving half of it done. A home whose record cannot be read is still a box — its directory name carries the id, which is what `--id` already starts one by | `cargo run -p wormhole -- remove api web` |
 | All three take the box's own claim first, so the kernel answers "is this running" rather than a list that can go stale, and no removal can reach a home an agent is writing to. The panel's `x` and `r` call the same bodies | |
 | `wormhole gc [--delete [--unreferenced]]` — what the data home holds and what of it can be given back. `--delete` takes what is proven dead: box directories whose process is gone, homes whose workspace no longer exists, locks whose box is gone. `--unreferenced` widens it to images, bases and artifacts no box on this host starts from — proven by reading every kept box's recipe, since a recipe names every digest the store keeps for it. Two claims, kept apart: a recipe built but never run from references nothing countable, so a bare `--delete` leaves it. One unreadable recipe makes the whole answer `unproven` and nothing is taken | `cargo run -p wormhole -- gc --delete --unreferenced` |
-| `wormhole allow <id\|name> <host>...` and `wormhole deny ...` — change what a running box may reach, live: the broker reads the box's allowlist file per tunnel, so an `allow` is in force on the agent's very next retry, with nothing restarted. The 403 a blocked host gets names the exact `allow` line to type. Additions are kept in the box's home and survive its restarts; the manifest is never edited for you. Host-side only — nothing inside a box can widen its own list (ADR 0003) | `cargo run -p wormhole -- allow api docs.rs` |
-| The broker — per box, spawned by the start itself and ended with the box; nothing to run by hand (`wormhole broker --socket P --egress H1,H2` remains for doing it anyway). Holds the credential, renews it under a lock, strips the box's dummy key, injects the real token, and streams the reply back; one thread per connection. Its `CONNECT` leg carries everything else: `HTTPS_PROXY` (set automatically) sends `cargo`/`git`/`curl` to the forwarder, the broker judges the host against `[access] egress` (exact names, one-level wildcards only beside their base, empty baseline), resolves and dials host-side on ports 443/80 only, and relays without interception. A blocked host is a 403 naming the manifest line that allows it; an unreachable one a 502. The box gets the socket read-only under `/run` plus the static musl forwarder (`wormhole-forward`, carried inside wormhole's binary); `box -- sh` gets the forwarder too. `tests/broker_connect.rs` drives policy through the real binary, plus one `--ignored` live-tunnel test | `cargo run -p wormhole -- broker` |
 | `wormhole doctor` — 9 host probes, pure verdict, exit code | `cargo run -p wormhole -- doctor` |
 | Purity guard: `wormhole-core` has no OS or I/O dependencies | `cargo test -p wormhole-core purity` |
-| The handbook — install, quickstart, the manifest reference (every key, grouped by what it decides), boxes, roles, the broker, the access model, plus these working docs rendered | `mdbook serve docs` (deployed to GitHub Pages by `.github/workflows/docs.yml`) |
+| The handbook — install, quickstart, the manifest reference (every key, grouped by what it decides), boxes, roles, the access model, plus these working docs rendered | `mdbook serve docs` (deployed to GitHub Pages by `.github/workflows/docs.yml`) |
 
 What the box gives the agent: user, mount, UTS and PID namespaces; a writable
 throwaway root from the image; the workspace read-write at its host path; the
-granted paths and nothing else; one named resolver; only the environment the
+granted paths and nothing else; the host's network and its resolver, or one named resolver; only the environment the
 manifest declares; its own `PATH`; an **empty capability bounding set and
 no-new-privs**, so nothing in the box can regain a capability or raise
 privilege through any `execve`; `Ctrl-C` that reaches the agent and not
@@ -76,10 +74,8 @@ than quietly meaning something else.
 | `[agent] instructions` | A file beside the manifest, appended after the built-in `AGENT.md` in the agent's instructions file, so it wins where they disagree |
 | `[agent] preflight` | A script beside the manifest, seeded into the box home and run there, then the agent replaces the shell |
 | `[access] grants` | Host paths the box may see. `~` expands. Symlinks, `..` and workspace overlap are refused |
-| `[access] dns` | The build box's resolver; the running box only under `network = "host"`. Absent means no DNS anywhere |
-| `[access] network` | `"none"` (default): a namespace holding only loopback, no route off the machine. `"host"`: every route the host has — the opt-out |
-| `[access] broker` | Reach out through the host-side broker, holding no credential. Default: on when the manifest has an agent, off when not; the start spawns it, the exit ends it |
-| `[access] egress` | HTTPS hosts reachable through the broker's `CONNECT` leg. Exact lowercase names or `*.X` beside `X` itself; empty baseline; refused where nothing would enforce it |
+| `[access] dns` | The resolver for the build box and the running box alike. Absent means the host's own `/etc/resolv.conf`, bound read-only |
+| `[access] credentials` | `"none"` (default): a clean box home, `/login` inside the box. `"copy"`: the host's credential files copied into the box home once, where absent. `"share"`: the host's files bound read-write at the same path in the box home. `--credentials` on a start beats it |
 | `[access] host_ca` | **Adds** the host's CA bundle (found per distro, symlinks resolved) to what the box trusts, in the running box and the build box alike — for networks that intercept TLS. Off by default |
 | `[[image.artifact]]` | `url`, `sha256`, `into`: a file fetched on the host, proved by digest, bound read-only on the build box's `/tmp`. A build that names all its fetches this way opens no TLS of its own |
 | `[runtime] rootfs` | `"copy"` (default) or `"readonly"`. `"readonly"` binds the cached image itself instead of copying it, with a tmpfs seeded from the image over `/etc` and `/var`. No per-box copy at all, so start time stops scaling with image size — and the box can no longer install a package at run time, which is the trade |
@@ -120,7 +116,8 @@ does survives into the next box or back into the image.
 | N10 | Roles: `wormhole build/box --role <name\|dir>` reads the manifest, instructions and preflight from `~/.config/wormhole/roles/<name>/` or a directory path. An explicit `--role` beats the workspace's own manifest; `instructions` and `hooks.preflight` resolve against the role's directory (the hook is seeded into the box home) | **done** |
 | N9 | The panel, first slice: bare `wormhole` lists running boxes live, Enter joins the box's agent (execs `attach`), `n` starts a new box from the current workspace's manifest, `d` kills the box's PID 1, `q` quits. Pure state machine in `wormhole-core::tui`, thin `crossterm` shell around it. The role/grant picker is N9b | **done**, needs a host terminal to confirm |
 | N12 | The rest of a box's life: `wormhole rename`, `reset` and `remove`, and `x`/`r`/`y` in the panel. One rule for all three — the box must be idle, proven by taking its own claim rather than by reading a list. `gc` learns to prove a built thing unreferenced by reading every kept box's recipe, and reclaims orphaned locks. Every decision stays pure: `run::parse_*`, `tui::Act` and `tui::Key::from_char`, `gc::Sweep`/`plan`/`built_verdict`/`lock_verdict`, `manifest::referenced_digests`, `paths::key_id`, `home::target`/`find`/`alias_conflict`. The claim is the *type* the verbs act on (`Claimed`), so a fourth verb cannot forget to take it | **done**, 14 lifecycle tests plus the panel driven on a real pty |
-| N11 | Usage limits in the conversation: the host polls the endpoint behind Claude Code's own `/usage` (host credential, `curl` config over stdin so no token in argv), caches the reply, and `wormhole box` writes the rendered line into `<box home>/.claude/wormhole-limits` once a minute. A seeded status-line script reads that file; the `statusLine` entry is merged into the home's `.claude/settings.json` and one the user set themselves wins. Parsing and both renderings are pure (`wormhole-core::limits`), including the scoped per-model weekly window that binds before the headline weekly one | **done**, needs a host run to confirm the status bar |
+| N11 | Usage limits in the conversation, polled host-side and fed into a seeded status line. Built, then **removed** with the broker on 2026-09-08: with a login inside the box, Claude Code's own `/usage` and status bar work and wormhole has nothing to render for it | **removed** |
+| N13 | The broker gone. Every box is on the host's network and speaks to the API for itself; what it logs in with is `[access] credentials = "none" \| "copy" \| "share"` or `--credentials` on the start. Pure pieces: `manifest::Credentials`, `manifest::credential_files`, `seed::claude_config` (host login merged in), `run::RunArgs.shared_credentials`, `run::BoxArgs.credentials`; `mount_plan::Resolver` (the named nameserver or the host's `resolv.conf`, bound read-only) and `mount_plan::Grant::shared`; the binary's `seed_credentials` copies or prepares the target and refuses a host with no login, `boundary.rs` refuses a host with no `resolv.conf`. Manifests naming `network`, `broker` or `egress` are refused by name (`ManifestError::Removed`). `TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` are built-in `[env]` defaults in `manifest::declarations`, so no manifest declares them. The `RouteExists` launch assertion went with the network namespace | **done** |
 
 What the first real runs taught, each fixed at the root rather than patched:
 
@@ -166,8 +163,7 @@ What a review of the finished code found, each fixed at the root as well:
   `box.toml` was truncated and rewritten while `ps`, the panel and every
   starting box scanned it, and a reader that caught it mid-write took itself
   down with a parse error. Writing beside it and `rename(2)`-ing over is now
-  the one body behind every file a peer reads — the same one the usage cache
-  already used. An entry that still cannot be parsed names its box and is
+  the one body behind every file a peer reads. An entry that still cannot be parsed names its box and is
   skipped.
 - **A box claimed its workspace after copying its root, not before.** The
   one-box-per-workspace check was blind for the whole copy — 0.4s with
@@ -179,10 +175,6 @@ What a review of the finished code found, each fixed at the root as well:
   entry is cleaned up too, and a `.dead` directory whose deletion was
   orphaned by a short-lived `ps` is picked up by the next scan instead of
   leaving a whole root copy on the disk.
-- **N boxes asked for one account's usage windows N times a minute.** The
-  windows are the account's and the cache is shared, but each box's thread
-  fetched on its own timer. The fetch is gated on the shared reading's age:
-  six boxes ask the rate-limited endpoint once a minute, not six times.
 
 What a second pass over the review's own output found, each fixed at the root:
 
@@ -207,16 +199,12 @@ What a second pass over the review's own output found, each fixed at the root:
 
 What a documentation audit of the finished code found:
 
-- **The banner claimed `egress: none` for a brokered box.** §1's whole point
-  is that a boundary which does not say which stage it is in is a lie, and
-  the pairing the design aims at — `network = "none"` with `broker = true` —
-  was the one case that printed it. The box reaches the model API through
-  the broker's socket. Root cause: the banner was assembled from three
-  hand-picked fields at each call site, so a new way out could be added
-  without the banner being told. It takes the whole `RunArgs` now
-  (`Banner::for_run`), which also puts the grant count — grants plus the CA
-  bundle — in the pure core where it is tested, instead
-  of an untested helper in the binary.
+- **The banner was assembled from hand-picked fields at each call site.**
+  §1's whole point is that a boundary which does not say which stage it is
+  in is a lie, and a new way out — or a new host path bound in — could be
+  added without the banner being told. It takes the whole `RunArgs` now
+  (`Banner::for_run`), which also puts the grant count — grants, the CA
+  bundle, a shared credential — in the pure core where it is tested.
 
 What running the panel on a real terminal found:
 
@@ -252,18 +240,24 @@ bounding set is stripped and no-new-privs is set (**done**, asserted from the
 box's own `/proc/self/status` — verified live at `CapBnd: 0000000000000000`),
 a box's claim is an `flock` the kernel holds (**done**), every
 read-write mount the box ends up with is checked against the plan (**done**),
-`network = "none"` gives the box its own namespace with loopback and no route
-(**done**, verified live: an empty route table), and cgroup v2 `cpu`/`memory`/
-`pids` caps are applied to the box and not to the process reporting on it
-(**done**, needs a host with a delegated hierarchy to confirm), and the broker
-now carries bytes: `broker = true` puts the credential on the host's side of the
-boundary for good (**done** — verified end to end, with the dummy key and the
-box's `Host:` header both stripped and the real token injected host-side).
-That pair — no route, brokered — **is the default now**: a manifest that says
-nothing about access gets it, the start spawns the box's own broker with the
-manifest's `egress` allowlist, and the exit ends it (ADR 0002). The refresh
-race between boxes sharing `~/.claude/.credentials.json` dissolves with the
-grant itself: the brokers renew under one host-wide lock.
+and cgroup v2 `cpu`/`memory`/`pids` caps are applied to the box and not to the
+process reporting on it (**done**, needs a host with a delegated hierarchy to
+confirm).
+
+**The broker is gone (2026-09-08).** It was built, proven end to end, and
+removed. A routeless box reaching the model API through a host-side proxy
+was the design's centrepiece, and it broke real Claude Code a few times a
+day: the agent opens a long-lived `CONNECT` tunnel the moment it starts and
+makes its calls beside it, which deadlocked a forwarder that served one
+connection at a time (a spinner and nothing else, forever); and every
+endpoint the broker could not inject into — bootstrap flags, `/usage`, the
+MCP registry — answered `401` to the dummy key, so half the agent ran
+degraded. The wanted thing was an autonomous agent, not a mediated one. So
+every box is on the host's network now and speaks to the API for itself,
+and the one remaining question — what it logs in with — is answered by
+`[access] credentials`: `none`, `copy` or `share`. With it went the
+forwarder crate, `wormhole allow`/`deny`, the egress allowlist, `wormhole
+usage` and the seeded status line.
 
 ## Choices worth remembering
 
@@ -276,11 +270,11 @@ One tarball plus `apk` needs neither. `apk` also needs no second uid, so a singl
 grants, empty environment. Third-party install scripts run as root over a
 filesystem that contains only the image.
 
-**DNS stays default-off.** `CONCEPT.md` §"`/etc/resolv.conf` is absent on purpose"
-holds: a box with no resolver fails loudly rather than quietly reaching somewhere.
-`dns` is the interim opt-in that lets an agent reach the API before the broker
-exists, and it writes one `nameserver` line you chose — your host's resolver setup
-never leaks in. It goes away with the broker.
+**DNS follows the host unless named.** A box is on the host's network, so
+with no `dns` line it reads the host's own `/etc/resolv.conf`, bound read-only
+with its symlink followed — a stub resolver on the host serves the box too.
+Naming one writes a single `nameserver` line you chose instead, for the build
+box and the running box alike.
 
 **`apk` over `http` is not a downgrade.** Every index and package is checked
 against the signing keys in `/etc/apk/keys`, and a fresh rootfs has no CA store to
@@ -304,17 +298,13 @@ thing that channel can carry is an errno, so the real message was destroyed. The
 fork removed the failure and the blind spot together.
 
 Beyond that, `CONCEPT.md`'s later steps still stand: the OCI registry pull with a
-layer cache, the `CONNECT` proxy (without it `apt`, WebFetch and context7 stay
-dead in a network-less box), the git and GitHub broker, and the control panel.
+layer cache and the control panel.
 
 ## Known gaps, deliberate
 
 | Gap | Closes at |
 |---|---|
-| The broker's model-API leg is `curl`, so it forks per request and reuses no connection. The host's CA store and TLS stay the host's business, which is the trade | if latency bites |
-| The `CONNECT` leg carries `https` only; a run-time `apk add` over plain `http` has no path in a routeless box. Packages belong in the image | by design |
-| Git over HTTPS reaches only public repos through `CONNECT`; the credential-injecting, fetch-only git broker of CONCEPT.md §2 is not built. `~/.ssh` grants are the workaround and carry full push capability — the reason not to use them | with the git broker |
-| A credentials grant carries account-level capabilities the preview cannot show: `~/.claude/.credentials.json` brings every hosted MCP connector on the claude.ai account (JIRA, Slack, ...), executing server-side, invisible to the mount plan and the future broker. Documented in the handbook's access model; the real fix is a separate agent account or detached connectors | open |
+| A credentials grant carries account-level capabilities the preview cannot show: `~/.claude/.credentials.json` brings every hosted MCP connector on the claude.ai account (JIRA, Slack, ...), executing server-side, invisible to the mount plan. The same holds for `credentials = "copy"` and `"share"`, which hand over exactly that file. Documented in the handbook's access model; the real fix is a separate agent account or detached connectors | open |
 | An attach session runs under the box's baked env, refreshed from the attacher's shell — but PID 1's own tree keeps the values it started with. Linux writes no other process's environment; a refreshed value reaches the agent when a new session starts it | closed for sessions; PID 1 staleness is a kernel limit |
 | Images are one verified tarball, not digest-pinned layers — your host has no unprivileged overlayfs and no `fuse-overlayfs`, so there is nothing to stack | when overlay is available |
 | An image built by `wormhole build` but never started from has no box, so `gc` reads it as `unreferenced` — correct as stated, and still not the same as unwanted. It is why `--unreferenced` is a flag of its own rather than part of `--delete` | by design; revisit if it bites |
@@ -327,8 +317,8 @@ dead in a network-less box), the git and GitHub broker, and the control panel.
 | Attaching without a command starts a second agent process in the box; it shares the home, so `claude --continue` semantics apply, but the original agent's terminal stays where the box was started | if it bites |
 | The box's root copy uses `cp --reflink=auto`: free on btrfs/XFS, silently a full physical copy on ext4 | if startup latency bites; `--reflink=always` would fail loudly instead |
 | `wormhole run` still falls back to the host's `/usr` when given no `--image` | when nothing needs it |
-| The usage windows come from an undocumented endpoint (the one behind Claude Code's own `/usage`); it can change or vanish without notice. Every failure degrades to the last reading with its age shown — `(12m ago)` — never to a wrong number. Fetching also needs `curl` on the host | when the broker exists, the same numbers come from response headers on wormhole's own route |
-| The status line is seeded for `claude` only; the limits file is written for every box, but no other agent has a standard hook to show it | when a second agent lands |
+| Two kernel tests, `a_build_box_reads_the_artifact_the_host_proved` and `the_build_box_is_pointed_at_the_host_bundle_it_was_given`, fail on this host with `cannot start /bin/sh: ENOENT` — the test rootfs the build box pivots into carries no shell it can run. They failed the same way on the tree before the broker was removed | when the test rootfs is fixed |
+| A box on the host's network can reach anything the host can. Nothing in wormhole names or bounds hosts any more; the workspace, the grants and the login mode are the whole blast radius | by design, since 2026-09-08 |
 
 ## Environment note
 

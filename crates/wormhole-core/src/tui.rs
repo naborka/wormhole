@@ -369,20 +369,20 @@ pub fn preview(manifest: &Manifest, source: &str, image_ready: bool) -> String {
     ));
     match manifest.access.dns {
         Some(dns) => text.push_str(&format!("  dns: {dns}\n")),
-        None => text.push_str("  dns: none\n"),
+        None => text.push_str("  dns: the host's resolver\n"),
     }
-    // The route is what the box can reach; a preview that hid it would
-    // understate exactly the thing this screen exists to show.
-    text.push_str(match manifest.access.network {
-        crate::run::Network::Host => "  network: host — every route the host has\n",
-        crate::run::Network::None => "  network: none — loopback only\n",
-    });
-    if crate::manifest::brokers(manifest) {
-        text.push_str("  broker: model api reached host-side, no credential in box\n");
-        for host in &manifest.access.egress {
-            text.push_str(&format!("  egress: {host}\n"));
+    // What the agent logs in with is the one host secret a box can be
+    // handed; a preview that hid it would understate exactly the thing
+    // this screen exists to show.
+    text.push_str(match manifest.access.credentials {
+        crate::manifest::Credentials::None => "  credentials: none — /login in the box\n",
+        crate::manifest::Credentials::Copy => {
+            "  credentials: copy — the host's login, copied once\n"
         }
-    }
+        crate::manifest::Credentials::Share => {
+            "  credentials: share — the host's login file, bound read-write\n"
+        }
+    });
     if manifest.env.is_empty() {
         text.push_str("\nenv: none\n");
     } else {
@@ -514,7 +514,7 @@ mod tests {
             "grants = [\"~/some/path\"]\n",
             "dns = \"1.1.1.1\"\n",
             "host_ca = true\n",
-            "egress = [\"crates.io\"]\n",
+            "credentials = \"copy\"\n",
             "[env.SHELL]\nfixed = \"/bin/bash\"\n",
             "[env.ANTHROPIC_API_KEY]\ndefault = \"\"\n",
         ));
@@ -528,9 +528,7 @@ mod tests {
             "~/some/path",
             "host CA bundle: trusted",
             "dns: 1.1.1.1",
-            "network: none — loopback only",
-            "broker: model api reached host-side, no credential in box",
-            "egress: crates.io",
+            "credentials: copy — the host's login, copied once",
             "SHELL = /bin/bash",
             "ANTHROPIC_API_KEY (host value, empty default)",
             "preflight: hooks/preflight.sh",
@@ -582,7 +580,8 @@ mod tests {
         for expected in [
             "grants: none",
             "host CA bundle: not shared",
-            "dns: none",
+            "dns: the host's resolver",
+            "credentials: none — /login in the box",
             "env: none",
             "preflight: none",
             "image: not built",

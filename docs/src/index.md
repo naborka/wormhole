@@ -30,10 +30,10 @@ wormhole box     # every time: the agent, in a fresh copy of that image
 wormhole         # the panel: running boxes, and `n` to start a new one
 ```
 
-Two keys tighten the boundary further: `network = "none"` gives the box a
-namespace with no route out of the machine at all, and `broker = true`
-keeps your credential on the host and hands the box a socket instead. The
-banner printed at every start names which of those it actually got.
+The box is on the host's network and speaks to the model API for itself.
+What it logs in as is yours to pick — `credentials = "none"`, `"copy"`
+or `"share"` — and the banner printed at every start names every host
+path it was handed, a shared login included.
 
 The rest of the commands:
 
@@ -42,7 +42,6 @@ The rest of the commands:
 | `wormhole help` | the whole tool on one page — start here |
 | `wormhole doctor` | nine host probes and a plain verdict — run this first |
 | `wormhole ps [--all]` / `attach <id\|name>` | what is running or kept, and a second terminal into it |
-| `wormhole usage` | what is left of the account's usage windows |
 | `wormhole stop <id\|name>` | end a running box, from anywhere |
 | `wormhole rename <id\|name> <new>` | call a box something else, without starting it |
 | `wormhole reset <id\|name>` | keep the box, empty its home |
@@ -50,15 +49,15 @@ The rest of the commands:
 | `wormhole role add <dir\|url@sha>` | install a role from a directory or a pinned commit |
 | `wormhole role list\|show\|remove` | what is installed, the whole recipe, and taking a name back |
 | `wormhole box --as <name>` | give a box a name to type instead of its id |
-| `wormhole broker` | the host-side proxy that holds the credential |
+| `wormhole box --credentials none\|copy\|share` | which login the agent starts with, for this start |
 | `wormhole gc` | what the data home holds, and what of it can go |
 
 Start with [Install](guide/install.md), then the
 [Quickstart](guide/quickstart.md). The [manifest reference](guide/manifest.md)
 covers every key and [Boxes](guide/boxes.md) covers running several at once.
 [Roles](guide/roles.md) make a box recipe shareable across
-workspaces, and [the broker](guide/broker.md) takes the credential out of
-the box entirely. [What the box can reach](guide/access.md) is the security
+workspaces, and [credentials](guide/credentials.md) says how the agent
+logs in. [What the box can reach](guide/access.md) is the security
 model — read it before granting anything. [What changed](changelog.md) is
 the plain-words history.
 

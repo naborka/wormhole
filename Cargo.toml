@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/wormhole-core", "crates/wormhole", "crates/wormhole-forward"]
+members = ["crates/wormhole-core", "crates/wormhole"]
 
 [workspace.package]
 edition = "2024"

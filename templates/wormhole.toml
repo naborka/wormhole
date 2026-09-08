@@ -1,13 +1,10 @@
 # Written by `wormhole init`. The whole recipe for this workspace's box.
-#
-# Every key is explained in the manifest reference:
-# https://naborka.github.io/wormhole/guide/manifest.html
+# Every key: https://naborka.github.io/wormhole/guide/manifest.html
 
 version = 1
 
+# Change anything here and the next start rebuilds the image.
 [image]
-# The rootfs this box is built from, verified against its digest before
-# anything is extracted. Change either and the next start rebuilds.
 base = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.2-x86_64.tar.gz"
 base_sha256 = "412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be"
 package_sources = [
@@ -15,62 +12,35 @@ package_sources = [
   "http://dl-cdn.alpinelinux.org/alpine/v3.22/community",
 ]
 packages = ["bash", "nodejs", "npm", "git", "ca-certificates"]
-# Arbitrary shell, run on your machine while the image is built. This is
-# the part `wormhole role show` puts in front of you before you trust
-# somebody else's role.
+# Shell lines, run as root while the image is built.
 build = ["npm install -g @anthropic-ai/claude-code"]
 
-# Anything this build fetches for itself can be named here instead, and
-# then wormhole fetches it on the host and checks its digest before the
-# build box starts. The box opens no connection for it, so a network that
-# intercepts TLS cannot break the build — and the version stops floating
-# under a digest that says two images are the same.
-#
-# These tables belong after every plain key above: TOML reads `build` or
-# `packages` written below one of them as part of *its* table.
+# A file the build would otherwise fetch: wormhole fetches it on the host,
+# checks the digest, and binds it read-only under /tmp. Put these tables
+# after every plain [image] key.
 #
 # [[image.artifact]]
 # url = "https://example.test/tool.tar.gz"
 # sha256 = "<64 lowercase hex characters>"
-# into = "/tmp/tool.tar.gz"   # /tmp, and nowhere else: it is a tmpfs, so
-#                             # the finished image never carries the file
+# into = "/tmp/tool.tar.gz"
 
 [agent]
 run = "claude"
 
+# The box is on the host's network. Everything else of yours is opt-in.
 [access]
-# Baseline is empty: this workspace and nothing else. The defaults hold
-# the line — no route off the machine, and the model API reached through
-# the host-side broker, so no credential ever enters the box. A grant is
-# a host path the agent can read; add one only when you mean it.
+# Host paths the agent may read and write.
 # grants = ["~/some/path"]
-# The resolver serves the build box's own fetches (npm above); the
-# running box has no route to one and needs none.
+# Leave out to use the host's own resolver.
 dns = "1.1.1.1"
-# Hosts the running box may reach over HTTPS through the broker. Exact
-# names or one-level wildcards; empty means nothing is reachable.
-# egress = ["crates.io", "static.crates.io"]
-# Add what the host trusts to what the box trusts. On a network that
-# intercepts TLS with its own CA — Cloudflare WARP, a corporate proxy — a
-# fresh store rightly refuses it. This mounts the host's bundle and points
-# every TLS client at it: most do not read one unless told to, and Node,
-# which the agent is, never reads one at all. The build box gets it too.
-#
-# Adds rather than replaces: the image's own roots keep working. What the
-# recipe can pin belongs in `[[image.artifact]]`, which needs no trust.
+# "none": /login in the box. "copy": your login, copied in once.
+# "share": your login file, bound read-write.
+# credentials = "none"
+# Trust the host's CA bundle too, for networks that intercept TLS.
 host_ca = true
 
-# The box's whole environment: a variable reaches it only when declared
-# here or by `--env` on `box`/`attach`. Every attach refreshes the
-# declared ones from your shell — your exported value wins, the box's own
-# survives, `fixed` never moves. `wormhole env <id>` shows what is set.
-#
-# Per variable: bare = carry the host's value · `default` = fallback when
-# the host has none · `fixed` = the manifest's word, never overridden ·
-# `required = true` = refuse to start without a value · `secret = true` =
-# masked wherever wormhole prints it.
-[env.TERM]
-default = "xterm-256color"
-
+# A variable reaches the box only when declared here or by --env.
+# `default`: host's value wins when it has one. `fixed`: never overridden.
+# `ask = true`: asked once, kept. `required`, `secret`: refuse, mask.
 [env.SHELL]
 fixed = "/bin/bash"

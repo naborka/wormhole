@@ -25,7 +25,6 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nix::libc;
 use nix::mount::{MntFlags, MsFlags, mount, umount2};
 use nix::sched::{CloneFlags, unshare};
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
@@ -34,10 +33,8 @@ use nix::unistd::{ForkResult, Pid, execvp, fork};
 use wormhole_core::ca;
 use wormhole_core::launch;
 use wormhole_core::limits_cgroup;
-use wormhole_core::mount_plan::{self, BOX_HOSTNAME, BOX_PATH, MountOp, Root, User, home_in_box};
-use wormhole_core::run::{
-    self, Network, RootMode, RunArgs, WaitOutcome, exit_code, identity_map, root_map,
-};
+use wormhole_core::mount_plan::{self, BOX_HOSTNAME, MountOp, Root, User, home_in_box};
+use wormhole_core::run::{self, RootMode, RunArgs, WaitOutcome, exit_code, identity_map, root_map};
 
 /// Host side of `wormhole run`. The scratch dir (box root mountpoint)
 /// lives here so it is removed from the host after the box exits.
@@ -121,13 +118,7 @@ pub fn build_in(
         pidfile: None,
         ca,
         artifacts: artifacts.to_vec(),
-        broker: None,
-        egress: Vec::new(),
-        // The build fetches for itself — `apk` its packages, `rustup` its
-        // toolchain — and has no broker to ride, so it runs on the host's
-        // network. Said explicitly: the default is routeless, and a build
-        // box that inherits it fails every fetch with "temporary error".
-        network: Network::Host,
+        shared_credentials: Vec::new(),
         root: RootMode::default(),
         command: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
     };
@@ -245,7 +236,7 @@ pub fn boxed_child(args: &[String]) -> ! {
         Ok(parsed) => parsed,
         Err(e) => fail(&e.to_string()),
     };
-    fork_into_box(identity_map, parsed.network, parsed.pidfile.clone(), || {
+    fork_into_box(identity_map, parsed.pidfile.clone(), || {
         box_init(scratch, home, &parsed)
     })
 }
@@ -262,9 +253,7 @@ pub fn boxed_build(args: &[String]) -> ! {
         Ok(parsed) => parsed,
         Err(e) => fail(&e.to_string()),
     };
-    fork_into_box(root_map, parsed.network, None, || {
-        build_init(scratch, image, &parsed)
-    })
+    fork_into_box(root_map, None, || build_init(scratch, image, &parsed))
 }
 
 /// Unshares the namespaces, then forks the process that will be PID 1 of
@@ -273,11 +262,10 @@ pub fn boxed_build(args: &[String]) -> ! {
 /// then only waits and reports.
 fn fork_into_box(
     map: fn(u32) -> String,
-    network: Network,
     pidfile: Option<String>,
     init: impl FnOnce() -> Infallible,
 ) -> ! {
-    if let Err(e) = enter_namespaces(map, network) {
+    if let Err(e) = enter_namespaces(map) {
         fail(&e);
     }
     // Nothing to inherit but the namespaces: `wormhole` is single-threaded
@@ -389,7 +377,11 @@ fn build_init(scratch: &Path, image: &Path, args: &RunArgs) -> ! {
     if let Some(ca) = &args.ca {
         bound.push((PathBuf::from(ca), PathBuf::from(ca::CA_BUNDLE_IN_BUILD)));
     }
-    let ops = mount_plan::build_ops(image, args.dns, &bound);
+    let resolver = match resolver(args.dns) {
+        Ok(resolver) => resolver,
+        Err(e) => fail(&e),
+    };
+    let ops = mount_plan::build_ops(image, &resolver, &bound);
     if let Err(e) = enter_and_pivot(scratch, &ops, Path::new("/")) {
         fail(&e);
     }
@@ -445,7 +437,7 @@ fn exec(command: &[String], home: &Path) -> ! {
     unsafe {
         std::env::set_var("HOME", home);
         std::env::set_var("HOSTNAME", BOX_HOSTNAME);
-        std::env::set_var("PATH", BOX_PATH);
+        std::env::set_var("PATH", mount_plan::box_path(Path::new(home)));
     }
 
     // `execvp` returns only on failure, so the error is the whole result.
@@ -488,24 +480,15 @@ fn wait_outcome(status: std::process::ExitStatus) -> WaitOutcome {
     }
 }
 
-fn enter_namespaces(map: fn(u32) -> String, network: Network) -> Result<(), String> {
+fn enter_namespaces(map: fn(u32) -> String) -> Result<(), String> {
     let uid = nix::unistd::getuid().as_raw();
     let gid = nix::unistd::getgid().as_raw();
-    // The network namespace joins the same unshare when it is asked for:
-    // it must exist before the fork, so the box's PID 1 and everything
-    // under it inherits it and nothing can be left in the host's.
-    let mut flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWPID;
-    if network == Network::None {
-        flags |= CloneFlags::CLONE_NEWNET;
-    }
+    let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWPID;
     unshare(flags)
         .map_err(|e| format!("unshare(user, uts, pid) failed: {e}; run `wormhole doctor`"))?;
     write("/proc/self/setgroups", "deny")?;
     write("/proc/self/uid_map", &map(uid))?;
     write("/proc/self/gid_map", &map(gid))?;
-    if network == Network::None {
-        bring_up_loopback()?;
-    }
     nix::unistd::sethostname(BOX_HOSTNAME).map_err(|e| format!("cannot set hostname: {e}"))
 }
 
@@ -562,52 +545,6 @@ fn apply_limits(limits: &limits_cgroup::Limits, pid: u32) -> Result<(), String> 
         .map_err(|e| format!("cannot put the box into {}: {e}", group.display()))
 }
 
-/// A fresh network namespace has a loopback device and it is *down*, so
-/// even `127.0.0.1` fails until it is raised. Plenty of tooling binds
-/// loopback and would break for a reason that has nothing to do with the
-/// isolation being asked for.
-///
-/// Done with an ioctl rather than by running `ip`: the box's image is not
-/// required to contain one, and this is host-side code anyway.
-fn bring_up_loopback() -> Result<(), String> {
-    // `struct ifreq` is a 16-byte name followed by a union; only the first
-    // `short` of that union — the flags — is touched here.
-    #[repr(C)]
-    struct IfReq {
-        name: [libc::c_char; libc::IF_NAMESIZE],
-        flags: libc::c_short,
-        _pad: [u8; 22],
-    }
-
-    #[expect(unsafe_code, reason = "SIOCSIFFLAGS has no safe wrapper in nix")]
-    unsafe {
-        let socket = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-        if socket < 0 {
-            return Err(format!(
-                "cannot open a socket to raise loopback: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let mut request = IfReq {
-            name: [0; libc::IF_NAMESIZE],
-            flags: 0,
-            _pad: [0; 22],
-        };
-        request.name[0] = b'l' as libc::c_char;
-        request.name[1] = b'o' as libc::c_char;
-        request.flags = libc::IFF_UP as libc::c_short | libc::IFF_RUNNING as libc::c_short;
-        // The request argument is a `c_int` on musl and a `c_ulong` on
-        // glibc; the cast takes whichever this target's `ioctl` declares.
-        let raised = libc::ioctl(socket, libc::SIOCSIFFLAGS as _, &raw const request);
-        let error = std::io::Error::last_os_error();
-        libc::close(socket);
-        if raised < 0 {
-            return Err(format!("cannot raise loopback in the box: {error}"));
-        }
-    }
-    Ok(())
-}
-
 /// Applies the plan into `scratch` and pivots into it.
 fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result<(), String> {
     let workspace =
@@ -616,18 +553,19 @@ fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result
     if let Some(ca) = &args.ca {
         let real =
             fs::canonicalize(ca).map_err(|e| format!("cannot resolve the CA bundle {ca}: {e}"))?;
-        grants.push(mount_plan::Grant::retargeted(
+        grants.push(mount_plan::Grant::bound(
             real,
             wormhole_core::ca::CA_BUNDLE_IN_BOX,
+            false,
         ));
     }
-    if let Some(socket) = &args.broker {
-        // Read-only: the box talks through the broker, never changes it.
-        let real = fs::canonicalize(socket)
-            .map_err(|e| format!("cannot resolve the broker socket {socket}: {e}"))?;
-        grants.push(mount_plan::Grant::retargeted(
+    for (source, relative) in &args.shared_credentials {
+        let real = fs::canonicalize(source)
+            .map_err(|e| format!("cannot resolve the credential file {source}: {e}"))?;
+        grants.push(mount_plan::Grant::bound(
             real,
-            wormhole_core::broker::SOCKET_IN_BOX,
+            mount_plan::home_in_box(user).join(relative),
+            true,
         ));
     }
     let image = args.image.as_ref().map(PathBuf::from);
@@ -636,37 +574,25 @@ fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result
         (Some(image), RootMode::Readonly) => Root::ImageReadOnly(image),
         (None, _) => Root::HostUsr,
     };
-    let ops = mount_plan::compute(&workspace, home, root, user, &grants, args.dns)
+    let resolver = resolver(args.dns)?;
+    let ops = mount_plan::compute(&workspace, home, root, user, &grants, &resolver)
         .map_err(|e| format!("mount plan refused: {e}"))?;
     enter_and_pivot(scratch, &ops, &workspace)?;
-    if args.broker.is_some() {
-        write_forwarder()?;
-    }
     Ok(())
 }
 
-/// The in-box forwarder, compiled for the musl target by `build.rs` and
-/// carried inside wormhole's own binary. Static, so it runs in any image
-/// regardless of the image's libc — however wormhole itself was linked.
-static FORWARDER: &[u8] = include_bytes!(env!("WORMHOLE_FORWARD_BIN"));
-
-/// Writes the forwarder into the pivoted box, executable for everyone.
-///
-/// Written, not bound: a bind's host-side temp file would outlive its
-/// deleter, which cannot reach host paths after the pivot. On the box's
-/// `/run` tmpfs it dies with the box. The file is the box's to scribble
-/// on, and that is fine — it holds no credential and reaches nothing the
-/// box cannot already reach; the boundary is the socket, which stays a
-/// read-only bind.
-fn write_forwarder() -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = Path::new(wormhole_core::broker::FORWARD_IN_BOX);
-    let dir = path.parent().ok_or("the forwarder path has no parent")?;
-    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    fs::write(path, FORWARDER)
-        .map_err(|e| format!("cannot write the forwarder {}: {e}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("cannot mark the forwarder executable: {e}"))
+/// The named resolver, or the host's own `resolv.conf` with its symlink
+/// followed. A host without one is refused: a box on the host's network
+/// with no resolver would fail every lookup and blame the network.
+fn resolver(dns: Option<std::net::IpAddr>) -> Result<mount_plan::Resolver, String> {
+    match dns {
+        Some(dns) => Ok(mount_plan::Resolver::Named(dns)),
+        None => fs::canonicalize("/etc/resolv.conf")
+            .map(mount_plan::Resolver::Host)
+            .map_err(|e| {
+                format!("the host has no readable /etc/resolv.conf ({e}); set [access] dns")
+            }),
+    }
 }
 
 /// Own mount namespace, every op applied into `scratch`, pivot into it,

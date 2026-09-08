@@ -125,14 +125,17 @@ fn root_shows_exactly_the_plan() {
 fn etc_holds_only_the_synthetic_files() {
     let listing = run_stdout(&["run", "--", "ls", "-a", "/etc"]);
     let seen: BTreeSet<&str> = listing.split_whitespace().collect();
-    let expected: BTreeSet<&str> = [".", "..", "group", "hosts", "passwd"].into();
+    let expected: BTreeSet<&str> = [".", "..", "group", "hosts", "passwd", "resolv.conf"].into();
     assert_eq!(seen, expected);
 }
 
+/// The box is on the host's network, so with no resolver named it reads
+/// the host's own — the file behind `/etc/resolv.conf`, symlink followed.
 #[test]
-fn without_dns_the_box_has_no_resolver() {
-    let output = wormhole(&["run", "--", "test", "-e", "/etc/resolv.conf"]);
-    assert_eq!(output.status.code(), Some(1));
+fn without_dns_the_box_reads_the_hosts_resolver() {
+    let host = std::fs::read_to_string("/etc/resolv.conf").expect("the host has a resolver");
+    let seen = run_stdout(&["run", "--", "cat", "/etc/resolv.conf"]);
+    assert_eq!(seen, host.trim());
 }
 
 #[test]
@@ -276,7 +279,11 @@ fn home_is_set_to_the_box_home() {
 #[test]
 fn path_is_the_boxs_own_not_the_hosts() {
     let inside = run_stdout(&["run", "--", "sh", "-c", "echo $PATH"]);
-    assert_eq!(inside, wormhole_core::mount_plan::BOX_PATH);
+    assert!(
+        inside.ends_with(wormhole_core::mount_plan::BOX_PATH),
+        "{inside}"
+    );
+    assert!(inside.contains("/.local/bin:"), "{inside}");
 }
 
 #[test]

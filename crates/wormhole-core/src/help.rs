@@ -60,6 +60,11 @@ const BOXES: &[Line] = &[
         blurb: "your command in the box instead of the agent",
     },
     Line {
+        name: "box",
+        args: "--credentials MODE",
+        blurb: "its login this once: none, copy or share",
+    },
+    Line {
         name: "env",
         args: "ID|NAME",
         blurb: "what the box runs under; secrets masked",
@@ -73,11 +78,6 @@ const BOXES: &[Line] = &[
         name: "attach",
         args: "ID|NAME [-- CMD...]",
         blurb: "a second terminal into a running box",
-    },
-    Line {
-        name: "allow",
-        args: "ID|NAME HOST...",
-        blurb: "let it reach one more host, live; deny undoes",
     },
     Line {
         name: "stop",
@@ -141,19 +141,9 @@ const REST: &[Line] = &[
         blurb: "what the store holds, and what of it can go",
     },
     Line {
-        name: "usage",
-        args: "",
-        blurb: "what is left of the account's limits",
-    },
-    Line {
         name: "secret",
         args: "list|set NAME|remove NAME",
         blurb: "values `ask` keeps, shared by every box",
-    },
-    Line {
-        name: "broker",
-        args: "",
-        blurb: "the host-side proxy holding the credential",
     },
     Line {
         name: "run",
@@ -216,8 +206,9 @@ const AFTER_BOXES: &str = r#"
   --env NAME[=VALUE] on box or attach; bare NAME carries the host's value.
   Attach refreshes declared ones — your export wins, fixed never moves.
   ask = true prompts once, masked, and keeps the answer for every box.
-  A blocked HTTPS host answers 403 naming the `wormhole allow` line that
-  unblocks it — typed on the host it acts immediately, nothing restarts.
+  The box is on the host's network and reaches what the host reaches.
+  Its login is yours to pick: none (a clean home, /login in the box),
+  copy (yours, copied in once), share (your file, bound read-write).
 
 PANEL   (bare `wormhole`)
   enter join or start · n new · d stop · x remove · r reset · q quit
@@ -246,13 +237,13 @@ MANIFEST
   instructions = "ROLE.md"          # added to the built-in instructions
   preflight = "hooks/setup.sh"      # runs in the box before the agent
 
-  [access]                          # baseline: this folder, no route, and
-  egress = ["crates.io"]            # the broker on — no credential in the
-  dns = "1.1.1.1"                   # box, the API and these hosts reached
-  host_ca = true                    # host-side. dns feeds the build box.
-  grants = ["~/some/path"]          # opt out: network="host", broker=false
+  [access]                          # baseline: this folder, no login
+  credentials = "none"              # or "copy" / "share" — see above
+  dns = "1.1.1.1"                   # absent: the host's own resolver
+  host_ca = true                    # trust what the host trusts (TLS)
+  grants = ["~/some/path"]          # more host paths, read-write
 
-  [env.SOME_VAR]
+  [env.SOME_VAR]                    # TERM and friends are built in
   fixed = "1"                       # the box cannot override this
   # default = ""                    # host's value wins when it has one
   # ask = true                      # asked once, kept for every box
@@ -280,8 +271,9 @@ MAKE A ROLE
 
 const UPDATE: &str = r#"
 MOVE THE AGENT'S VERSION
-  The version is pinned in the manifest, so moving it is an edit and a
-  rebuild. A box keeps its home, so there is nothing to log into again.
+  Pinned in the image, moving it is an edit and a rebuild; an agent that
+  updates itself writes into a root deleted on exit, so turn that off
+  with [env.DISABLE_UPDATES] fixed = "1" and let the pin decide.
 
   1. edit the [[image.artifact]] url and sha256 to the new version
   2. wormhole build                        # or let the next start do it
@@ -289,8 +281,8 @@ MOVE THE AGENT'S VERSION
      wormhole box --id ID                  # this, which applies the change
   4. wormhole gc --delete --unreferenced   # give the old image back
 
-  An agent updating itself writes into a filesystem deleted on exit, so
-  turn that off — [env.DISABLE_UPDATES] fixed = "1" — and let the pin decide.
+  Or keep it in the home: a preflight hook installing the agent into
+  ~/.local/bin (first on the box's PATH) has the latest on every start.
 
 MORE
 "#;

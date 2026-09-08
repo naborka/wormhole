@@ -29,10 +29,7 @@ wormhole help
 
 ## Requirements
 
-- Rust 1.97 or newer, to build it, plus the musl target for your
-  architecture (`rustup target add x86_64-unknown-linux-musl`): the build
-  compiles the in-box broker forwarder against musl so it runs in any
-  image, and fails with that exact command if the target is missing
+- Rust 1.97 or newer, to build it
 - Linux with unprivileged user namespaces enabled (most desktop distros)
 - `curl`, `tar`, `cp` with reflink support on the filesystem for cheap
   image copies (Btrfs, XFS; works without, just slower)

@@ -1,48 +1,26 @@
-# Alphaca Codex: the same chief-staff-engineer role as `alphaca`, run by
-# OpenAI's Codex CLI instead of Claude Code. Same toolchain, same skills,
-# same rtk — delivered the way codex reads each one. Install by linking
-# this directory where wormhole looks for roles:
+# Alphaca Codex: the alphaca role, run by OpenAI's Codex CLI.
 #
 #   ln -s "$(pwd)/roles/alphaca-codex" ~/.config/wormhole/roles/alphaca-codex
-#
-# then, in any workspace (`--role` beats the workspace's own manifest):
-#
 #   wormhole box --role alphaca-codex
 #
-# BEFORE THE FIRST BUILD: pin the codex artifact below. The digest here is
-# a placeholder — this box had no route to fetch the real one. On the
-# host:
+# Before the first build, pin the codex artifact: the digest below is a
+# placeholder.
 #
 #   curl -sL https://github.com/openai/codex/releases/download/rust-v0.153.3/codex-x86_64-unknown-linux-musl.tar.gz | sha256sum
 #
-# and put the result in `sha256`. Bump the tag to the release you mean.
-#
-# What lands where, versus the claude alphaca:
-# - rtk: same binary, but a rules-file integration (`rtk init -g --codex`
-#   writes ~/.codex/RTK.md and a reference into AGENTS.md) — codex has no
-#   PreToolUse rewrite hook, so the model follows the rules rather than
-#   having its commands rewritten underneath it.
-# - skills (caveman, mattpocock, rust-skills): installed by the preflight
-#   into codex's own skills directory via the `skills` installer.
-# - caveman's mode: CAVEMAN_DEFAULT_MODE below, plus the installed skill.
-# - context7: a real MCP server in ~/.codex/config.toml, added once by
-#   the preflight.
-# - rust-analyzer-lsp has no codex equivalent; rust-analyzer itself is in
-#   the toolchain below for anything that speaks LSP.
-#
-# ROLE.md repeats alphaca's persona because a manifest names one
-# instructions file and wormhole cannot compose two.
+# Versus alphaca: rtk is a rules file (codex has no PreToolUse hook),
+# skills go in via the `skills` installer, context7 is an MCP server in
+# ~/.codex/config.toml. ROLE.md repeats alphaca's because a manifest
+# names one instructions file.
 
 version = 1
 name = "Alphaca Codex"
 
-# Everything the image is made of, and nothing else.
 [image]
 base = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.2-x86_64.tar.gz"
 base_sha256 = "412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be"
 
-# http on purpose: a fresh rootfs has no CA store, and apk verifies every
-# index and package against the signing keys it ships.
+# http on purpose: a fresh rootfs has no CA store; apk verifies signatures.
 package_sources = [
   "http://dl-cdn.alpinelinux.org/alpine/v3.22/main",
   "http://dl-cdn.alpinelinux.org/alpine/v3.22/community",
@@ -50,70 +28,43 @@ package_sources = [
 
 packages = [
   "bash",
-  # For the `skills` installer and the context7 MCP server, both run
-  # through npx by the preflight.
   "nodejs",
   "npm",
   "git",
-  # `gh`, reading GitHub through the broker's tunnel. It takes the token
-  # from GITHUB_TOKEN — declared under [env] below, asked for once.
   "github-cli",
   "openssh-client",
   "ca-certificates",
-  # Rust: build-base gives cc and the linker. The compiler itself comes
-  # from rustup below, not from apk — see the build lines for why.
   "build-base",
-  # Modern tools, called by name: a non-interactive shell reads no aliases.
-  "ripgrep", # grep
-  "fd",      # find
-  "eza",     # ls
-  "btop",    # top
-  "ncdu",    # du
+  "ripgrep",
+  "fd",
+  "eza",
+  "btop",
+  "ncdu",
 ]
 
 build = [
-  # One static musl binary — no npm, no platform-dependency pair.
   "tar -xzf /tmp/codex.tar.gz -C /tmp",
   "install -m 755 /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex",
-  # An artifact is bound read-only and carries no execute bit — bytes off
-  # the network are not something to run by accident — so running one is a
-  # deliberate copy onto the scratch. Into a directory of its own, keeping
-  # the name: rustup-init decides what it is from its own argv[0], and one
-  # called anything else refuses with "unknown proxy name".
+  # rustup-init reads its own argv[0], so it keeps its name.
   "mkdir -p /tmp/rustup && cp /tmp/rustup-init /tmp/rustup/ && chmod +x /tmp/rustup/rustup-init",
-  # The toolchain itself is rustup's own fetch over TLS, which no digest
-  # in a manifest can pin. It is why `host_ca` below still matters.
   "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /tmp/rustup/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 -c rustfmt -c clippy -c rust-analyzer",
   "ln -s /usr/local/cargo/bin/* /usr/local/bin/",
-  # /usr/local/bin is on every shell's default PATH; ~/.cargo/bin is not
-  # on the /bin/sh subshells hooks and preflights run in.
   "tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk",
 ]
 
-# Everything this build would otherwise fetch for itself. Wormhole fetches
-# each one on the host, checks the digest, and binds it read-only on the
-# build box's /tmp — which is a tmpfs, so none of them reach the image.
-
-# Codex CLI, the release musl tarball, proved by digest. PLACEHOLDER
-# digest — see the header for the pin command; the build refuses to
-# proceed until the real one is here.
+# PLACEHOLDER digest; see the header.
 [[image.artifact]]
 url = "https://github.com/openai/codex/releases/download/rust-v0.153.3/codex-x86_64-unknown-linux-musl.tar.gz"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 into = "/tmp/codex.tar.gz"
 
-# Rust from rustup, not from apk. Alpine pins one compiler per release
-# branch — 3.22 is 1.87 forever — so an apk toolchain cannot build a
-# workspace whose `rust-version` is newer, and no amount of waiting fixes
-# it.
+# Rust from rustup, not apk: Alpine 3.22 pins rustc 1.87 for good.
 [[image.artifact]]
 url = "https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init"
 sha256 = "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1"
 into = "/tmp/rustup-init"
 
-# RTK, prebuilt musl binary. Not `cargo install`: that needs crates.io,
-# and a prebuilt binary needs no compiler at all. 0.45.0 is the first
-# line that carries `rtk init --codex`.
+# 0.45.0 is the first rtk with `rtk init --codex`.
 [[image.artifact]]
 url = "https://github.com/rtk-ai/rtk/releases/download/v0.45.0/rtk-x86_64-unknown-linux-musl.tar.gz"
 sha256 = "c4c036fbf181fc55ef329786c8c17e0d427972b053b825944d968a6aafef1ba4"
@@ -121,95 +72,37 @@ into = "/tmp/rtk.tar.gz"
 
 [agent]
 run = "codex"
-# No `model`: codex's own default. To pin one, name it here — it lands in
-# the box's ~/.codex/config.toml, which is where codex reads a model.
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
 
-# What the box can reach. Everything unnamed here is invisible to it.
-#
-# Unlike the claude roles, the credential sits in the box: the broker's
-# injection leg speaks only Anthropic, so codex reaches its API through
-# the broker's CONNECT tunnel with its own ~/.codex/auth.json. Log in on
-# the host once (`codex login`); the box reuses that file.
+# One `codex login` on the host serves every box.
 [access]
-grants = ["~/.codex/auth.json"]
 dns = "1.1.1.1"
-# Reachable over HTTPS through the broker's tunnel: the API and login
-# refresh, cargo's registry and docs at run time, GitHub and npm for what
-# the preflight installs. A blocked host answers with the exact line to
-# add here, so extend on refusal, not on guess.
-egress = [
-  "api.openai.com",
-  "auth.openai.com",
-  "chatgpt.com",
-  "crates.io",
-  "static.crates.io",
-  "index.crates.io",
-  "static.rust-lang.org",
-  "docs.rs",
-  "github.com",
-  "codeload.github.com",
-  "raw.githubusercontent.com",
-  "objects.githubusercontent.com",
-  # For `gh`. Whatever this box can do there is exactly what the token
-  # below can do — scope the token, and this line is scoped with it.
-  "api.github.com",
-  # The `skills` installer and the context7 MCP server, fetched by npx.
-  "registry.npmjs.org",
-]
+credentials = "share"
 host_ca = true
 
-# The box's whole environment. `default` lets the host's value win when it
-# has one; `fixed` ignores the host, for anything that describes the box.
-
-# Empty default: ChatGPT sign-in via auth.json needs no key; a host that
-# exports one uses usage-based billing instead.
+# Empty: ChatGPT sign-in needs no key; a host that exports one would
+# switch codex to usage-based billing.
 [env.OPENAI_API_KEY]
 default = ""
 
-# Where the toolchain is. The shims on PATH find nothing without it, and
-# the host's value would name a directory this box does not have.
-# `CARGO_HOME` is deliberately left alone: unset it defaults to ~/.cargo,
-# the kept home, so the crate registry survives between boxes.
+# CARGO_HOME stays unset: ~/.cargo is in the kept home, so the registry
+# survives between boxes.
 [env.RUSTUP_HOME]
 fixed = "/usr/local/rustup"
 
-# The caveman skill's highest-priority mode source, above any config file.
 [env.CAVEMAN_DEFAULT_MODE]
 fixed = "ultra"
 
-# Asked for once on the first start that finds it empty, then kept in
-# ~/.config/wormhole/secrets.toml for every box of every role.
 [env.CONTEXT7_API_KEY]
 ask = true
 
-# What `gh` and git authenticate with. Use a fine-grained token scoped
-# to the repos this role works on, read-only unless you mean it: the
-# agent can read any secret the box holds, and the token's scope — plus
-# the egress list above — is the whole blast radius. Empty answer skips:
-# `gh` then reads public GitHub only. Never grant ~/.ssh instead; a key
-# is push-everything and scoped to nothing.
+# A fine-grained token, read-only unless you mean it: the agent can read
+# it, and its scope is the blast radius. Empty skips; gh then reads
+# public GitHub only.
 [env.GITHUB_TOKEN]
 ask = true
 
-# Wormhole carries your terminal's own description into the box home on
-# every start, so your real TERM wins here. This is what the box is told
-# when there was no description to carry.
-[env.TERM]
-default = "xterm-256color"
-
-# What TERM does not say. Neither needs a terminfo entry.
-[env.COLORTERM]
-default = ""
-
-[env.TERM_PROGRAM]
-default = ""
-
-[env.TERM_PROGRAM_VERSION]
-default = ""
-
-# The shell codex hands to hooks and commands, and it must exist inside
-# the box.
+# Codex hands it to hooks and commands, and it must exist in the box.
 [env.SHELL]
 fixed = "/bin/bash"
