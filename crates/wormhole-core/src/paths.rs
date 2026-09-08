@@ -152,18 +152,6 @@ pub fn roles_dir(config_home: &Path) -> PathBuf {
     config_home.join("wormhole/roles")
 }
 
-/// A box's live egress allowlist, beside its root copy: what its broker
-/// re-reads per tunnel, and what `wormhole allow`/`deny` edit.
-pub fn egress_file(box_dir: &Path) -> PathBuf {
-    box_dir.join("egress")
-}
-
-/// A box's own broker socket, beside its root copy — per box, so one
-/// box's revocation never touches another's.
-pub fn box_broker_socket(box_dir: &Path) -> PathBuf {
-    box_dir.join("broker.sock")
-}
-
 /// The host-side secret store: values asked for once and shared by every
 /// box that declares them. In config beside the roles that ask — the
 /// person's own file, 0600, never a box's.
@@ -213,12 +201,6 @@ pub fn baked_env(box_dir: &Path) -> PathBuf {
     box_dir.join("env.toml")
 }
 
-/// The last usage reading, shared by every box on this host: the limits
-/// are the account's, so one file holds them and one poll refreshes it.
-pub fn usage_file(data_home: &Path) -> PathBuf {
-    data_home.join("wormhole/usage.json")
-}
-
 /// The undo point: a reflink copy of the workspace as it was before this
 /// box started. One per box, replaced on that box's every start.
 ///
@@ -232,21 +214,6 @@ pub fn usage_file(data_home: &Path) -> PathBuf {
 /// protecting you from is not an undo point at all.
 pub fn snapshot_dir(data_home: &Path, key: &str) -> PathBuf {
     data_home.join("wormhole/snapshots").join(key)
-}
-
-/// The broker's unix socket on the host. Bind-mounted into a box that
-/// uses it, so the box speaks to the broker without a route anywhere.
-pub fn broker_socket(data_home: &Path) -> PathBuf {
-    data_home.join("wormhole/broker.sock")
-}
-
-/// The file whose lock means "this process is the one asking the endpoint
-/// for the account's usage windows". Age alone cannot hold that line:
-/// boxes started together stay in step, so every one of them reads the
-/// same stale cache in the same instant and every one of them fetches. The
-/// lock is what makes "one poll per host" true rather than likely.
-pub fn usage_lock(data_home: &Path) -> PathBuf {
-    data_home.join("wormhole/usage.lock")
 }
 
 /// The file whose lock means "this process is building the thing that

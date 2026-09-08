@@ -1,5 +1,7 @@
 # Egress changes live, because policy never lived in the box
 
+**Superseded on 2026-09-08.** The broker was removed; a box is on the host's network and `[access] credentials` says what it logs in as. Kept as the record of what was built and why.
+
 A blocked host used to mean editing the manifest and restarting the
 box — an unusable loop for any browsing-shaped work. The fix is
 structural, not a feature: the allowlist is enforced by the host-side

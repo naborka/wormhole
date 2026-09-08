@@ -148,46 +148,36 @@ preflight = "hooks/preflight.sh"
 | `run` | Which agent wormhole launches. `claude` and `codex` are known; each starts with its own permission prompts and sandbox bypassed, because the box holds the line. Absent means a box with no agent |
 | `model` | Passed the way the agent reads a model: `ANTHROPIC_MODEL` in the box for `claude`, the `model` key in `.codex/config.toml` for `codex` |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
-| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts; the agent then replaces the shell. A failing hook stops the box. Non-secret setup only — plugins, skills, tool init. It runs inside the box, so a credential it saved would sit where the agent reads; credentials belong to `ask` (host-side store) or the broker, never here |
+| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts; the agent then replaces the shell. A failing hook stops the box. Non-secret setup only — plugins, skills, tool init. It runs inside the box, so a credential it saved would sit where the agent reads; secrets belong to `ask` (host-side store), and the agent's login to `[access] credentials`, never here |
 
 ## `[access]` — what the box can reach
 
 ```toml
 [access]
-dns = "1.1.1.1"                          # the build box's resolver
-egress = ["crates.io", "*.crates.io"]    # HTTPS hosts, via the broker
+credentials = "none"                     # or "copy", "share"
+dns = "1.1.1.1"                          # absent: the host's resolver
 host_ca = false
 # grants = ["~/some/path"]               # host paths, only when you mean it
-# network = "host"                       # the opt-out escape hatch
-# broker = false                         # this box talks to nothing
 ```
 
 | Key | Meaning |
 |---|---|
-| `grants` | Host paths the box may see, bound at their host paths. `~` expands to your home. Symlinks, `..` and workspace overlap are refused |
-| `dns` | The resolver the build box uses for its own fetches, and the running box only under `network = "host"`. A routeless box needs none: the broker resolves names host-side. Absent means no DNS anywhere |
-| `network` | `"none"` (default) — a namespace holding only loopback, no route off the machine — or `"host"`, every route the host has |
-| `broker` | Reach out through the host. Default: on when the manifest has an agent, off when it does not. The box holds no credential; wormhole starts and stops the broker with the box |
-| `egress` | HTTPS hosts the box may reach through the broker's `CONNECT` leg. Exact lowercase names, or `*.X` for one subdomain level — and only beside `X` itself. Empty is the baseline: nothing is reachable that is not named. Refused when nothing would enforce it (`network = "host"` or no broker) |
+| `grants` | Host paths the box may see, bound read-write at their host paths. `~` expands to your home. Symlinks, `..` and workspace overlap are refused |
+| `credentials` | How the agent logs in. `"none"` (default): a clean box home, `/login` inside the box. `"copy"`: the host's login files copied into the box home once, where absent; the box refreshes its own copy and the host is never written. `"share"`: the host's login file bound read-write at the same place in the box home, so one login serves both and a refresh in the box lands on the host. `wormhole box --credentials MODE` beats this for one start. See [credentials](credentials.md) |
+| `dns` | The resolver the box uses, building and running alike. Absent means the host's own `/etc/resolv.conf`, bound read-only |
 | `host_ca` | **Adds** the host's CA bundle to what the box trusts, and points every TLS client at it — most do not read a bundle unless told to, and Node, which the agent is, never reads one at all. Applies to the build box as well. For networks that intercept TLS with their own CA. Off by default — see [what the box can reach](access.md) |
 
-The defaults carry the design: no route, broker on, baseline empty. A
-box with no `[access]` table at all holds no credential, reaches the
-model API through the host, and reaches nothing else.
+The box is on the host's network and speaks to the API for itself.
+Nothing here filters a connection; what `[access]` decides is what of
+*yours* the box can read — paths, trust, and the login it acts as. A box
+with no `[access]` table holds no login of yours and reaches the
+workspace and nothing else.
 
-### `network` and `broker`
-
-`network = "none"` gives the box a network namespace of its own with
-nothing in it but loopback. Connecting anywhere off the machine fails
-because **there is no route**, not because something filtered one.
-
-The broker is the other half, and wormhole runs it for you: every start
-of a brokered box spawns one with that box's `egress` list, its socket
-in the box's own directory, and ends it with the box. The agent reaches
-the model API through it with no credential in the box; `cargo`, `git`
-and anything that honors `HTTPS_PROXY` reach the `egress` hosts through
-its `CONNECT` leg, resolved and dialed host-side. See
-[the broker](broker.md).
+A manifest from before the broker went that still says `network`,
+`broker` or `egress` is refused by name, with `credentials` as the
+pointer. A host with no `/etc/resolv.conf` and no `dns` line is refused
+too: a box on the host's network with no resolver would fail every
+lookup and blame the network.
 
 ## `[runtime]` — how the box is made
 
@@ -215,7 +205,7 @@ what changed when it exits:
 
 ```
 workspace: 3 files changed
-  added   src/broker.rs
+  added   src/receipt.rs
   changed Cargo.toml
   removed notes.txt
 ```
@@ -281,22 +271,18 @@ ask = true                # asked once, kept for every box
 
 `ask` beside `fixed` or `default` is refused: a value that is never
 missing could never be asked for. A secret a box holds is a secret that
-box's agent can read — for the model API credential use the broker,
-which keeps it out of the box entirely.
+box's agent can read; the agent's own login is `[access] credentials`'
+business, not `[env]`'s.
 
-`TERM` is the one key wormhole helps with. It is only a name: every curses
+The terminal is declared for you. `TERM` is only a name: every curses
 program turns it into a description by looking it up, and the box carries
-only the descriptions its image ships — so a bare host `TERM` of
-`xterm-ghostty` names a terminal nothing in there can find.
-
-So declare it with `default`, and wormhole makes that safe: on every box
-start, and on every `wormhole attach`, it copies your terminal's own
-compiled description out of the host's terminfo database into the box home,
-where ncurses reads it without being told. Your real `TERM` then reaches
-the box and resolves in it. When there was no description to copy — a
-`TERM` the host itself cannot describe — wormhole drops it, and the
-`default` you declared is what the box is told. Name one the image
-certainly carries, such as `xterm-256color`.
+only the descriptions its image ships. So on every box start, and on every
+`wormhole attach`, wormhole copies your terminal's own compiled description
+out of the host's terminfo database into the box home, and your real
+`TERM` reaches the box and resolves in it. When there was no description
+to copy, the box is told `xterm-256color`. `COLORTERM`, `TERM_PROGRAM`
+and `TERM_PROGRAM_VERSION` carry the host's value too. A manifest that
+declares any of the four wins.
 
 ## `version`
 
@@ -335,9 +321,9 @@ built. What a box *does* redo on every start:
 
 - copies the image into a throwaway root (free on Btrfs and XFS, a full
   copy on ext4, skipped entirely with `[runtime] rootfs = "readonly"`)
-- re-seeds the instructions file, the preflight hook, the Claude Code
-  config and the status line into the kept home, so a manifest edit or a
-  wormhole upgrade takes effect at once
+- re-seeds the instructions file, the preflight hook and the Claude Code
+  config into the kept home, so a manifest edit or a wormhole upgrade
+  takes effect at once
 
 The kept home itself survives — one per box — so history, settings, logins
 and installed toolchains carry over every time that box starts again. A

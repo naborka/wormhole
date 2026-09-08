@@ -128,32 +128,19 @@ pub struct Access {
     /// the caller because a home directory is not a pure decision.
     #[serde(default)]
     pub grants: Vec<String>,
-    /// The one resolver the build box uses — a build fetches what its
-    /// recipe cannot pin — and the running box only under
-    /// `network = "host"`; a routeless box could not reach one, and the
-    /// broker's `CONNECT` leg resolves names host-side instead. Absent
-    /// means no DNS anywhere.
+    /// The one resolver the box uses, build and run alike. Absent means
+    /// the host's own `/etc/resolv.conf`, bound read-only — the box is on
+    /// the host's network, so the host's resolver is the natural one.
     #[serde(default)]
     pub dns: Option<IpAddr>,
-    /// `"none"` (the default) or `"host"`. With `"none"` the box gets a
-    /// network namespace of its own holding nothing but loopback, so
-    /// there is no route off the machine to take; what the box needs
-    /// beyond that goes through the broker. `"host"` hands it every
-    /// route the host has — the escape hatch, no longer the default.
+    /// How the agent gets a login. `"none"` (the default) starts with a
+    /// clean box home and the agent's own `/login` does the rest;
+    /// `"copy"` seeds the host's credential into the box home once, and
+    /// the box refreshes its own copy from then on; `"share"` binds the
+    /// host's credential file read-write, so a refresh in the box lands on
+    /// the host too. A start typed with `--credentials` beats this.
     #[serde(default)]
-    pub network: crate::run::Network,
-    /// Reach everything through the host-side broker: the model API with
-    /// no credential in the box, and the `egress` hosts by `CONNECT`.
-    /// Unset it defaults to "this box runs an agent" — the pairing with
-    /// `network = "none"` that makes the thesis true is what a bare
-    /// manifest gets. `broker = false` says this box talks to nothing.
-    #[serde(default)]
-    pub broker: Option<bool>,
-    /// Hosts the box may reach over HTTPS through the broker's `CONNECT`
-    /// leg, exact names or one-level wildcards (`*.crates.io`). Empty is
-    /// the baseline: nothing is reachable that is not named here.
-    #[serde(default)]
-    pub egress: Vec<String>,
+    pub credentials: Credentials,
     /// Adds the host's CA bundle to the box's own trust, for networks that
     /// intercept TLS with their own CA — Cloudflare WARP, a corporate
     /// proxy. Adds, not replaces: OpenSSL reads `SSL_CERT_DIR` as well as
@@ -169,25 +156,29 @@ pub struct Access {
     pub host_ca: bool,
 }
 
-/// The resolver a *running* box gets. The build box always takes the
-/// manifest's word — a build fetches what its recipe cannot pin — but a
-/// routeless run box could not reach a resolver, and the broker resolves
-/// names host-side; a resolv.conf there would be decoration. Decided
-/// here, once, so no caller building run arguments can restate it wrong.
-#[must_use]
-pub fn runtime_dns(manifest: &Manifest) -> Option<std::net::IpAddr> {
-    manifest
-        .access
-        .dns
-        .filter(|_| manifest.access.network == crate::run::Network::Host)
+/// Where a box's agent login comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Credentials {
+    /// Nothing seeded; the agent's own `/login` in the box fills the home.
+    #[default]
+    None,
+    /// The host's credential files copied into the box home, once: a box
+    /// that already has a login keeps it. The host copy is never written.
+    Copy,
+    /// The host's credential files bound read-write in the box home. One
+    /// login; a host agent and a box refreshing at once can cost a `/login`.
+    Share,
 }
 
-/// Whether this box speaks through the broker. Explicit wins; unset means
-/// "when there is an agent to speak for" — a `box -- sh` manifest with no
-/// agent spawns no broker it would never use.
-#[must_use]
-pub fn brokers(manifest: &Manifest) -> bool {
-    manifest.access.broker.unwrap_or(manifest.agent.run.is_some())
+impl fmt::Display for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Credentials::None => write!(f, "none"),
+            Credentials::Copy => write!(f, "copy"),
+            Credentials::Share => write!(f, "share"),
+        }
+    }
 }
 
 /// How the box is made from its image and what it leaves behind.
@@ -267,16 +258,6 @@ pub enum ConfigSeed {
     CodexToml,
 }
 
-/// The env pair a brokered box gets so its agent talks to the forwarder:
-/// the base-URL variable, and a key variable holding a dummy the broker
-/// strips host-side. Absent for an agent whose API leg goes through the
-/// `CONNECT` tunnel with its own credential instead.
-struct BrokeredApi {
-    base_url: &'static str,
-    key: &'static str,
-    dummy: &'static str,
-}
-
 /// One agent wormhole knows how to launch. Everything agent-specific
 /// lives here; a call site that compares `agent.run` to a string instead
 /// of asking this table is the bug this table exists to prevent.
@@ -292,11 +273,9 @@ struct KnownAgent {
     /// The env var this agent reads its model from; `None` means the
     /// model is seeded into the agent's config file instead.
     model_env: Option<&'static str>,
-    /// How the broker redirects this agent's API leg, when it does.
-    brokered_api: Option<BrokeredApi>,
-    /// Whether the usage feed and its status line apply — they read an
-    /// Anthropic endpoint, so they are claude's and nobody else's.
-    usage: bool,
+    /// The files, relative to a home, that hold this agent's login: what
+    /// `credentials = "copy"` copies and `"share"` binds.
+    credential_files: &'static [&'static str],
     config: ConfigSeed,
 }
 
@@ -309,12 +288,9 @@ const KNOWN_AGENTS: [KnownAgent; 2] = [
         // `.claude/`; the canonical file is at the home root.
         pointer: Pointer::Import("@~/AGENTS.md\n"),
         model_env: Some("ANTHROPIC_MODEL"),
-        brokered_api: Some(BrokeredApi {
-            base_url: "ANTHROPIC_BASE_URL",
-            key: "ANTHROPIC_API_KEY",
-            dummy: "sk-wormhole-dummy",
-        }),
-        usage: true,
+        // The account fields in `.claude.json` travel with it; see
+        // `seed::claude_config`.
+        credential_files: &[".claude/.credentials.json"],
         config: ConfigSeed::ClaudeJson,
     },
     KnownAgent {
@@ -327,10 +303,7 @@ const KNOWN_AGENTS: [KnownAgent; 2] = [
         // Codex has no import syntax, so the pointer is a symlink.
         pointer: Pointer::Symlink,
         model_env: None,
-        // Codex reaches its API through the CONNECT leg with its own
-        // credential; the broker's injection leg speaks only Anthropic.
-        brokered_api: None,
-        usage: false,
+        credential_files: &[".codex/auth.json"],
         config: ConfigSeed::CodexToml,
     },
 ];
@@ -359,11 +332,9 @@ pub enum ManifestError {
     EnvFixedConflict(String),
     /// `ask` beside a value that is never missing.
     EnvAskConflict(String),
-    /// An egress entry the allowlist rules refuse, with the rule it broke.
-    Egress(String, String),
-    /// An egress list on a box whose network makes it decoration.
-    EgressUnenforced,
     NoAgent,
+    /// An `[access]` key the broker took with it.
+    Removed(String),
     /// A manifest that both names a role and carries a recipe.
     RoleAndImage,
     /// A recipe was wanted and this manifest hands its box to a role.
@@ -414,15 +385,6 @@ impl fmt::Display for ManifestError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            ManifestError::Egress(entry, rule) => {
-                write!(f, "[access] egress entry {entry:?}: {rule}")
-            }
-            ManifestError::EgressUnenforced => write!(
-                f,
-                "[access] egress is enforced by the broker on a routeless \
-                 box; with network = \"host\" or broker = false it would be \
-                 decoration, and a rule that only decorates is refused"
-            ),
             ManifestError::EnvAskConflict(name) => write!(
                 f,
                 "[env.{name}] has a value already, so `ask` could never \
@@ -434,27 +396,32 @@ impl fmt::Display for ManifestError {
                  could never act; drop them or drop `fixed`"
             ),
             ManifestError::NoAgent => write!(f, "no agent named, so there is nothing to run"),
+            ManifestError::Removed(key) => write!(
+                f,
+                "[access] {key} is gone with the broker: the box is on the host's \
+                 network; `credentials` says which login it gets"
+            ),
         }
     }
 }
 
 impl std::error::Error for ManifestError {}
 
-#[derive(Deserialize)]
-struct VersionClaim {
-    version: Option<toml::Value>,
+/// The file as TOML, before anything is asked of it. Parsed once; the
+/// version, the role and the removed keys are read off this table and
+/// the manifest is built from it.
+fn table(text: &str) -> Result<toml::Table, ManifestError> {
+    toml::from_str(text).map_err(|e| ManifestError::Syntax(e.message().to_owned()))
 }
 
 /// What a wormhole file claims as its version, written exactly as it wrote
-/// it — `1`, `"v1alpha1"`, or `None` for a file that names none. `Err` is a
-/// TOML syntax failure.
+/// it — `1`, `"v1alpha1"`, or `None` for a file that names none.
 ///
 /// Read before the file itself, so one from another version is named as
 /// such instead of surfacing as a type error on one field or a heap of
 /// unknown keys. That is the whole reason the key exists.
-pub fn claimed_version(text: &str) -> Result<Option<String>, String> {
-    let claim: VersionClaim = toml::from_str(text).map_err(|e| e.message().to_owned())?;
-    Ok(claim.version.map(|found| found.to_string()))
+fn claimed_version(table: &toml::Table) -> Option<String> {
+    table.get("version").map(|found| found.to_string())
 }
 
 /// The role a workspace's manifest hands its box over to, if it does.
@@ -469,12 +436,17 @@ pub fn claimed_version(text: &str) -> Result<Option<String>, String> {
 /// manifest holding both is refused rather than merged, because merging is
 /// where a key like this turns into an override system nobody can predict.
 pub fn names_a_role(text: &str) -> Result<Option<String>, ManifestError> {
-    let claim: RoleClaim =
-        toml::from_str(text).map_err(|e| ManifestError::Syntax(e.message().to_owned()))?;
-    let Some(role) = claim.role else {
+    role_in(&table(text)?)
+}
+
+fn role_in(table: &toml::Table) -> Result<Option<String>, ManifestError> {
+    let Some(role) = table.get("role") else {
         return Ok(None);
     };
-    if claim.image.is_some() {
+    let role = role
+        .as_str()
+        .ok_or_else(|| ManifestError::Syntax("`role` must be a string".to_owned()))?;
+    if table.contains_key("image") {
         return Err(ManifestError::RoleAndImage);
     }
     if role.trim().is_empty() {
@@ -482,34 +454,35 @@ pub fn names_a_role(text: &str) -> Result<Option<String>, ManifestError> {
             "`role` names no role; give it a directory, a name, or a pinned ref".to_owned(),
         ));
     }
-    Ok(Some(role))
+    Ok(Some(role.to_owned()))
 }
 
-/// Just enough of a manifest to answer "does this hand over to a role".
-/// Deliberately not `deny_unknown_fields`: every other key is somebody
-/// else's business at this point.
-#[derive(Deserialize)]
-struct RoleClaim {
-    role: Option<String>,
-    image: Option<serde::de::IgnoredAny>,
+/// The `[access]` keys the broker took with it, so an old manifest is
+/// told what replaced them rather than "unknown field".
+fn removed_key(table: &toml::Table) -> Option<&'static str> {
+    let access = table.get("access")?.as_table()?;
+    ["network", "broker", "egress"]
+        .into_iter()
+        .find(|key| access.contains_key(*key))
 }
 
 pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
-    match claimed_version(text).map_err(ManifestError::Syntax)? {
+    let table = table(text)?;
+    match claimed_version(&table) {
         Some(found) if found == VERSION.to_string() => {}
         Some(found) => return Err(ManifestError::Version(found)),
         None => return Err(ManifestError::Version("nothing".to_owned())),
     }
-
-    // Said in this project's words rather than serde's. Without it a
-    // manifest that hands over to a role — a role's own, say, which is
-    // where "a role may not name a role" is decided — surfaces as
-    // `unknown field 'role'`, which names the key and not the rule.
-    if names_a_role(text)?.is_some() {
+    // Said in this project's words rather than serde's `unknown field`.
+    if role_in(&table)?.is_some() {
         return Err(ManifestError::HandsToARole);
     }
-    let manifest: Manifest =
-        toml::from_str(text).map_err(|e| ManifestError::Syntax(e.message().to_owned()))?;
+    if let Some(key) = removed_key(&table) {
+        return Err(ManifestError::Removed(key.to_owned()));
+    }
+    let manifest: Manifest = table
+        .try_into()
+        .map_err(|e: toml::de::Error| ManifestError::Syntax(e.message().to_owned()))?;
     if !crate::is_lowercase_hex(&manifest.image.base_sha256, SHA256_HEX) {
         return Err(ManifestError::Sha256NotHex(manifest.image.base_sha256));
     }
@@ -542,16 +515,6 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         }
         if var.ask && (var.fixed.is_some() || !var.default.is_empty()) {
             return Err(ManifestError::EnvAskConflict(name.clone()));
-        }
-    }
-    if !manifest.access.egress.is_empty()
-        && (manifest.access.network == crate::run::Network::Host || !brokers(&manifest))
-    {
-        return Err(ManifestError::EgressUnenforced);
-    }
-    for entry in &manifest.access.egress {
-        if let Some(rule) = crate::broker::egress_entry_error(entry, &manifest.access.egress) {
-            return Err(ManifestError::Egress(entry.clone(), rule));
         }
     }
     Ok(manifest)
@@ -591,17 +554,16 @@ pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
     known(manifest.agent.run.as_deref()?).map(|agent| agent.config)
 }
 
-/// Whether the usage feed and its status line apply to this box's agent.
-/// They read an Anthropic endpoint with the host's claude credential, so
-/// any other agent — or no agent — means no.
+/// The files, relative to a home, that hold this agent's login — what a
+/// `copy` seeds and a `share` binds. Empty with no agent.
 #[must_use]
-pub fn usage_feed(manifest: &Manifest) -> bool {
+pub fn credential_files(manifest: &Manifest) -> &'static [&'static str] {
     manifest
         .agent
         .run
         .as_deref()
         .and_then(known)
-        .is_some_and(|agent| agent.usage)
+        .map_or(&[], |agent| agent.credential_files)
 }
 
 /// The instructions file a box's agent gets: the built-in text, then the
@@ -630,12 +592,6 @@ pub fn compose_instructions(default: &str, extra: Option<&str>) -> String {
 /// cannot run under it must still be able to read this list.
 pub fn pre_agent_script(manifest: &Manifest) -> String {
     let mut script = String::new();
-    // Before the hook: a preflight that reaches the API needs the route
-    // the forwarder is, and with `network = "none"` there is no other.
-    if brokers(manifest) {
-        script.push_str(&crate::broker::forwarder_line());
-        script.push('\n');
-    }
     if manifest.agent.preflight.is_some() {
         script.push_str(&format!(
             "/bin/sh \"$HOME/{PREFLIGHT_SEED}\" || {{\n\
@@ -654,21 +610,6 @@ pub fn launch_command(manifest: &Manifest) -> Result<Vec<String>, ManifestError>
         return Ok(agent);
     }
     Ok(wrapped(&before, &agent))
-}
-
-/// A custom command (`box -- sh`) in a brokered box still gets the
-/// forwarder — the socket is mounted and `HTTPS_PROXY` points at the
-/// forwarder's port either way, and a shell whose proxy answers nothing
-/// would blame the network. The preflight hook stays out: a command you
-/// typed is not the agent's setup path.
-#[must_use]
-pub fn brokered_command(manifest: &Manifest, command: Vec<String>) -> Vec<String> {
-    if !brokers(manifest) {
-        return command;
-    }
-    let mut before = crate::broker::forwarder_line();
-    before.push('\n');
-    wrapped(&before, &command)
 }
 
 fn wrapped(before: &str, command: &[String]) -> Vec<String> {
@@ -735,10 +676,10 @@ fn shell_quote(word: &str) -> String {
 /// host's value when it has one and the default when it does not. Anything
 /// the manifest does not name never reaches the box.
 ///
-/// Everything the manifest declares plus what the recipe implies —
-/// `[env]` as written, with the model, the CA pointers and the broker's
-/// two variables folded in as fixed ones. The single input every env
-/// screen and every resolution starts from.
+/// Everything the manifest declares plus what the recipe implies — `[env]`
+/// as written, with the model and the CA pointers folded in as fixed ones
+/// and the terminal as defaults. The single input every env screen and
+/// every resolution starts from.
 #[must_use]
 pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
     let fixed = |value: String| EnvVar {
@@ -746,6 +687,12 @@ pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
         ..EnvVar::default()
     };
     let mut declared = manifest.env.clone();
+    for (name, default) in crate::terminfo::ENV_DEFAULTS {
+        declared.entry(name.to_owned()).or_insert_with(|| EnvVar {
+            default: default.to_owned(),
+            ..EnvVar::default()
+        });
+    }
     // Only when this agent reads a model variable at all: exporting
     // ANTHROPIC_MODEL to codex would be a line nobody reads, and worse, a
     // lie about how the model was actually passed.
@@ -769,42 +716,6 @@ pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
                 .entry(name.to_owned())
                 .or_insert_with(|| fixed(bundle));
         }
-    }
-    if brokers(manifest) {
-        // The agent talks to the forwarder and nothing else. The dummy key
-        // exists only so its client starts at all; the broker strips it and
-        // puts the real credential on, host-side. Only for an agent whose
-        // API leg the broker actually redirects — one that carries its own
-        // credential goes through the CONNECT leg and must not be pointed
-        // at an injection leg that speaks a different provider.
-        if let Some(api) = manifest
-            .agent
-            .run
-            .as_deref()
-            .and_then(known)
-            .and_then(|agent| agent.brokered_api.as_ref())
-        {
-            declared.insert(
-                api.base_url.to_owned(),
-                fixed(crate::broker::base_url_in_box()),
-            );
-            declared.insert(api.key.to_owned(), fixed(api.dummy.to_owned()));
-        }
-        // The CONNECT leg, spelled the way the tools in the box read it:
-        // cargo and friends take the uppercase pair, curl the lowercase.
-        // Loopback excluded, or the agent's own API leg would try to
-        // proxy itself through the proxy it already is.
-        for name in ["HTTPS_PROXY", "https_proxy"] {
-            declared.insert(name.to_owned(), fixed(crate::broker::base_url_in_box()));
-        }
-        for name in ["NO_PROXY", "no_proxy"] {
-            declared.insert(name.to_owned(), fixed("127.0.0.1,localhost".to_owned()));
-        }
-        // Node's own fetch ignores the proxy variables unless told; the
-        // agent is Node, and its WebFetch would otherwise dial a route
-        // the box does not have. A Node too old for the switch ignores
-        // it, which costs nothing.
-        declared.insert("NODE_USE_ENV_PROXY".to_owned(), fixed("1".to_owned()));
     }
     declared
 }
@@ -1052,87 +963,107 @@ mod tests {
 
     #[test]
     fn without_a_hook_the_agent_is_the_command_itself() {
-        let manifest = full("[agent]\nrun = \"claude\"\n[access]\nbroker = false\n");
+        let manifest = full("[agent]\nrun = \"claude\"\n");
         assert_eq!(launch_command(&manifest), agent_command(&manifest));
     }
 
-    /// The default carries the thesis: an agent manifest that says
-    /// nothing about access is routeless and brokered; saying
-    /// `broker = false` — or having no agent to speak for — turns it off.
+    /// The default hands the box no login of yours: a manifest that says
+    /// nothing about credentials starts clean, and `/login` inside the
+    /// box is the whole story. The two ways to hand one in are named.
     #[test]
-    fn an_agent_manifest_brokers_by_default_and_a_bare_one_does_not() {
-        let agent = full("[agent]\nrun = \"claude\"\n");
-        assert!(brokers(&agent));
-        assert_eq!(agent.access.network, crate::run::Network::None);
-        assert!(!brokers(&full("")), "no agent, nothing to broker for");
-        assert!(!brokers(&full(
-            "[agent]\nrun = \"claude\"\n[access]\nbroker = false\n"
-        )));
+    fn a_manifest_starts_with_no_login_unless_it_asks_for_one() {
+        assert_eq!(
+            full("[agent]\nrun = \"claude\"\n").access.credentials,
+            Credentials::None
+        );
+        for (spelled, wanted) in [
+            ("none", Credentials::None),
+            ("copy", Credentials::Copy),
+            ("share", Credentials::Share),
+        ] {
+            let manifest = full(&format!("[access]\ncredentials = \"{spelled}\"\n"));
+            assert_eq!(manifest.access.credentials, wanted);
+            assert_eq!(wanted.to_string(), spelled);
+        }
+        assert!(parse(&text("[access]\ncredentials = \"borrow\"\n")).is_err());
     }
 
-    /// An allowlist nothing would enforce is decoration, and decoration
-    /// is refused: egress needs the broker on a routeless box.
+    /// Each agent names the files its login lives in, relative to a home;
+    /// a copy or a share moves exactly those and nothing else. No agent,
+    /// nothing to move.
     #[test]
-    fn an_unenforced_egress_list_is_refused() {
-        for extra in [
-            "[access]\negress = [\"crates.io\"]\nnetwork = \"host\"\n[agent]\nrun = \"claude\"\n",
-            "[access]\negress = [\"crates.io\"]\nbroker = false\n[agent]\nrun = \"claude\"\n",
-            "[access]\negress = [\"crates.io\"]\n", // no agent, so no broker
+    fn each_agent_names_its_login_files() {
+        assert_eq!(
+            credential_files(&full("[agent]\nrun = \"claude\"\n")),
+            &[".claude/.credentials.json"]
+        );
+        assert_eq!(
+            credential_files(&full("[agent]\nrun = \"codex\"\n")),
+            &[".codex/auth.json"]
+        );
+        assert!(credential_files(&full("")).is_empty());
+    }
+
+    /// The keys the broker took with it are refused by name, with where
+    /// to look now, instead of serde's "unknown field".
+    #[test]
+    fn a_manifest_still_naming_the_broker_is_told_what_replaced_it() {
+        for key in [
+            "network = \"host\"",
+            "broker = false",
+            "egress = [\"crates.io\"]",
         ] {
-            assert!(
-                matches!(parse(&text(extra)), Err(ManifestError::EgressUnenforced)),
-                "{extra}"
+            let name = key.split(' ').next().expect("a key");
+            assert_eq!(
+                parse(&text(&format!("[access]\n{key}\n"))),
+                Err(ManifestError::Removed(name.to_owned())),
+                "{key}"
             );
         }
-        let held = "[agent]\nrun = \"claude\"\n[access]\negress = [\"crates.io\"]\n";
-        assert!(parse(&text(held)).is_ok());
     }
 
-    /// The egress rules themselves are the broker's (`egress_allows`);
-    /// what the manifest holds is that a bad entry is refused by name.
+    /// The terminal is wormhole's business: it carries the description in,
+    /// so it names the fallback too. A manifest that says otherwise wins.
     #[test]
-    fn a_bad_egress_entry_is_refused_with_its_rule() {
-        let extra = "[agent]\nrun = \"claude\"\n[access]\negress = [\"*.github.io\"]\n";
-        assert!(
-            matches!(parse(&text(extra)), Err(ManifestError::Egress(entry, _)) if entry == "*.github.io")
+    fn every_box_is_told_a_terminal_without_the_manifest_saying_so() {
+        let bare = full("");
+        assert_eq!(
+            box_env(&bare, &host(&[])).get("TERM").map(String::as_str),
+            Some("xterm-256color")
+        );
+        let told = box_env(
+            &bare,
+            &host(&[("TERM", "xterm-ghostty"), ("COLORTERM", "truecolor")]),
+        );
+        assert_eq!(told.get("TERM").map(String::as_str), Some("xterm-ghostty"));
+        assert_eq!(told.get("COLORTERM").map(String::as_str), Some("truecolor"));
+        assert_eq!(told.get("TERM_PROGRAM").map(String::as_str), Some(""));
+        let own = full("[env.TERM]\nfixed = \"vt100\"\n");
+        assert_eq!(
+            box_env(&own, &host(&[("TERM", "xterm-ghostty")]))
+                .get("TERM")
+                .map(String::as_str),
+            Some("vt100")
         );
     }
 
-    /// The broker hands the box its proxy view of the world: base URL and
-    /// dummy key for the agent, the CONNECT proxy for everything else,
-    /// loopback excluded so the API leg does not proxy itself.
+    /// The box speaks to the API for itself, so nothing about a proxy or
+    /// a stand-in key ever reaches its environment.
     #[test]
-    fn a_brokered_box_is_pointed_at_the_forwarder_for_everything() {
-        let env = box_env(&full("[agent]\nrun = \"claude\"\n"), &host(&[]));
-        assert_eq!(
-            env.get("HTTPS_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:8787")
-        );
-        assert_eq!(env.get("https_proxy"), env.get("HTTPS_PROXY"));
-        assert_eq!(
-            env.get("NO_PROXY").map(String::as_str),
-            Some("127.0.0.1,localhost")
-        );
-        assert_eq!(env.get("NODE_USE_ENV_PROXY").map(String::as_str), Some("1"));
-    }
-
-    /// A typed command in a brokered box gets the forwarder and not the
-    /// preflight hook: the proxy must answer, the setup path is the
-    /// agent's own. Without the broker the command runs bare.
-    #[test]
-    fn a_custom_command_gets_the_forwarder_exactly_when_the_box_brokers() {
-        let brokered = full("[agent]\nrun = \"claude\"\n");
-        let command = brokered_command(&brokered, vec!["sh".to_owned()]);
-        assert_eq!(command[0], "/bin/sh");
-        let script = command.last().expect("script");
-        assert!(script.contains("/run/wormhole/forward"), "{script}");
-        assert!(script.contains("exec 'sh'"), "{script}");
-        assert!(!script.contains("preflight"), "{script}");
-        let bare = full("[agent]\nrun = \"claude\"\n[access]\nbroker = false\n");
-        assert_eq!(
-            brokered_command(&bare, vec!["sh".to_owned()]),
-            vec!["sh".to_owned()]
-        );
+    fn a_box_is_told_nothing_about_a_proxy_or_a_stand_in_key() {
+        for agent in ["claude", "codex"] {
+            let env = box_env(&full(&format!("[agent]\nrun = \"{agent}\"\n")), &host(&[]));
+            for name in [
+                "HTTPS_PROXY",
+                "https_proxy",
+                "NO_PROXY",
+                "NODE_USE_ENV_PROXY",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_API_KEY",
+            ] {
+                assert!(!env.contains_key(name), "{agent}: {env:?}");
+            }
+        }
     }
 
     /// The hook runs from its seeded copy in the box home, so a role's
@@ -1252,7 +1183,7 @@ mod tests {
     #[test]
     fn an_undeclared_host_variable_never_reaches_the_box() {
         let env = box_env(&full(""), &host(&[("AWS_SECRET_ACCESS_KEY", "leak")]));
-        assert!(env.is_empty(), "{env:?}");
+        assert!(!env.contains_key("AWS_SECRET_ACCESS_KEY"), "{env:?}");
     }
 
     #[test]
@@ -1265,64 +1196,16 @@ mod tests {
         );
     }
 
-    /// A brokered box talks to the forwarder and holds nothing worth
-    /// taking: the dummy key exists only so the agent's client starts, and
-    /// the broker strips it host-side before anything goes upstream.
+    /// The hook runs before the agent, and the agent still replaces the
+    /// shell, so it stays PID 1 and owns the terminal.
     #[test]
-    fn a_brokered_box_is_pointed_at_the_forwarder_and_given_a_dummy_key() {
-        let manifest = full("[agent]\nrun = \"claude\"\n[access]\nbroker = true\n");
-        let env = box_env(&manifest, &host(&[]));
-        assert_eq!(
-            env.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some(crate::broker::base_url_in_box().as_str())
-        );
-        assert!(
-            env.get("ANTHROPIC_API_KEY")
-                .is_some_and(|k| !k.contains("sk-ant")),
-            "{env:?}"
-        );
-    }
-
-    /// A box that does not broker reaches the API itself and must not be
-    /// handed a base URL pointing at a forwarder that is not running.
-    #[test]
-    fn a_box_that_does_not_broker_is_told_nothing_about_one() {
-        let env = box_env(
-            &full("[agent]\nrun = \"claude\"\n[access]\nbroker = false\n"),
-            &host(&[]),
-        );
-        assert!(!env.contains_key("ANTHROPIC_BASE_URL"), "{env:?}");
-        assert!(!env.contains_key("ANTHROPIC_API_KEY"), "{env:?}");
-    }
-
-    /// The forwarder starts before the hook, because a preflight that
-    /// reaches the API needs the route the forwarder *is* — and with
-    /// `network = "none"` there is no other one.
-    #[test]
-    fn the_forwarder_starts_before_the_hook_and_the_agent_still_replaces_the_shell() {
-        let manifest =
-            full("[agent]\nrun = \"claude\"\npreflight = \"p.sh\"\n[access]\nbroker = true\n");
+    fn the_hook_runs_first_and_the_agent_still_replaces_the_shell() {
+        let manifest = full("[agent]\nrun = \"claude\"\npreflight = \"p.sh\"\n");
         let command = launch_command(&manifest).expect("command");
         let script = command.last().expect("script");
-        let forwarder = script
-            .find(crate::broker::FORWARD_IN_BOX)
-            .expect("forwarder");
         let hook = script.find(PREFLIGHT_SEED).expect("hook");
         let agent = script.find("exec ").expect("exec");
-        assert!(forwarder < hook, "{script}");
         assert!(hook < agent, "{script}");
-    }
-
-    /// Brokering alone is enough to need a shell wrapper, hook or no hook.
-    #[test]
-    fn brokering_without_a_hook_still_starts_the_forwarder() {
-        let manifest = full("[agent]\nrun = \"claude\"\n[access]\nbroker = true\n");
-        let script = launch_command(&manifest)
-            .expect("command")
-            .pop()
-            .expect("script");
-        assert!(script.contains(crate::broker::FORWARD_IN_BOX), "{script}");
-        assert!(script.contains("exec "), "{script}");
     }
 
     #[test]
@@ -1723,30 +1606,6 @@ mod tests {
         let manifest = full("[agent]\nrun = \"codex\"\nmodel = \"gpt-5-codex\"\n");
         let env = box_env(&manifest, &host(&[]));
         assert!(!env.contains_key("ANTHROPIC_MODEL"), "{env:?}");
-    }
-
-    /// A brokered codex box still gets the CONNECT proxy — that leg is
-    /// provider-neutral — but no Anthropic base URL and no dummy key: its
-    /// API leg tunnels with its own credential, and pointing it at the
-    /// injection leg would hand its requests to the wrong provider.
-    #[test]
-    fn a_brokered_codex_box_gets_the_tunnel_and_no_anthropic_redirect() {
-        let env = box_env(&full("[agent]\nrun = \"codex\"\n"), &host(&[]));
-        assert_eq!(
-            env.get("HTTPS_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:8787")
-        );
-        assert!(!env.contains_key("ANTHROPIC_BASE_URL"), "{env:?}");
-        assert!(!env.contains_key("ANTHROPIC_API_KEY"), "{env:?}");
-    }
-
-    /// The usage feed reads an Anthropic endpoint with the host's claude
-    /// credential; only a claude box may spawn it.
-    #[test]
-    fn the_usage_feed_applies_to_claude_and_nobody_else() {
-        assert!(usage_feed(&full("[agent]\nrun = \"claude\"\n")));
-        assert!(!usage_feed(&full("[agent]\nrun = \"codex\"\n")));
-        assert!(!usage_feed(&full("")));
     }
 
     #[test]

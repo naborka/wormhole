@@ -749,10 +749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wormhole-forward"
-version = "0.1.0"
-
-[[package]]
 name = "zerocopy"
 version = "0.8.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"

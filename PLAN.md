@@ -12,10 +12,10 @@ Two crates. The only boundary the compiler must enforce is purity, and that need
 
 | Crate | Owns | Touches the OS? |
 |---|---|---|
-| `wormhole-core` | the five port traits, their in-memory fakes, mount planning, role manifest, grants, egress policy, launch assertions as data, banner rendering | **no** — pure, no syscalls, no I/O |
-| `wormhole` | CLI, TUI, wiring, and every port impl as a module: `boundary.rs` (`clone`/`unshare`/`pivot_root`/`mount`/seccomp/Landlock), `rootfs.rs` (registry pull, layer cache, overlay), `broker.rs` (reverse proxies, credential injection, OAuth refresh, streaming relay), `term.rs` (PTY master, raw mode, VT screen model), `path.rs` (canonicalisation, symlink resolution) | yes |
+| `wormhole-core` | the five port traits, their in-memory fakes, mount planning, role manifest, grants, credential modes, launch assertions as data, banner rendering | **no** — pure, no syscalls, no I/O |
+| `wormhole` | CLI, TUI, wiring, and every port impl as a module: `boundary.rs` (`clone`/`unshare`/`pivot_root`/`mount`/seccomp/Landlock), `rootfs.rs` (registry pull, layer cache, overlay), `term.rs` (PTY master, raw mode, VT screen model), `path.rs` (canonicalisation, symlink resolution) | yes |
 
-Five ports, each defined in `wormhole-core` with an in-memory fake: `Boundary`, `RootFs`, `Broker`, `Terminal`, `PathResolver`. Every decision in the system is reachable through them without a kernel. Ports are traits, not crates — a module graduates to its own crate only when compile time or reuse demands it, which is a mechanical extraction later, not a design decision now.
+Four ports, each defined in `wormhole-core` with an in-memory fake: `Boundary`, `RootFs`, `Terminal`, `PathResolver`. (A fifth, `Broker`, was built and removed — see Step 8.) Every decision in the system is reachable through them without a kernel. Ports are traits, not crates — a module graduates to its own crate only when compile time or reuse demands it, which is a mechanical extraction later, not a design decision now.
 
 **Purity is enforced mechanically:** `wormhole-core`'s `Cargo.toml` carries no `libc`, `nix`, or `tokio` dependency, and a one-line CI check keeps it that way.
 
@@ -75,8 +75,8 @@ This is where default-deny lives. It is pure, so it can be tested exhaustively.
 Every assertion from CONCEPT.md §8 exists first as a pure verdict: probe results in, refusal-or-proceed out. The banner renders from the same data. Pulling this ahead of the first real box costs nothing — it is data — and means the ratchet exists before there is anything to regress.
 
 **Tests (pure):**
-- each of: digest mismatch · a readable credential path · a reachable route · an unplanned rw host mount · a retained capability · a held lockfile → maps to refusal with its own distinct error
-- the banner renders the live boundary, egress set, and grant count, from data — pure function, snapshot-tested
+- each of: digest mismatch · a readable credential path · an unplanned rw host mount · a retained capability · a held lockfile → maps to refusal with its own distinct error
+- the banner renders the live boundary, the resolver, and the grant count — grants, CA bundle, shared credential — from data; pure function, snapshot-tested
 
 Step 6 wires these verdicts to real probes; nothing about the decisions changes there.
 
@@ -152,7 +152,11 @@ This step is the ratchet. Nothing after it can quietly regress an invariant.
 
 ---
 
-## Step 8 — broker: model API
+## Step 8 — broker: model API — built, then removed
+
+**Superseded on 2026-09-08.** The broker was built as planned — streaming relay, proactive refresh under `flock`, atomic write-back, the dummy key stripped host-side, every test below green — and then taken out. Two things sank it. Claude Code opens a long-lived `CONNECT` tunnel the moment it starts and makes its calls beside it, which deadlocked the one-connection-at-a-time in-box forwarder into a silent spinner; and everything the broker could not inject into (bootstrap flags, `/usage`, the MCP registry) answered `401` to the dummy key, so the agent ran half-degraded by design. The wanted thing was an autonomous agent. A box is on the host's network now and speaks to the API for itself; what it logs in with is `[access] credentials = "none" | "copy" | "share"` (or `--credentials` on the start): a clean home and `/login` inside the box, the host's credential files copied in once, or the host's files bound read-write. The test list stays below as the record of what was proven.
+
+<details><summary>The original step, for the record</summary>
 
 Host-side reverse proxy, unix socket into the box, ~100-line in-box forwarder on `127.0.0.1`. Shape already proven by CONCEPT.md spike #14.
 
@@ -175,6 +179,8 @@ Broker errors surface to the agent as HTTP responses in its own TUI — nothing 
 - two brokers started concurrently produce **one** refresh, not two — the second observes the first's result. This is the test that stops a silent re-login bug that would otherwise appear only on a second workspace, hours in
 - a rotated refresh token is persisted before the response is served, so a crash after refresh does not lose the new token
 
+</details>
+
 ---
 
 ## Step 9 — agent layer
@@ -191,17 +197,16 @@ Broker errors surface to the agent as HTTP responses in its own TUI — nothing 
 
 ## Step 10 — run the agent
 
-`wormhole` boots a box and runs Claude Code against the broker.
+`wormhole` boots a box and runs Claude Code in it, on the host's network, with the login the `credentials` mode hands it.
 
 ### ← FIRST RUNNABLE. Dogfood to answer assumptions, not to switch.
 
-At this point: your project directory and nothing else of your machine, no credential in the box, no route but the broker, boundary printed on every launch. **No persona yet** — which means this is worse than the role container you use today, and you will not actually switch here. That is Step 11. Saying otherwise would be optimism dressed as a milestone.
+At this point: your project directory and nothing else of your machine, no credential in the box unless a `credentials` mode put one there, the host's network, boundary printed on every launch. **No persona yet** — which means this is worse than the role container you use today, and you will not actually switch here. That is Step 11. Saying otherwise would be optimism dressed as a milestone.
 
 Run it anyway, because these questions decide the rest of the design and only a real run answers them:
-- does the absence of DNS break anything you did not predict (assumption #3) — **measure startup time**; Claude Code does update and feature-flag checks (`cachedGrowthBookFeatures` is in `account.json`) and with no route those must fail *fast*, not hang
+- ~~does the absence of DNS break anything you did not predict (assumption #3)~~ — moot: the box has the host's network and resolver, and Claude Code's update and feature-flag checks simply work
 - does `debian:13-slim` + npm-installed Claude actually run (assumption #4)
-- how badly do you miss `apt-get install` inside a running box — that is the signal for whether the `CONNECT` proxy is MVP-1 or urgent
-- how badly do you miss the claude.ai connectors that the dummy key disables
+- how badly do you miss `apt-get install` inside a running box — the root is thrown away on exit, so packages belong in the image either way
 
 ---
 
@@ -217,7 +222,7 @@ Run it anyway, because these questions decide the rest of the design and only a 
 - a `dst` escaping the box is rejected
 - `src` outside `files/` still ships (the `shared/persona.md` case)
 - a role layer rebuild is byte-identical
-- a role `egress` request beyond the configured ceiling is refused, with a diff — printed at launch, before the PTY; the panel is not required for this refusal to be visible
+- ~~a role `egress` request beyond the configured ceiling is refused~~ — no egress lists since 2026-09-08; the ceiling idea survives for `grants` only
 
 ## Step 11b — roles, from a git commit
 
@@ -247,15 +252,15 @@ refusing with the command that fixes it.
 
 ### ← Roles done. MVP-0 completes at Step 14.
 
-Your persona, your settings, your skills, boxed. Steps 12, 13 and 14 finish it: the control panel, the `CONNECT` proxy (without which `apt-get`, WebFetch and context7 stay dead), and read-only git plus GitHub API. From Step 11 on it is already better than the role container you use today — same persona, but no credential inside it and no host path but the project.
+Your persona, your settings, your skills, boxed. Step 12 finishes it: the control panel. (Steps 13 and 14, the `CONNECT` proxy and the read-only git broker, were dropped with the broker — the box is on the host's network.) From Step 11 on it is already better than the role container you use today — same persona, no host path but the project, and a login only where you chose one.
 
 ---
 
 ## Step 12 — control panel
 
-Deferred to here deliberately. Nothing earlier needed it: launch refusals print to stderr before the PTY exists (Step 6), broker errors reach the agent as HTTP responses (Step 8). The first thing that genuinely needs a live prompt is the blocked-host flow of Step 13 — so the panel arrives exactly one step before its first real customer, instead of before the first runnable.
+Deferred to here deliberately. Nothing earlier needed it: launch refusals print to stderr before the PTY exists (Step 6), and API errors reach the agent in its own TUI. (It was once meant to arrive one step before the blocked-host flow of Step 13; that flow went with the broker.)
 
-VT screen model, `Ctrl-\` toggle, grants list, credential revocation, egress grants.
+VT screen model, `Ctrl-\` toggle, grants list.
 
 **No live mount injection.** Mount grants are launch-time only; granting a path means restarting the box. Boots are instant (layers cached), mount revocation was never retroactive anyway (CONCEPT.md §5 — open fds survive `umount`), so a restart is what honest revocation already required. This deletes the only `setns` code in the MVP. Live injection is post-MVP if dogfooding demands it.
 
@@ -263,38 +268,20 @@ VT screen model, `Ctrl-\` toggle, grants list, credential revocation, egress gra
 - recorded byte streams → screen model → `contents_formatted()` restores an identical screen (fixture-driven, no tty)
 - toggling in and back leaves the agent's screen byte-identical
 - the panel renders from core state only; it holds no decision of its own
-- revoking a credential is **retroactive** — the very next request fails
 - the panel lists mount grants and offers no revoke; it says a mount change means restart, rather than implying a live revoke exists
-- the panel says **"revoked in this box"**, never "revoked" — one broker per box, so it cannot speak for another (CONCEPT.md §10, risk 7)
-- a role's `egress` request renders as a diff and is refused until approved — **including local roles**, so the approval path is exercised daily rather than first meeting reality when git-sourced roles land
+- a role's `grants` request renders as a preview and is refused until approved — **including local roles**, so the approval path is exercised daily rather than first meeting reality when git-sourced roles land
 
 ---
 
-## Step 13 — `CONNECT` proxy
+## Step 13 — `CONNECT` proxy — dropped
 
-Baseline allowlist is **empty**. Every host comes from a role request or a panel grant.
-
-**Tests:**
-- exact-name match; one-level wildcard `*.crates.io` matches `static.crates.io` and **not** `a.b.crates.io`
-- **`*.X` is rejected unless `X` is itself allowed** — so `*.github.io` cannot be granted without `github.io` as a target in its own right. No Public Suffix List, one rule, exhaustive table test
-- an IP literal in `CONNECT` is refused — allowlists are names
-- the enumerated GitHub set is reachable: `github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`
-- **`api.github.com` and `gist.github.com` are refused** — the API's only path is the broker, and a wildcard must never be able to grant them
-- a blocked host produces a refusal plus a panel prompt, never a hang; one keystroke grants it and the pending request proceeds
+**Dropped on 2026-09-08 with the broker.** The allowlist rules (exact names, one-level wildcards only beside their base, the enumerated GitHub set, IP literals refused) were built and tested, and `wormhole allow`/`deny` changed a running box's list live. None of it exists now: a box is on the host's network, and what bounds it is the workspace, the grants and the login mode. If a host allowlist is ever wanted again it is a netfilter question on the host, not a proxy in front of a routeless box.
 
 ---
 
-## Step 14 — git and GitHub API broker, read only
+## Step 14 — git and GitHub API broker, read only — dropped
 
-`insteadOf` rewrite in a box-local gitconfig, token injected host-side, scoped to this workspace's remotes.
-
-**Tests:**
-- clone and fetch of a workspace remote succeed; any other repo is refused
-- **push is refused** — no push path exists
-- GitHub API `GET` succeeds through the broker; **`POST`, `PATCH`, `PUT`, `DELETE` are refused**
-- specifically refused, because each one reinstates push by another route: `PUT /repos/*/contents/*`, `POST /repos/*/git/refs`, `POST /gists`
-- the host's `.git/config` and `~/.gitconfig` are never modified
-- the token never appears inside the box, in any log, or in any error message
+**Dropped on 2026-09-08 with the broker.** Git and `gh` in the box reach GitHub the way they do on the host, over the host's network, with whatever `GITHUB_TOKEN` the manifest asks for (`[env.GITHUB_TOKEN] ask = true`, kept host-side and handed to the box). Scope that token instead of scoping a proxy: read-only unless you mean it, and only to the repositories the role works on.
 
 ---
 
@@ -308,7 +295,7 @@ Baseline allowlist is **empty**. Every host comes from a role request or a panel
 | N sessions with per-session PID/mount/net namespaces | the multi-agent goal (§4) |
 | Reflink checkpoint and restore | undo for `rm -rf`, without giving up transparency |
 | `MicroVM` boundary | the host-kernel row of the §1 table — blocked on `/dev/kvm` and libkrun #329 |
-| Crate extraction (`boundary`, `rootfs`, `broker`, `term` out of the binary crate) | compile time or reuse, if either ever hurts — mechanical, no design change |
+| Crate extraction (`boundary`, `rootfs`, `term` out of the binary crate) | compile time or reuse, if either ever hurts — mechanical, no design change |
 
 ---
 
@@ -316,15 +303,15 @@ Baseline allowlist is **empty**. Every host comes from a role request or a panel
 
 Each is cheap and each removes a decision from the critical path.
 
-**Done:** broker-side OAuth refresh — proven live, CONCEPT.md spike #15. It rotated the refresh token, which is what put `flock` and atomic write-back into Step 8.
+**Done, then moot:** broker-side OAuth refresh — proven live, CONCEPT.md spike #15. It rotated the refresh token, which is what put `flock` and atomic write-back into Step 8. With the broker gone the agent refreshes for itself; the rotation result is still why `credentials = "share"` warns that the host agent and a box can race each other for one file.
 
 Remaining:
 
 1. **Assumption #1** — the uid-map overlap test. One `sudo` command. Decides whether §4's namespace separation has an alternative.
 2. **Assumption #7** — `vt100` upstream health. Check maintenance, compare `vt100-ctt` and `vt100-psmux`, decide vendor-or-depend before Step 12.
 3. **Assumption #4** — `debian:13-slim` + npm Claude Code. A `docker run` and an `npm i -g` proves or kills it in ten minutes.
-4. **Assumption #9** — is `anthropic-beta: oauth-2025-04-20` required? Isolate it so the header set is understood rather than copied.
-5. **Assumption #10** — does `gh` accept a base-URL override cleanly? Decides whether the GitHub API broker is usable through `gh` or only through `curl`.
+4. ~~**Assumption #9** — is `anthropic-beta: oauth-2025-04-20` required?~~ Moot without the broker.
+5. ~~**Assumption #10** — does `gh` accept a base-URL override cleanly?~~ Moot without the GitHub API broker.
 
 ---
 

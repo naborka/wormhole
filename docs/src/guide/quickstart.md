@@ -8,9 +8,10 @@ wormhole init
 
 `wormhole.toml` in your workspace root is the whole recipe: the image, the
 agent, and everything the box may reach. `init` writes a working one —
-Alpine, Node, Claude Code, no route off the machine, and no credential of
-yours anywhere in the box: the agent reaches the model API through the
-host-side [broker](broker.md):
+Alpine, Node, Claude Code, the host's network, and no login of yours in
+the box: the first start asks you to `/login` inside it, and the box
+keeps that login in its own home from then on (see
+[credentials](credentials.md) for the two ways to hand yours in):
 
 ```toml
 {{#include ../../../templates/wormhole.toml}}
@@ -61,11 +62,9 @@ wormhole box --new --as <name>  # another box, under a name you pick
 wormhole box --id <id|name>     # that exact box, whenever
 wormhole ps               # running boxes
 wormhole ps --all         # every box this host keeps, running or idle
-wormhole usage            # the account's usage windows, with resets
 wormhole attach <id|name> # second terminal into a running box (its agent)
 wormhole attach <id> -- sh
-wormhole allow <id|name> <host>  # let it reach one more host, live
-wormhole deny <id|name> <host>   # take one back; no restart either way
+wormhole box --credentials copy  # this start: your login, copied in once
 wormhole secret list      # values `ask = true` keeps, shared by every box
 wormhole stop <id|name>   # end a running box from anywhere
 wormhole rename <id|name> <new>  # call it something else
@@ -76,20 +75,6 @@ wormhole gc               # what the data home holds, and what can go
 
 `<id>` is the twelve-character ID `wormhole ps` prints; `<name>` is what
 you called the box with `--as`. Every command takes either.
-
-While you talk to the agent, Claude Code's status bar shows what is left
-of the account's usage windows — the session window, the weekly one, and
-any per-model weekly window that binds sooner:
-
-```
-SESSION: 13%  FABLE: 78%  WEEKLY: 47%
-```
-
-The numbers are the account's, shared by every box, and are refreshed
-from the host about once a minute; the box holds no credential and makes
-no call for them. A reading that stops refreshing shows its age —
-`(12m ago)` — rather than posing as current. A status line you configured
-yourself in the home's `.claude/settings.json` is left alone.
 
 ## 4. Or drive it from the panel
 
@@ -140,5 +125,5 @@ gigabyte on a gap in the evidence.
 - [The manifest](manifest.md) — every key, including the boundary ones
 - [Boxes](boxes.md) — several in one folder, resumable by id
 - [Roles](roles.md) — one recipe, any workspace
-- [The broker](broker.md) — the credential off the box for good
+- [Credentials](credentials.md) — none, copy, or share
 - [What the box can reach](access.md) — the security model

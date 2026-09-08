@@ -31,7 +31,10 @@ mod tests {
             .collect();
         let text = to_toml(&store).expect("serializes");
         assert_eq!(parse(&text).expect("parses"), store);
-        assert_eq!(parse("").expect("an empty file is an empty store"), Store::new());
+        assert_eq!(
+            parse("").expect("an empty file is an empty store"),
+            Store::new()
+        );
     }
 
     #[test]

@@ -1,5 +1,7 @@
 # Routeless and brokered by default
 
+**Superseded on 2026-09-08.** The broker was removed; a box is on the host's network and `[access] credentials` says what it logs in as. Kept as the record of what was built and why.
+
 A manifest that says nothing about access now gets `network = "none"`
 and, when it has an agent, the broker — spawned by the box start itself,
 with that manifest's `egress` allowlist, its socket in the box's own

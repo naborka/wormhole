@@ -1,6 +1,6 @@
 # wormhole
 
-Isolation tool for AI coding agents run with all permissions granted. The agent is assumed hostile: it sees one directory and nothing else of the machine, holds no credential you did not grant, and reaches no host you did not name.
+Isolation tool for AI coding agents run with all permissions granted. The agent is assumed hostile: it sees one directory and nothing else of the machine, and holds no login you did not hand it. It is on the host's network and speaks to the world for itself.
 
 ## Language
 
@@ -39,7 +39,7 @@ A name you gave something that already has an identity of its own — a box, whi
 _Avoid_: name (a manifest has one of those, and several boxes share it), label, tag, handle
 
 **Boundary**:
-The namespaces a box runs behind: user, mount, UTS and PID always, plus a network namespace with no route out of the machine when `network = "none"`. No daemon, no root, no Docker.
+The namespaces a box runs behind: user, mount, UTS and PID. No network namespace: a box is on the host's network. No daemon, no root, no Docker.
 _Avoid_: jail, isolation level
 
 ### Images
@@ -105,13 +105,17 @@ A recipe could not be read, so nothing about what references it can be shown eit
 A host path that a manifest's `[access] grants` names, mounted into the box. Baseline is empty — the workspace and nothing else — and every grant prints at launch.
 _Avoid_: permission, allow rule, exception
 
-**Broker**:
-The host-side process that holds the credential and hands the box a socket instead, so the box needs no key of its own.
-_Avoid_: proxy (say which: reverse proxy or CONNECT proxy), gateway
-
 **Credential**:
-A secret that belongs to the host. Either granted as a file the box may read, or held by the broker and never entering the box at all.
+A secret that belongs to the host. It reaches a box only by a credentials mode — `none`, `copy`, `share` — or by an explicit grant; nothing else carries one across.
 _Avoid_: token, key, secret (except when quoting a protocol field)
+
+**Credentials mode**:
+How a box's agent gets its login, set by `[access] credentials` or `--credentials` on the start. `none`: a clean box home, and the agent's own `/login` inside the box. `copy`: the host's credential files copied into the box home once, where absent; the box refreshes its own copy. `share`: the host's files bound read-write at the same place in the box home, so one login serves both and a refresh in the box lands on the host.
+_Avoid_: auth mode, login sharing, credential grant (that is a `grants` line, which is the other route)
+
+**Broker** (_retired_):
+The host-side process that once held the credential and handed the box a socket instead. Built, proven, removed on 2026-09-08; the word survives only in the design record.
+_Avoid_: using it for anything current
 
 **Declared variable**:
 An environment variable named in the manifest's `[env]` or by `--env`. The only kind that reaches a box; an undeclared host variable never crosses. Per variable: `fixed` is the manifest's own value and never moves, `default` fills in when the host has none, `required` refuses a start without a value, `secret` masks the value on every screen.

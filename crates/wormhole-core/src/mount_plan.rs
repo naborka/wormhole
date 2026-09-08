@@ -14,6 +14,13 @@ pub const BOX_HOSTNAME: &str = "wormhole";
 /// busybox there, and the box would find neither `mkdir` nor `apk`.
 pub const BOX_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// The `PATH` a box runs under: the kept home's `.local/bin` first, so a
+/// tool installed there outlives the throwaway root, then the image's.
+#[must_use]
+pub fn box_path(home: &Path) -> String {
+    format!("{}/.local/bin:{BOX_PATH}", home.display())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub name: String,
@@ -44,15 +51,15 @@ impl Grant {
         }
     }
 
-    /// An already-resolved host file bound read-only at a different box
-    /// path. How the host CA bundle travels.
-    pub fn retargeted(resolved: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
+    /// An already-resolved host file bound at a different box path: the
+    /// CA bundle read-only, a shared login read-write.
+    pub fn bound(resolved: impl Into<PathBuf>, target: impl Into<PathBuf>, rw: bool) -> Self {
         let resolved = resolved.into();
         Grant {
             requested: resolved.clone(),
             resolved,
             target: target.into(),
-            rw: false,
+            rw,
         }
     }
 }
@@ -168,7 +175,7 @@ pub const DEVICES: [&str; 6] = [
 /// root, because installing is the point, plus only what a package manager
 /// needs. No workspace, no home, no grants — nothing of yours is reachable
 /// while third-party install scripts run.
-pub fn build_ops(image: &Path, dns: Option<IpAddr>, bound: &[(PathBuf, PathBuf)]) -> Vec<MountOp> {
+pub fn build_ops(image: &Path, resolver: &Resolver, bound: &[(PathBuf, PathBuf)]) -> Vec<MountOp> {
     let mut ops = vec![image_root(image, true)];
     ops.extend(device_ops());
     ops.push(MountOp::Proc {
@@ -193,7 +200,7 @@ pub fn build_ops(image: &Path, dns: Option<IpAddr>, bound: &[(PathBuf, PathBuf)]
         rw: false,
     }));
     ops.push(hosts_op());
-    ops.extend(resolv_op(dns));
+    ops.push(resolv_op(resolver));
     ops
 }
 
@@ -240,11 +247,29 @@ fn hosts_op() -> MountOp {
     }
 }
 
-fn resolv_op(dns: Option<IpAddr>) -> Option<MountOp> {
-    dns.map(|dns| MountOp::File {
-        target: PathBuf::from("/etc/resolv.conf"),
-        content: format!("nameserver {dns}\n"),
-    })
+/// What answers the box's name lookups. A box on the host's network
+/// always has one: the resolver named, or the host's own file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolver {
+    /// One nameserver, the only line of the box's `resolv.conf`.
+    Named(IpAddr),
+    /// The host's `resolv.conf`, symlinks followed, bound read-only.
+    Host(PathBuf),
+}
+
+fn resolv_op(resolver: &Resolver) -> MountOp {
+    let target = PathBuf::from("/etc/resolv.conf");
+    match resolver {
+        Resolver::Named(dns) => MountOp::File {
+            target,
+            content: format!("nameserver {dns}\n"),
+        },
+        Resolver::Host(file) => MountOp::Bind {
+            source: file.clone(),
+            target,
+            rw: false,
+        },
+    }
 }
 
 /// Interim rootfs until Step 4 ships digest-pinned layers: the host's
@@ -350,7 +375,7 @@ pub fn compute(
     root: Root<'_>,
     user: &User,
     grants: &[Grant],
-    dns: Option<IpAddr>,
+    resolver: &Resolver,
 ) -> Result<Vec<MountOp>, PlanError> {
     if !workspace.is_absolute() {
         return Err(PlanError::WorkspaceNotAbsolute(workspace.to_owned()));
@@ -413,7 +438,7 @@ pub fn compute(
         target: PathBuf::from("/etc/group"),
         content: format!("{name}:x:{gid}:\n", name = user.name, gid = user.gid),
     });
-    ops.extend(resolv_op(dns));
+    ops.push(resolv_op(resolver));
     ops.push(MountOp::Bind {
         source: home_src.to_owned(),
         target: home_in_box(user),
@@ -498,6 +523,15 @@ fn validate_and_normalize(workspace: &Path, grants: &[Grant]) -> Result<Vec<Gran
 mod tests {
     use super::*;
 
+    /// A tool the agent installs into its kept home is found before the
+    /// image's copy, and the image's directories are all still there.
+    #[test]
+    fn the_box_path_puts_the_homes_local_bin_first_and_keeps_the_images() {
+        let path = box_path(Path::new("/home/me"));
+        assert!(path.starts_with("/home/me/.local/bin:"), "{path}");
+        assert!(path.ends_with(BOX_PATH), "{path}");
+    }
+
     fn user() -> User {
         User {
             name: "nabor".to_owned(),
@@ -506,19 +540,34 @@ mod tests {
         }
     }
 
-    fn plan(grants: &[Grant]) -> Result<Vec<MountOp>, PlanError> {
-        plan_with_dns(grants, None)
+    fn host_resolver() -> Resolver {
+        Resolver::Host(PathBuf::from("/run/systemd/resolve/stub-resolv.conf"))
     }
 
-    fn plan_with_dns(grants: &[Grant], dns: Option<IpAddr>) -> Result<Vec<MountOp>, PlanError> {
+    fn plan(grants: &[Grant]) -> Result<Vec<MountOp>, PlanError> {
+        plan_with(grants, &host_resolver())
+    }
+
+    fn plan_with(grants: &[Grant], resolver: &Resolver) -> Result<Vec<MountOp>, PlanError> {
         compute(
             Path::new("/home/nabor/proj"),
             Path::new("/home/nabor/.local/share/wormhole/workspaces/abc/home"),
             Root::HostUsr,
             &user(),
             grants,
-            dns,
+            resolver,
         )
+    }
+
+    fn resolv_conf(ops: &[MountOp]) -> Vec<&MountOp> {
+        ops.iter()
+            .filter(|op| match op {
+                MountOp::File { target, .. } | MountOp::Bind { target, .. } => {
+                    target == Path::new("/etc/resolv.conf")
+                }
+                _ => false,
+            })
+            .collect()
     }
 
     /// The host bundle lands read-only at the box's canonical path, so
@@ -526,7 +575,12 @@ mod tests {
     #[test]
     fn a_trusted_host_ca_is_bound_read_only_at_the_canonical_path() {
         let host_bundle = Path::new("/etc/ca-certificates/extracted/tls-ca-bundle.pem");
-        let ops = plan(&[Grant::retargeted(host_bundle, crate::ca::CA_BUNDLE_IN_BOX)]).unwrap();
+        let ops = plan(&[Grant::bound(
+            host_bundle,
+            crate::ca::CA_BUNDLE_IN_BOX,
+            false,
+        )])
+        .unwrap();
         assert!(
             binds(&ops).contains(&(host_bundle, Path::new(crate::ca::CA_BUNDLE_IN_BOX), false)),
             "{:?}",
@@ -552,7 +606,7 @@ mod tests {
     fn a_retargeted_grant_is_never_covered_by_an_ancestor() {
         let ops = plan(&[
             Grant::direct("/etc", true),
-            Grant::retargeted("/etc/ca/bundle.pem", crate::ca::CA_BUNDLE_IN_BOX),
+            Grant::bound("/etc/ca/bundle.pem", crate::ca::CA_BUNDLE_IN_BOX, false),
         ])
         .unwrap();
         assert!(
@@ -605,9 +659,10 @@ mod tests {
     }
 
     /// The interim host-`/usr` root is the one deliberate exception; an
-    /// image root has no host sources beyond the image itself.
+    /// image root has no host sources beyond the image itself and the
+    /// host's resolver file.
     #[test]
-    fn no_host_path_beyond_workspace_home_and_grants() {
+    fn no_host_path_beyond_workspace_home_grants_and_resolver() {
         let grant = Grant::direct("/opt/data", false);
         let ops = compute(
             Path::new("/home/nabor/proj"),
@@ -615,7 +670,7 @@ mod tests {
             Root::Image(Path::new("/box-image")),
             &user(),
             &[grant],
-            None,
+            &host_resolver(),
         )
         .unwrap();
         let allowed = [
@@ -623,6 +678,7 @@ mod tests {
             Path::new("/home/nabor/proj"),
             Path::new("/home/nabor/.local/share/wormhole/workspaces/abc/home"),
             Path::new("/opt/data"),
+            Path::new("/run/systemd/resolve/stub-resolv.conf"),
         ];
         for (source, _, _) in binds(&ops) {
             assert!(allowed.contains(&source), "unplanned source {source:?}");
@@ -640,7 +696,7 @@ mod tests {
             Root::ImageReadOnly(image),
             &user(),
             &[],
-            None,
+            &host_resolver(),
         )
         .expect("plan");
         assert_eq!(
@@ -665,7 +721,7 @@ mod tests {
             Root::ImageReadOnly(image),
             &user(),
             &[],
-            None,
+            &host_resolver(),
         )
         .expect("plan");
         for (target, seed) in [
@@ -694,7 +750,7 @@ mod tests {
             Root::ImageReadOnly(Path::new("/data/images/abc")),
             &user(),
             &[],
-            Some("1.1.1.1".parse().expect("address")),
+            &Resolver::Named("1.1.1.1".parse().expect("address")),
         )
         .expect("plan");
         let tmpfs = ops
@@ -724,25 +780,25 @@ mod tests {
         assert!(!ops.iter().any(|op| matches!(op, MountOp::TmpfsFrom { .. })));
     }
 
+    /// No resolver named: the host's own file, read-only, and nothing
+    /// else at that path.
     #[test]
-    fn resolv_conf_is_never_in_the_plan() {
+    fn without_a_named_resolver_the_hosts_file_is_bound_read_only() {
         let ops = plan(&[]).unwrap();
-        let touches_resolv = ops.iter().any(|op| match op {
-            MountOp::File { target, .. }
-            | MountOp::TmpfsFrom { target, .. }
-            | MountOp::Tmpfs { target, .. }
-            | MountOp::Proc { target }
-            | MountOp::DevPts { target } => target == Path::new("/etc/resolv.conf"),
-            MountOp::Bind { target, .. } => target == Path::new("/etc/resolv.conf"),
-            MountOp::Device { path } => path == Path::new("/etc/resolv.conf"),
-            MountOp::TmpfsRoot | MountOp::Symlink { .. } => false,
-        });
-        assert!(!touches_resolv);
+        assert_eq!(
+            resolv_conf(&ops),
+            vec![&MountOp::Bind {
+                source: PathBuf::from("/run/systemd/resolve/stub-resolv.conf"),
+                target: PathBuf::from("/etc/resolv.conf"),
+                rw: false,
+            }]
+        );
     }
 
     #[test]
     fn the_build_box_writes_into_the_image_and_reaches_nothing_of_yours() {
-        let ops = build_ops(Path::new("/data/images/abc"), None, &[]);
+        let dns = Resolver::Named("1.1.1.1".parse().expect("address"));
+        let ops = build_ops(Path::new("/data/images/abc"), &dns, &[]);
         let sources: Vec<&Path> = ops
             .iter()
             .filter_map(|op| match op {
@@ -757,24 +813,19 @@ mod tests {
         ));
     }
 
+    /// The build box resolves names the same way a running box does.
     #[test]
-    fn the_build_box_gets_a_resolver_only_when_one_is_named() {
-        let resolver = |dns| {
-            build_ops(Path::new("/i"), dns, &[])
-                .into_iter()
-                .any(|op| matches!(op, MountOp::File { target, .. } if target == Path::new("/etc/resolv.conf")))
-        };
-        assert!(!resolver(None));
-        assert!(resolver(Some("9.9.9.9".parse().expect("address"))));
+    fn the_build_box_gets_the_same_resolver_as_a_running_box() {
+        let ops = build_ops(Path::new("/i"), &host_resolver(), &[]);
+        assert_eq!(resolv_conf(&ops), resolv_conf(&plan(&[]).unwrap()));
     }
 
-    /// The default is no resolver at all. A box only gets one when the
-    /// user names it, and then it is the only one it can reach — the
-    /// host's own resolver setup never leaks in.
+    /// A named resolver is the only one the box can reach; the host's
+    /// own setup never leaks in beside it.
     #[test]
     fn a_named_resolver_becomes_the_only_line_of_resolv_conf() {
-        let dns = "1.1.1.1".parse().expect("valid address");
-        let ops = plan_with_dns(&[], Some(dns)).unwrap();
+        let dns = Resolver::Named("1.1.1.1".parse().expect("valid address"));
+        let ops = plan_with(&[], &dns).unwrap();
         let resolv: Vec<&str> = ops
             .iter()
             .filter_map(|op| match op {
@@ -942,7 +993,7 @@ mod tests {
             PathBuf::from("/data/artifacts/abc"),
             PathBuf::from("/tmp/rustup-init"),
         );
-        let ops = build_ops(Path::new("/i"), None, &[artifact]);
+        let ops = build_ops(Path::new("/i"), &host_resolver(), &[artifact]);
         let scratch = ops
             .iter()
             .position(|op| matches!(op, MountOp::Tmpfs { target, .. } if target == Path::new(BUILD_SCRATCH)))
@@ -964,7 +1015,7 @@ mod tests {
 
     #[test]
     fn the_build_box_needs_no_devpts() {
-        let ops = build_ops(Path::new("/i"), None, &[]);
+        let ops = build_ops(Path::new("/i"), &host_resolver(), &[]);
         assert!(!ops.iter().any(|op| matches!(op, MountOp::DevPts { .. })));
     }
 
@@ -1166,7 +1217,8 @@ mod tests {
                 let workspace = Path::new("/home/nabor/proj");
                 let home = Path::new("/data/home");
                 let image = Path::new("/box-image");
-                let Ok(ops) = compute(workspace, home, Root::Image(image), &user(), &grants, None) else {
+                let resolver = host_resolver();
+                let Ok(ops) = compute(workspace, home, Root::Image(image), &user(), &grants, &resolver) else {
                     return Ok(()); // rejection is always a safe outcome
                 };
                 for op in &ops {
@@ -1174,6 +1226,7 @@ mod tests {
                         let allowed = source == workspace
                             || source == home
                             || source == image
+                            || resolver == Resolver::Host(source.clone())
                             || grants.iter().any(|g| g.resolved == *source);
                         prop_assert!(allowed, "unplanned source {source:?}");
                     }
@@ -1190,7 +1243,7 @@ mod tests {
             Root::HostUsr,
             &user(),
             &[],
-            None,
+            &host_resolver(),
         )
         .unwrap_err();
         assert_eq!(err, PlanError::WorkspaceNotAbsolute(PathBuf::from("proj")));
@@ -1204,7 +1257,7 @@ mod tests {
             Root::HostUsr,
             &user(),
             &[],
-            None,
+            &host_resolver(),
         )
         .unwrap_err();
         assert_eq!(err, PlanError::HomeNotAbsolute(PathBuf::from("home")));

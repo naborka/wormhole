@@ -462,7 +462,13 @@ mod tests {
     /// `secret`; it is masked everywhere.
     #[test]
     fn an_asked_variable_is_masked_without_being_told() {
-        let vars = declared(&[("KEY", EnvVar { ask: true, ..plain() })]);
+        let vars = declared(&[(
+            "KEY",
+            EnvVar {
+                ask: true,
+                ..plain()
+            },
+        )]);
         let env = resolve(&vars, &[], &host(&[]), &host(&[("KEY", "hush")]));
         assert!(env["KEY"].secret);
         let table = table(&env);
@@ -475,8 +481,20 @@ mod tests {
     #[test]
     fn to_ask_lists_only_asked_names_still_unset() {
         let vars = declared(&[
-            ("FILLED", EnvVar { ask: true, ..plain() }),
-            ("MISSING", EnvVar { ask: true, ..plain() }),
+            (
+                "FILLED",
+                EnvVar {
+                    ask: true,
+                    ..plain()
+                },
+            ),
+            (
+                "MISSING",
+                EnvVar {
+                    ask: true,
+                    ..plain()
+                },
+            ),
             ("PLAIN", plain()),
         ]);
         let env = resolve(&vars, &[], &host(&[("FILLED", "v")]), &host(&[]));

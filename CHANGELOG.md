@@ -9,26 +9,73 @@ true.
 
 ## Unreleased
 
-### Fixed: the broker could not renew the token
+### Changed: the box's PATH starts with its own `~/.local/bin`
 
-The first time a box outlived its token, the agent got `401 OAuth access
-token has expired` and nothing it did helped — `/login` inside the box
-answered `proxy refused the connection`, which is correct (the box holds
-no credential; the login site is not on its allowlist) but no help.
+A tool the agent installs into its kept home is found before the
+image's copy. The alphaca role uses it: Claude Code and rtk are no
+longer baked into the image at a pinned version but installed into the
+home by the preflight hook — latest on a box's first start, updated on
+every later one — so an update sticks instead of dying with the root.
 
-Three things were wrong at once. The renewal request was missing the
-client id and scopes Claude Code sends, so the endpoint refused it as
-`Invalid request format`. The broker then treated that refusal as "keep
-the old token" and forwarded one already expired. And had the request
-been accepted, the reply would have been written over the credential
-file verbatim, in the endpoint's shape rather than Claude Code's, which
-would have logged the host out.
+### Removed: the broker, and every rule that hung off it
 
-Now the renewal asks the way Claude Code does, the answer is merged into
-the file in the shape Claude Code reads, and a renewal that fails is
-never hidden: inside the margin the current token is used and the
-failure logged; past expiry the box gets a `403` naming the reason and
-the fix, which is `/login` on the host.
+The box is on the host's network now and speaks to the model API for
+itself. Gone with the broker: the in-box forwarder, `[access] egress`,
+`[access] network`, `[access] broker`, `wormhole allow` and `deny`,
+`wormhole usage`, and the status line wormhole used to seed so a box
+without a credential could still show your usage windows.
+
+Two things drove it. The broker's shape — a proxy the agent was pointed
+at — broke real client behaviour more than once: the forwarder served
+one connection at a time, and a Claude Code that parks a `CONNECT`
+tunnel at startup then never got its prompt through, with nothing
+logged and nothing failing but a spinner; and the endpoints the broker
+could not inject into (bootstrap, `/usage`, the MCP registry) answered
+`401` to the dummy key, quietly turning features off. And an agent that
+is meant to be autonomous should not need a host-side process holding
+its hand on every request.
+
+What replaces it is a decision you make, not a proxy:
+
+```toml
+[access]
+credentials = "none"      # or "copy", "share"
+```
+
+`none` starts a clean box home and the agent's own `/login` inside the
+box does the rest. `copy` seeds your login files into the box home once;
+the box refreshes its own copy and your host file is never written.
+`share` binds your login file read-write at the same place in the box
+home, so one login serves both. `wormhole box --credentials MODE` picks
+one for a single start. The banner counts a shared login as the grant it
+is.
+
+`dns` now serves the running box as well as the build; leave it out and
+the box reads the host's own `/etc/resolv.conf`. `host_ca` is unchanged
+and matters more, since everything the box reaches is its own TLS now.
+
+Said plainly: the box can dial anything the host can, and holds whatever
+login you gave it. What still holds is the filesystem line — the
+workspace, granted paths, its own home, nothing else of the machine —
+and the box checks that itself before the agent starts.
+
+Two fixes made on the way — the forwarder taking one thread per
+connection, the broker renewing the token the way Claude Code does —
+went out with the code they fixed.
+
+A manifest that still says `network`, `broker` or `egress` is refused by
+name, with `credentials` as the pointer, rather than with serde's
+"unknown field". A host with no `/etc/resolv.conf` and no `dns` line is
+refused too, not quietly given no resolver.
+
+### Changed: the terminal is declared for you
+
+`TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` are
+built-in `[env]` defaults now — wormhole already carried your terminal's
+description into the box, so it names the fallback too. Every shipped
+manifest lost the same twelve lines, and a manifest that declares one of
+the four still wins. The manifests and the role files also lost most of
+their comments: what is left says what the code cannot.
 
 ### A second agent: codex
 
