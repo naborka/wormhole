@@ -82,6 +82,8 @@ The files are the agent's own: `~/.claude/.credentials.json` for `claude`, `~/.c
 
 `share` names one race honestly: the refresh token rotates on every use, so the host agent and a box refreshing the same file can invalidate each other. Cost is one `/login`. Not defended, named.
 
+`share` also has a limit nothing can lift: it binds the file, a bind is a mount point, and no rename can replace a mount point. An agent that saves a login by writing a new file and moving it into place therefore cannot share one — so each agent says which it does, and a `share` that would break is refused before the box starts rather than failing inside the agent.
+
 A copied or shared login is a grant like any other and the banner counts it: it is the one host secret a box can be handed, and the preview screen says which mode it got.
 
 ### What is not protected, said plainly

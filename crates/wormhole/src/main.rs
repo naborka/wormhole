@@ -262,6 +262,13 @@ fn run_box(args: &[String]) -> ! {
         ..
     } = resolved;
 
+    // Before the home and the image: a login this start cannot deliver is
+    // not something to find out after a build.
+    let credentials = parsed.credentials.unwrap_or(manifest.access.credentials);
+    if let Some(refusal) = manifest::credentials_refusal(&manifest, credentials) {
+        fail(&refusal);
+    }
+
     let home = paths::home_dir(&data_home, &box_key);
     std::fs::create_dir_all(&home)
         .unwrap_or_else(|e| fail(&format!("cannot create box home {}: {e}", home.display())));
@@ -324,7 +331,6 @@ fn run_box(args: &[String]) -> ! {
     );
     seed::seed_instructions(&manifest, &manifest_dir, &home);
     seed::seed_preflight(&manifest, &manifest_dir, &home);
-    let credentials = parsed.credentials.unwrap_or(manifest.access.credentials);
     seed::seed_agent_config(&manifest, &workspace, &home, credentials);
     let shared_credentials = seed::seed_credentials(credentials, &manifest, &home);
     if manifest.access.dns.is_none() && !Path::new("/etc/resolv.conf").exists() {

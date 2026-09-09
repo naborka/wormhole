@@ -61,10 +61,12 @@ run = "grok"
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
 
-# One `grok login` on the host serves every box.
+# `grok login --device-auth` in the box: it prints a URL and a code, so a
+# box with no browser can still sign in. Not `share` — grok saves a login
+# by replacing ~/.grok/auth.json, and a shared file is a mount point.
 [access]
 dns = "1.1.1.1"
-credentials = "share"
+credentials = "none"
 host_ca = true
 
 # Empty: a box signs in with `grok login`. Declared so a host that has a

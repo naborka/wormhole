@@ -49,6 +49,13 @@ each refreshes its own. Your host file is never written by a box.
 Your credential file is bound read-write at the same path in the box
 home. One login, and a refresh in the box lands on the host. The banner
 counts it as a grant, because it is one: a host path the box can write.
+
+Only for an agent that writes that file in place. A bind is a mount
+point, and nothing can rename over a mount point — so an agent that
+saves a login by writing a new file and moving it into place gets
+`Resource busy` instead, after the whole login. `grok` is one, so a
+`share` naming it is refused before the box starts, with `copy` and
+`none` named as the two that work.
 For `claude` the account fields in `.claude.json` are carried into the
 box home the same way `copy` does it; that file stays the box's own.
 

@@ -155,12 +155,33 @@ build answers "Not signed in" identically whether the variable is unset,
 empty, or holds a key, so the empty default cannot take a box off its
 sign-in path.
 
-Deferred, and named rather than hidden: `credentials = "share"` puts the
-host's `auth.json` in reach of the box, the same trade the codex role
-makes. Grok's own docs advise against copying `auth.json` between
-machines; a shared bind is not a copy between machines, but it is one
-token for two processes, and a refresh race between them is possible —
-the cost is one `grok login`.
+**The role cannot use `credentials = "share"`, and neither can any agent
+like grok.** The first draft did, and a login in the box ended with
+`Failed to save credentials: Resource busy (os error 16)`. `share` binds
+the credential file; a bind is a mount point; `rename` cannot replace a
+mount point. Grok saves a login by writing a temporary file and renaming
+it over `auth.json`, so the save is `EBUSY` every time.
+
+Reproduced generically, no agent involved:
+
+```
+$ unshare -Umr sh -c 'mount --bind host/auth.json box/auth.json
+                      echo new > box/auth.json.tmp
+                      mv box/auth.json.tmp box/auth.json'
+mv: can't rename 'box/auth.json.tmp': Resource busy
+```
+
+And checked the other way for codex, which the codex role does share:
+`codex login --with-api-key` through the same bind mount succeeded, and
+the host file held the new content afterwards. Codex writes in place.
+
+Nothing lifts this for a single shared file — binding the file's parent
+directory would work, but for grok that directory is `~/.grok`, holding
+sessions, config, skills and a 150 MiB download cache. So it is a
+per-agent fact, `CredentialWrite`, and a `share` that would break is now
+a launch refusal naming `copy` and `none`. The role takes `none`:
+`grok login --device-auth` prints a URL and a code, which is what a box
+with no browser needs.
 
 ## 6. Pre-attack
 

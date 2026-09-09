@@ -255,6 +255,22 @@ impl ConfigSeed {
     }
 }
 
+/// How an agent saves a login, which decides whether its credential file
+/// can be a shared one: `credentials = "share"` binds that file, and a
+/// bind mount is a mount point, which `rename` cannot replace. An agent
+/// that writes a new file and renames it over the old therefore fails
+/// with `EBUSY` — inside the agent, after a whole login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialWrite {
+    /// Writes the file it was given. Verified for codex by saving a
+    /// login through a bind mount; assumed for claude, whose roles ship
+    /// `credentials = "none"`.
+    InPlace,
+    /// Replaces the file. Verified for grok, which fails a shared login
+    /// with `Failed to save credentials: Resource busy (os error 16)`.
+    Replace,
+}
+
 /// One agent wormhole knows how to launch. Everything agent-specific
 /// lives here; a call site that compares `agent.run` to a string instead
 /// of asking this table is the bug this table exists to prevent.
@@ -274,6 +290,8 @@ struct KnownAgent {
     /// The files, relative to a home, that hold this agent's login: what
     /// `credentials = "copy"` copies and `"share"` binds.
     credential_files: &'static [&'static str],
+    /// How the agent saves one, which decides whether it can share one.
+    credential_write: CredentialWrite,
     /// `None` for an agent that asks nothing a start could answer for it.
     config: Option<ConfigSeed>,
 }
@@ -290,6 +308,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         // The account fields in `.claude.json` travel with it; see
         // `seed::claude_config`.
         credential_files: &[".claude/.credentials.json"],
+        credential_write: CredentialWrite::InPlace,
         config: Some(ConfigSeed::ClaudeJson),
     },
     KnownAgent {
@@ -303,6 +322,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         pointer: Pointer::Symlink,
         model_env: None,
         credential_files: &[".codex/auth.json"],
+        credential_write: CredentialWrite::InPlace,
         config: Some(ConfigSeed::CodexToml),
     },
     KnownAgent {
@@ -318,6 +338,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         pointer: Pointer::Symlink,
         model_env: Some("GROK_DEFAULT_MODEL"),
         credential_files: &[".grok/auth.json"],
+        credential_write: CredentialWrite::Replace,
         config: None,
     },
 ];
@@ -572,6 +593,28 @@ pub fn pointer_link(target: &str) -> String {
 /// Which config file a start seeds for this agent.
 pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
     known(manifest.agent.run.as_deref()?).and_then(|agent| agent.config)
+}
+
+/// Why this start cannot hand the box the login it asked for, when it
+/// cannot. A launch assertion, not a warning: the alternative is the
+/// agent failing on its own save, after a whole login, with an `EBUSY`
+/// nothing in the box explains.
+#[must_use]
+pub fn credentials_refusal(manifest: &Manifest, mode: Credentials) -> Option<String> {
+    if mode != Credentials::Share {
+        return None;
+    }
+    let name = manifest.agent.run.as_deref()?;
+    let agent = known(name)?;
+    if agent.credential_write == CredentialWrite::InPlace {
+        return None;
+    }
+    let files = agent.credential_files.join(", ");
+    Some(format!(
+        "credentials = \"share\" cannot work for {name}: it saves a login by replacing \
+         {files}, and a shared file is a mount point, which nothing can replace. \
+         Use --credentials copy for your login in the box, or none to log in there"
+    ))
 }
 
 /// The files, relative to a home, that hold this agent's login — what a
@@ -1024,6 +1067,42 @@ mod tests {
             &[".grok/auth.json"]
         );
         assert!(credential_files(&full("")).is_empty());
+    }
+
+    /// `share` binds the credential file itself, and a rename onto a
+    /// mount point is `EBUSY` — so an agent that saves its login by
+    /// replacing the file cannot be handed a shared one. Refused before
+    /// the box starts, because the failure otherwise lands inside the
+    /// agent as `Resource busy (os error 16)` after a whole login.
+    #[test]
+    fn an_agent_that_replaces_its_login_file_is_refused_a_shared_one() {
+        let refusal = credentials_refusal(&full("[agent]\nrun = \"grok\"\n"), Credentials::Share)
+            .expect("refused");
+        assert!(refusal.contains(".grok/auth.json"), "{refusal}");
+        assert!(refusal.contains("copy"), "{refusal}");
+    }
+
+    /// Codex writes its `auth.json` in place — verified by writing one
+    /// through a bind mount — so sharing does what it says.
+    #[test]
+    fn an_agent_that_writes_its_login_file_in_place_may_share_it() {
+        for agent in ["claude", "codex"] {
+            let manifest = full(&format!("[agent]\nrun = \"{agent}\"\n"));
+            assert_eq!(credentials_refusal(&manifest, Credentials::Share), None);
+        }
+        assert_eq!(credentials_refusal(&full(""), Credentials::Share), None);
+    }
+
+    /// Only a share binds anything. A copy is a plain file in the box
+    /// home, which any agent may replace.
+    #[test]
+    fn a_copy_is_never_refused_because_nothing_is_bound() {
+        for mode in [Credentials::None, Credentials::Copy] {
+            assert_eq!(
+                credentials_refusal(&full("[agent]\nrun = \"grok\"\n"), mode),
+                None
+            );
+        }
     }
 
     /// The keys the broker took with it are refused by name, with where

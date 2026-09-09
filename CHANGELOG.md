@@ -9,6 +9,21 @@ true.
 
 ## Unreleased
 
+### Fixed: a shared login an agent could never save
+
+`credentials = "share"` binds your credential file into the box. A bind
+is a mount point, and nothing can rename over a mount point — so an
+agent that saves a login by writing a new file and moving it into place
+got `Resource busy (os error 16)` from its own save, after the whole
+login, with nothing in the box explaining why. Grok is such an agent.
+
+Each agent now says how it writes a login, and a `share` that cannot
+work is refused before the box starts, naming `copy` and `none`. Codex
+writes its `auth.json` in place — checked by saving one through a bind
+mount — so sharing still does what it says there. The `alphaca-grok`
+role takes `none`: `grok login --device-auth` prints a URL and a code,
+which is what a box with no browser needs.
+
 ### A third agent: grok
 
 `run = "grok"` launches xAI's Grok Build CLI. Grok has two gates, and a
@@ -34,8 +49,7 @@ one lookup, and each config seeding names its own file.
 A new `alphaca-grok` role carries the whole alphaca kit under grok: the
 Rust toolchain, `gh`, rtk as a rules file (grok has no rewrite hook),
 the caveman, mattpocock and rust skills in grok's own skills directory,
-and context7 as an MCP server in `~/.grok/config.toml`. One `grok login`
-on the host serves every box.
+and context7 as an MCP server in `~/.grok/config.toml`.
 
 ### Fixed: a failed Claude Code install looked like one that worked
 
