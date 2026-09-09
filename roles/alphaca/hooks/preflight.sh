@@ -15,7 +15,10 @@ if command -v claude >/dev/null 2>&1; then
     else
         echo "[preflight] WARN: claude update failed; keeping $(version)" >&2
     fi
-elif curl -fsSL https://claude.ai/install.sh | bash; then
+elif curl -fsSL https://claude.ai/install.sh | bash \
+    && command -v claude >/dev/null 2>&1; then
+    # A `curl | bash` whose curl failed feeds bash an empty script and
+    # exits 0, so the binary itself is what says the install happened.
     echo "[preflight] installed claude $(version)"
 else
     echo "[preflight] ERROR: claude install failed; nothing to run" >&2

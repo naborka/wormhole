@@ -37,6 +37,14 @@ the caveman, mattpocock and rust skills in grok's own skills directory,
 and context7 as an MCP server in `~/.grok/config.toml`. One `grok login`
 on the host serves every box.
 
+### Fixed: a failed Claude Code install looked like one that worked
+
+The alphaca role's preflight installs Claude Code with `curl | bash`. A
+`curl` that fails there feeds bash an empty script, which exits 0 — so
+the hook announced an install that had not happened, and the box then
+started with no agent to run. The binary being on `PATH` is what says
+it now.
+
 ### Changed: the codex role installs codex and rtk the way alphaca does
 
 The `alphaca-codex` role no longer bakes codex and rtk into its image —
