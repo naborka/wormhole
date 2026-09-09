@@ -9,6 +9,34 @@ true.
 
 ## Unreleased
 
+### A third agent: grok
+
+`run = "grok"` launches xAI's Grok Build CLI. Grok has two gates, and a
+box answers both: approvals, and the folder trust that decides whether a
+headless start reads the workspace's instructions at all. Its own
+sandbox is off by default, so there was nothing there to turn off.
+
+Adding it was one entry in the agent table, which is what that table was
+built for. One thing the table could not say yet: grok asks nothing a
+start could answer for it — its trust comes from a flag and its model
+from `GROK_DEFAULT_MODEL` — so "which config file a start seeds" is now
+allowed to be *none*, instead of every agent having to name one.
+
+Grok reads no instructions file at the box home root. What it reads
+whatever directory it starts in is `~/.grok/rules/`, so the pointer to
+the canonical `AGENTS.md` goes there, as a symlink. That is the first
+pointer two directories deep, and it moved the "how far back is the home
+root" arithmetic out of the file-writing code into the pure core, where
+a test can reach it. Two more per-agent facts went with it: the path an
+agent reads its instructions from now comes back with the pointer, from
+one lookup, and each config seeding names its own file.
+
+A new `alphaca-grok` role carries the whole alphaca kit under grok: the
+Rust toolchain, `gh`, rtk as a rules file (grok has no rewrite hook),
+the caveman, mattpocock and rust skills in grok's own skills directory,
+and context7 as an MCP server in `~/.grok/config.toml`. One `grok login`
+on the host serves every box.
+
 ### Changed: the codex role installs codex and rtk the way alphaca does
 
 The `alphaca-codex` role no longer bakes codex and rtk into its image —

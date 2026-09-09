@@ -35,10 +35,11 @@ is the honest answer to [what a login really carries](access.md#what-a-credentia
 
 On a start that finds the box home without a login, the agent's
 credential files are copied in from your home — `~/.claude/.credentials.json`
-for `claude`, `~/.codex/auth.json` for `codex` — and, for `claude`, the
-account fields beside it in `.claude.json`, because the token alone is
-half a login. Once: a box that already has a login keeps it, so a
-refresh the box made is never clobbered by the next start.
+for `claude`, `~/.codex/auth.json` for `codex`, `~/.grok/auth.json` for
+`grok` — and, for `claude`, the account fields beside it in
+`.claude.json`, because the token alone is half a login. Once: a box that
+already has a login keeps it, so a refresh the box made is never
+clobbered by the next start.
 
 From then on the box and the host hold two tokens for one account, and
 each refreshes its own. Your host file is never written by a box.

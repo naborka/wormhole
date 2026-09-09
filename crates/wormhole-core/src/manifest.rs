@@ -244,6 +244,17 @@ pub enum ConfigSeed {
     CodexToml,
 }
 
+impl ConfigSeed {
+    /// The file this seeding writes, relative to the box home.
+    #[must_use]
+    pub fn file(self) -> &'static str {
+        match self {
+            Self::ClaudeJson => ".claude.json",
+            Self::CodexToml => ".codex/config.toml",
+        }
+    }
+}
+
 /// One agent wormhole knows how to launch. Everything agent-specific
 /// lives here; a call site that compares `agent.run` to a string instead
 /// of asking this table is the bug this table exists to prevent.
@@ -257,15 +268,17 @@ struct KnownAgent {
     /// How that path delivers the canonical `AGENTS.md`.
     pointer: Pointer,
     /// The env var this agent reads its model from; `None` means the
-    /// model is seeded into the agent's config file instead.
+    /// model is seeded into the agent's config file instead. Every agent
+    /// does one or the other, or a manifest's `model` would go nowhere.
     model_env: Option<&'static str>,
     /// The files, relative to a home, that hold this agent's login: what
     /// `credentials = "copy"` copies and `"share"` binds.
     credential_files: &'static [&'static str],
-    config: ConfigSeed,
+    /// `None` for an agent that asks nothing a start could answer for it.
+    config: Option<ConfigSeed>,
 }
 
-const KNOWN_AGENTS: [KnownAgent; 2] = [
+const KNOWN_AGENTS: [KnownAgent; 3] = [
     KnownAgent {
         name: "claude",
         command: &["claude", "--dangerously-skip-permissions"],
@@ -277,7 +290,7 @@ const KNOWN_AGENTS: [KnownAgent; 2] = [
         // The account fields in `.claude.json` travel with it; see
         // `seed::claude_config`.
         credential_files: &[".claude/.credentials.json"],
-        config: ConfigSeed::ClaudeJson,
+        config: Some(ConfigSeed::ClaudeJson),
     },
     KnownAgent {
         name: "codex",
@@ -290,7 +303,22 @@ const KNOWN_AGENTS: [KnownAgent; 2] = [
         pointer: Pointer::Symlink,
         model_env: None,
         credential_files: &[".codex/auth.json"],
-        config: ConfigSeed::CodexToml,
+        config: Some(ConfigSeed::CodexToml),
+    },
+    KnownAgent {
+        name: "grok",
+        // Two gates the box already answers: approvals, and the folder
+        // trust that gates whether a headless start reads the workspace's
+        // instructions at all. Grok's own sandbox is off by default, so
+        // there is nothing there to turn off.
+        command: &["grok", "--always-approve", "--trust"],
+        // Grok reads no file of its own at the home root; what it always
+        // reads, whatever directory it starts in, is `$GROK_HOME/rules/`.
+        instructions: ".grok/rules/AGENTS.md",
+        pointer: Pointer::Symlink,
+        model_env: Some("GROK_DEFAULT_MODEL"),
+        credential_files: &[".grok/auth.json"],
+        config: None,
     },
 ];
 
@@ -523,21 +551,27 @@ pub fn attach_command(agent: Option<&str>) -> Vec<String> {
     }
 }
 
-/// Where the agent reads its own instructions, relative to the box home.
-/// `None` when the box has no agent to instruct.
-pub fn instructions_target(manifest: &Manifest) -> Option<&'static str> {
-    known(manifest.agent.run.as_deref()?).map(|agent| agent.instructions)
+/// Where the agent reads its own instructions, relative to the box home,
+/// and how that path delivers the canonical `AGENTS.md`. One lookup, so
+/// the path and the pointer planted at it cannot disagree. `None` when
+/// the box has no agent to instruct.
+pub fn instructions_pointer(manifest: &Manifest) -> Option<(&'static str, Pointer)> {
+    known(manifest.agent.run.as_deref()?).map(|agent| (agent.instructions, agent.pointer))
 }
 
-/// How the agent's own instructions path delivers the canonical
-/// `AGENTS.md`. `None` when the box has no agent.
-pub fn instructions_pointer(manifest: &Manifest) -> Option<Pointer> {
-    known(manifest.agent.run.as_deref()?).map(|agent| agent.pointer)
+/// What a `Pointer::Symlink` at `target` holds. Relative, so a kept home
+/// survives being moved: one `..` per directory between the agent's own
+/// path and the home root the canonical file sits at.
+#[must_use]
+pub fn pointer_link(target: &str) -> String {
+    let mut link = "../".repeat(target.matches('/').count());
+    link.push_str(INSTRUCTIONS_SEED);
+    link
 }
 
-/// Which config file a start seeds for this agent. `None` with no agent.
+/// Which config file a start seeds for this agent.
 pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
-    known(manifest.agent.run.as_deref()?).map(|agent| agent.config)
+    known(manifest.agent.run.as_deref()?).and_then(|agent| agent.config)
 }
 
 /// The files, relative to a home, that hold this agent's login — what a
@@ -794,8 +828,6 @@ pub fn build_script(manifest: &Manifest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -987,6 +1019,10 @@ mod tests {
             credential_files(&full("[agent]\nrun = \"codex\"\n")),
             &[".codex/auth.json"]
         );
+        assert_eq!(
+            credential_files(&full("[agent]\nrun = \"grok\"\n")),
+            &[".grok/auth.json"]
+        );
         assert!(credential_files(&full("")).is_empty());
     }
 
@@ -1037,7 +1073,7 @@ mod tests {
     /// a stand-in key ever reaches its environment.
     #[test]
     fn a_box_is_told_nothing_about_a_proxy_or_a_stand_in_key() {
-        for agent in ["claude", "codex"] {
+        for agent in KNOWN_AGENTS.iter().map(|agent| agent.name) {
             let env = box_env(&full(&format!("[agent]\nrun = \"{agent}\"\n")), &host(&[]));
             for name in [
                 "HTTPS_PROXY",
@@ -1536,17 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn claudes_instructions_live_in_its_own_config_dir() {
-        let manifest = full("[agent]\nrun = \"claude\"\n");
-        assert_eq!(
-            instructions_target(&manifest).map(PathBuf::from),
-            Some(PathBuf::from(".claude/CLAUDE.md"))
-        );
-    }
-
-    #[test]
     fn no_agent_means_no_instructions_file() {
-        assert_eq!(instructions_target(&full("")), None);
         assert_eq!(instructions_pointer(&full("")), None);
     }
 
@@ -1558,7 +1584,7 @@ mod tests {
         let manifest = full("[agent]\nrun = \"claude\"\n");
         assert_eq!(
             instructions_pointer(&manifest),
-            Some(Pointer::Import("@~/AGENTS.md\n"))
+            Some((".claude/CLAUDE.md", Pointer::Import("@~/AGENTS.md\n")))
         );
         assert_eq!(INSTRUCTIONS_SEED, "AGENTS.md");
     }
@@ -1569,10 +1595,9 @@ mod tests {
     fn codexs_instructions_are_a_symlink_into_its_config_dir() {
         let manifest = full("[agent]\nrun = \"codex\"\n");
         assert_eq!(
-            instructions_target(&manifest).map(PathBuf::from),
-            Some(PathBuf::from(".codex/AGENTS.md"))
+            instructions_pointer(&manifest),
+            Some((".codex/AGENTS.md", Pointer::Symlink))
         );
-        assert_eq!(instructions_pointer(&manifest), Some(Pointer::Symlink));
     }
 
     #[test]
@@ -1583,6 +1608,45 @@ mod tests {
             Ok(vec![
                 "codex".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_pointer_symlink_climbs_back_to_the_canonical_file() {
+        assert_eq!(pointer_link(".codex/AGENTS.md"), "../AGENTS.md");
+        assert_eq!(pointer_link(".grok/rules/AGENTS.md"), "../../AGENTS.md");
+    }
+
+    #[test]
+    fn groks_instructions_are_a_symlink_into_the_rules_it_always_reads() {
+        let manifest = full("[agent]\nrun = \"grok\"\n");
+        assert_eq!(
+            instructions_pointer(&manifest),
+            Some((".grok/rules/AGENTS.md", Pointer::Symlink))
+        );
+    }
+
+    #[test]
+    fn a_grok_model_reaches_it_as_the_variable_grok_reads() {
+        let manifest = full("[agent]\nrun = \"grok\"\nmodel = \"grok-code-fast-1\"\n");
+        let env = box_env(&manifest, &host(&[]));
+        assert_eq!(
+            env.get("GROK_DEFAULT_MODEL").map(String::as_str),
+            Some("grok-code-fast-1")
+        );
+        assert!(!env.contains_key("ANTHROPIC_MODEL"), "{env:?}");
+    }
+
+    #[test]
+    fn grok_starts_approved_and_trusting_because_the_box_holds_the_line() {
+        let manifest = full("[agent]\nrun = \"grok\"\n");
+        assert_eq!(
+            agent_command(&manifest),
+            Ok(vec![
+                "grok".to_owned(),
+                "--always-approve".to_owned(),
+                "--trust".to_owned()
             ])
         );
     }
@@ -1598,16 +1662,33 @@ mod tests {
     }
 
     #[test]
-    fn each_agent_names_the_config_file_a_start_seeds() {
+    fn each_agent_says_which_config_a_start_seeds_and_where() {
         assert_eq!(
             config_seed(&full("[agent]\nrun = \"claude\"\n")),
             Some(ConfigSeed::ClaudeJson)
         );
+        assert_eq!(ConfigSeed::ClaudeJson.file(), ".claude.json");
         assert_eq!(
             config_seed(&full("[agent]\nrun = \"codex\"\n")),
             Some(ConfigSeed::CodexToml)
         );
+        assert_eq!(ConfigSeed::CodexToml.file(), ".codex/config.toml");
+        assert_eq!(config_seed(&full("[agent]\nrun = \"grok\"\n")), None);
         assert_eq!(config_seed(&full("")), None);
+    }
+
+    /// A manifest's `model` must have somewhere to go: an env var the
+    /// agent reads, or the config file a start seeds for it. An agent
+    /// with neither would take a `model` and silently drop it.
+    #[test]
+    fn every_agent_has_somewhere_to_put_a_model() {
+        for agent in &KNOWN_AGENTS {
+            assert!(
+                agent.model_env.is_some() || agent.config == Some(ConfigSeed::CodexToml),
+                "{} takes a model nowhere",
+                agent.name
+            );
+        }
     }
 
     #[test]

@@ -217,7 +217,7 @@ MANIFEST
   into = "/tmp/tool.tgz"            # connection for it
 
   [agent]
-  run = "claude"                    # or "codex"; each starts bypassed
+  run = "claude"                    # or "codex" / "grok"; starts bypassed
   model = "claude-opus-5"           # the way this agent reads a model
   instructions = "ROLE.md"          # added to the built-in instructions
   preflight = "hooks/setup.sh"      # runs in the box before the agent

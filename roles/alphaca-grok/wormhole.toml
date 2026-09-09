@@ -1,0 +1,94 @@
+# Alphaca Grok: the alphaca role, run by xAI's Grok Build CLI.
+#
+#   ln -s "$(pwd)/roles/alphaca-grok" ~/.config/wormhole/roles/alphaca-grok
+#   wormhole box --role alphaca-grok
+#
+# Versus alphaca: rtk is a rules file (grok has no rewrite hook), skills
+# go in through the `skills` installer, context7 is an MCP server in
+# ~/.grok/config.toml. ROLE.md repeats alphaca's because a manifest names
+# one instructions file.
+
+version = 1
+name = "Alphaca Grok"
+
+[image]
+base = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.2-x86_64.tar.gz"
+base_sha256 = "412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be"
+
+# http on purpose: a fresh rootfs has no CA store; apk verifies signatures.
+package_sources = [
+  "http://dl-cdn.alpinelinux.org/alpine/v3.22/main",
+  "http://dl-cdn.alpinelinux.org/alpine/v3.22/community",
+]
+
+# zstd: grok's installer prefers the zstd build and falls back to a gzip
+# one that is 15 MiB larger.
+packages = [
+  "bash",
+  "nodejs",
+  "npm",
+  "git",
+  "curl",
+  "github-cli",
+  "openssh-client",
+  "ca-certificates",
+  "build-base",
+  "ripgrep",
+  "fd",
+  "eza",
+  "btop",
+  "ncdu",
+  "zstd",
+]
+
+# Grok and rtk are not in the image: the preflight hook keeps the latest
+# of both in the box home's ~/.local/bin.
+build = [
+  # rustup-init reads its own argv[0], so it keeps its name.
+  "mkdir -p /tmp/rustup && cp /tmp/rustup-init /tmp/rustup/ && chmod +x /tmp/rustup/rustup-init",
+  "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /tmp/rustup/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 -c rustfmt -c clippy -c rust-analyzer",
+  "ln -s /usr/local/cargo/bin/* /usr/local/bin/",
+]
+
+# Rust from rustup, not apk: Alpine 3.22 pins rustc 1.87 for good.
+[[image.artifact]]
+url = "https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init"
+sha256 = "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1"
+into = "/tmp/rustup-init"
+
+[agent]
+run = "grok"
+instructions = "ROLE.md"
+preflight = "hooks/preflight.sh"
+
+# One `grok login` on the host serves every box.
+[access]
+dns = "1.1.1.1"
+credentials = "share"
+host_ca = true
+
+# Empty: a box signs in with `grok login`. Declared so a host that has a
+# key can hand it over, and so nothing else can.
+[env.XAI_API_KEY]
+default = ""
+
+# CARGO_HOME stays unset: ~/.cargo is in the kept home, so the registry
+# survives between boxes.
+[env.RUSTUP_HOME]
+fixed = "/usr/local/rustup"
+
+[env.CAVEMAN_DEFAULT_MODE]
+fixed = "ultra"
+
+[env.CONTEXT7_API_KEY]
+ask = true
+
+# A fine-grained token, read-only unless you mean it: the agent can read
+# it, and its scope is the blast radius. Empty skips; gh then reads
+# public GitHub only.
+[env.GITHUB_TOKEN]
+ask = true
+
+# Grok hands it to hooks and commands, and it must exist in the box.
+[env.SHELL]
+fixed = "/bin/bash"

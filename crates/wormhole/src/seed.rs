@@ -18,7 +18,7 @@ use crate::{DEFAULT_INSTRUCTIONS, fail, replace_file, replace_file_private};
 /// import line, or a symlink for an agent with no import syntax. One
 /// source of truth however many agents learn to read it.
 pub(crate) fn seed_instructions(manifest: &manifest::Manifest, manifest_dir: &Path, home: &Path) {
-    let Some(target) = manifest::instructions_target(manifest) else {
+    let Some((target, pointer)) = manifest::instructions_pointer(manifest) else {
         return;
     };
     let extra = manifest.agent.instructions.as_ref().map(|path| {
@@ -32,7 +32,7 @@ pub(crate) fn seed_instructions(manifest: &manifest::Manifest, manifest_dir: &Pa
         manifest::INSTRUCTIONS_SEED,
         &manifest::compose_instructions(DEFAULT_INSTRUCTIONS, extra.as_deref()),
     );
-    match manifest::instructions_pointer(manifest).expect("an agent with a target has a pointer") {
+    match pointer {
         manifest::Pointer::Import(line) => seed_file(home, target, line),
         manifest::Pointer::Symlink => seed_symlink(home, target),
     }
@@ -47,11 +47,7 @@ fn seed_symlink(home: &Path, target: &str) {
         std::fs::create_dir_all(parent)
             .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", parent.display())));
     }
-    // Relative, so the kept home survives being moved: one `..` per
-    // directory between the link and the home root.
-    let depth = Path::new(target).components().count() - 1;
-    let back: PathBuf = std::iter::repeat_n("..", depth).collect();
-    let to = back.join(manifest::INSTRUCTIONS_SEED);
+    let to = manifest::pointer_link(target);
     match std::fs::symlink_metadata(&link) {
         Ok(_) => std::fs::remove_file(&link)
             .unwrap_or_else(|e| fail(&format!("cannot replace {}: {e}", link.display()))),
@@ -109,10 +105,7 @@ pub(crate) fn seed_agent_config(
     let Some(kind) = manifest::config_seed(manifest) else {
         return;
     };
-    let file = home.join(match kind {
-        manifest::ConfigSeed::ClaudeJson => ".claude.json",
-        manifest::ConfigSeed::CodexToml => ".codex/config.toml",
-    });
+    let file = home.join(kind.file());
     let existing = read_if_present(&file);
     let workspace = workspace.display().to_string();
     let config = match kind {
