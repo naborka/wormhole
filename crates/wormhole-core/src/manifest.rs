@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 
 /// The only manifest version this build understands. A manifest names it
 /// so a newer one is refused clearly instead of half-read.
@@ -99,11 +100,13 @@ pub struct Artifact {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Agent {
-    /// Which agent wormhole launches. Absent means a box with no agent.
+    /// Products this role may run. A string or a list of known names.
+    /// Empty means a box with no agent. A list is a choice at start:
+    /// `--run` names one, a terminal picks, a kept box keeps its own.
     /// Not `name`: the box has one of those, and two keys spelled alike in
     /// adjacent tables is how a misplaced line becomes a valid one.
-    #[serde(default)]
-    pub run: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_run")]
+    pub run: Vec<String>,
     /// Passed to the agent as its model, when it takes one.
     #[serde(default)]
     pub model: Option<String>,
@@ -117,6 +120,32 @@ pub struct Agent {
     /// role's especially — is not in the box.
     #[serde(default)]
     pub preflight: Option<String>,
+}
+
+impl Agent {
+    /// The product this start runs: the only name after [`bound`], or the
+    /// default (first) name before it. `None` when the role runs none.
+    #[must_use]
+    pub fn product(&self) -> Option<&str> {
+        self.run.first().map(String::as_str)
+    }
+}
+
+/// A string is one product; a list is the products this role may run.
+fn deserialize_run<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(name) => Ok(vec![name]),
+        OneOrMany::Many(names) if names.is_empty() => Err(D::Error::custom(
+            "run must name at least one agent; omit the key for none",
+        )),
+        OneOrMany::Many(names) => Ok(names),
+    }
 }
 
 /// What the box can reach. Every field defaults to the answer that keeps
@@ -198,6 +227,10 @@ pub struct Runtime {
 /// launcher writes it there; `launch_command` runs it from there.
 pub const PREFLIGHT_SEED: &str = ".wormhole/preflight";
 
+/// The product this start bound, so a preflight hook can branch without
+/// wormhole parsing it. Injected as a fixed env variable.
+pub const RUN_ENV: &str = "WORMHOLE_RUN";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvVar {
@@ -244,6 +277,33 @@ pub enum ConfigSeed {
     CodexToml,
 }
 
+impl ConfigSeed {
+    /// The file this seeding writes, relative to the box home.
+    #[must_use]
+    pub fn file(self) -> &'static str {
+        match self {
+            Self::ClaudeJson => ".claude.json",
+            Self::CodexToml => ".codex/config.toml",
+        }
+    }
+}
+
+/// How an agent saves a login, which decides whether its credential file
+/// can be a shared one: `credentials = "share"` binds that file, and a
+/// bind mount is a mount point, which `rename` cannot replace. An agent
+/// that writes a new file and renames it over the old therefore fails
+/// with `EBUSY` — inside the agent, after a whole login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialWrite {
+    /// Writes the file it was given. Verified for codex by saving a
+    /// login through a bind mount; assumed for claude, whose roles ship
+    /// `credentials = "none"`.
+    InPlace,
+    /// Replaces the file. Verified for grok, which fails a shared login
+    /// with `Failed to save credentials: Resource busy (os error 16)`.
+    Replace,
+}
+
 /// One agent wormhole knows how to launch. Everything agent-specific
 /// lives here; a call site that compares `agent.run` to a string instead
 /// of asking this table is the bug this table exists to prevent.
@@ -257,15 +317,19 @@ struct KnownAgent {
     /// How that path delivers the canonical `AGENTS.md`.
     pointer: Pointer,
     /// The env var this agent reads its model from; `None` means the
-    /// model is seeded into the agent's config file instead.
+    /// model is seeded into the agent's config file instead. Every agent
+    /// does one or the other, or a manifest's `model` would go nowhere.
     model_env: Option<&'static str>,
     /// The files, relative to a home, that hold this agent's login: what
     /// `credentials = "copy"` copies and `"share"` binds.
     credential_files: &'static [&'static str],
-    config: ConfigSeed,
+    /// How the agent saves one, which decides whether it can share one.
+    credential_write: CredentialWrite,
+    /// `None` for an agent that asks nothing a start could answer for it.
+    config: Option<ConfigSeed>,
 }
 
-const KNOWN_AGENTS: [KnownAgent; 2] = [
+const KNOWN_AGENTS: [KnownAgent; 3] = [
     KnownAgent {
         name: "claude",
         command: &["claude", "--dangerously-skip-permissions"],
@@ -277,7 +341,8 @@ const KNOWN_AGENTS: [KnownAgent; 2] = [
         // The account fields in `.claude.json` travel with it; see
         // `seed::claude_config`.
         credential_files: &[".claude/.credentials.json"],
-        config: ConfigSeed::ClaudeJson,
+        credential_write: CredentialWrite::InPlace,
+        config: Some(ConfigSeed::ClaudeJson),
     },
     KnownAgent {
         name: "codex",
@@ -290,7 +355,24 @@ const KNOWN_AGENTS: [KnownAgent; 2] = [
         pointer: Pointer::Symlink,
         model_env: None,
         credential_files: &[".codex/auth.json"],
-        config: ConfigSeed::CodexToml,
+        credential_write: CredentialWrite::InPlace,
+        config: Some(ConfigSeed::CodexToml),
+    },
+    KnownAgent {
+        name: "grok",
+        // Two gates the box already answers: approvals, and the folder
+        // trust that gates whether a headless start reads the workspace's
+        // instructions at all. Grok's own sandbox is off by default, so
+        // there is nothing there to turn off.
+        command: &["grok", "--always-approve", "--trust"],
+        // Grok reads no file of its own at the home root; what it always
+        // reads, whatever directory it starts in, is `$GROK_HOME/rules/`.
+        instructions: ".grok/rules/AGENTS.md",
+        pointer: Pointer::Symlink,
+        model_env: Some("GROK_DEFAULT_MODEL"),
+        credential_files: &[".grok/auth.json"],
+        credential_write: CredentialWrite::Replace,
+        config: None,
     },
 ];
 
@@ -314,6 +396,15 @@ pub enum ManifestError {
     /// An artifact in a recipe with no build line at all.
     ArtifactWithNoBuild(String),
     UnknownAgent(String),
+    /// `run` names the same product twice.
+    DuplicateAgent(String),
+    /// `model` with more than one `run` name: no one product to give it to.
+    ModelOnManyRuns,
+    /// `--run` named a known product this role does not offer.
+    ProductNotInRole {
+        wanted: String,
+        offered: Vec<String>,
+    },
     /// A fixed variable that also carries `default`.
     EnvFixedConflict(String),
     /// `ask` beside a value that is never missing.
@@ -370,6 +461,24 @@ impl fmt::Display for ManifestError {
                     .map(|agent| agent.name)
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            ManifestError::DuplicateAgent(name) => {
+                write!(f, "run names {name} twice")
+            }
+            ManifestError::ModelOnManyRuns => write!(
+                f,
+                "[agent] model needs a single run; a list of products has no one place to put it"
+            ),
+            ManifestError::ProductNotInRole { wanted, offered } if offered.is_empty() => {
+                write!(
+                    f,
+                    "this role runs no agent, so --run {wanted} has nothing to pick"
+                )
+            }
+            ManifestError::ProductNotInRole { wanted, offered } => write!(
+                f,
+                "this role does not run {wanted}; it runs {}",
+                offered.join(", ")
             ),
             ManifestError::EnvAskConflict(name) => write!(
                 f,
@@ -490,10 +599,17 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
     {
         return Err(ManifestError::ArtifactWithNoBuild(first.url.clone()));
     }
-    if let Some(name) = &manifest.agent.run
-        && known(name).is_none()
-    {
-        return Err(ManifestError::UnknownAgent(name.clone()));
+    let mut seen = std::collections::BTreeSet::new();
+    for name in &manifest.agent.run {
+        if known(name).is_none() {
+            return Err(ManifestError::UnknownAgent(name.clone()));
+        }
+        if !seen.insert(name) {
+            return Err(ManifestError::DuplicateAgent(name.clone()));
+        }
+    }
+    if manifest.agent.run.len() > 1 && manifest.agent.model.is_some() {
+        return Err(ManifestError::ModelOnManyRuns);
     }
     for (name, var) in &manifest.env {
         if var.fixed.is_some() && !var.default.is_empty() {
@@ -509,8 +625,8 @@ pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
 /// The command that starts this box's agent. Permissions are bypassed
 /// because the box, not the agent, is what holds the line.
 pub fn agent_command(manifest: &Manifest) -> Result<Vec<String>, ManifestError> {
-    let name = manifest.agent.run.as_ref().ok_or(ManifestError::NoAgent)?;
-    let agent = known(name).ok_or_else(|| ManifestError::UnknownAgent(name.clone()))?;
+    let name = manifest.agent.product().ok_or(ManifestError::NoAgent)?;
+    let agent = known(name).ok_or_else(|| ManifestError::UnknownAgent(name.to_owned()))?;
     Ok(agent.command())
 }
 
@@ -523,21 +639,121 @@ pub fn attach_command(agent: Option<&str>) -> Vec<String> {
     }
 }
 
-/// Where the agent reads its own instructions, relative to the box home.
-/// `None` when the box has no agent to instruct.
-pub fn instructions_target(manifest: &Manifest) -> Option<&'static str> {
-    known(manifest.agent.run.as_deref()?).map(|agent| agent.instructions)
+/// Where the agent reads its own instructions, relative to the box home,
+/// and how that path delivers the canonical `AGENTS.md`. One lookup, so
+/// the path and the pointer planted at it cannot disagree. `None` when
+/// the box has no agent to instruct.
+pub fn instructions_pointer(manifest: &Manifest) -> Option<(&'static str, Pointer)> {
+    known(manifest.agent.product()?).map(|agent| (agent.instructions, agent.pointer))
 }
 
-/// How the agent's own instructions path delivers the canonical
-/// `AGENTS.md`. `None` when the box has no agent.
-pub fn instructions_pointer(manifest: &Manifest) -> Option<Pointer> {
-    known(manifest.agent.run.as_deref()?).map(|agent| agent.pointer)
+/// What a `Pointer::Symlink` at `target` holds. Relative, so a kept home
+/// survives being moved: one `..` per directory between the agent's own
+/// path and the home root the canonical file sits at.
+#[must_use]
+pub fn pointer_link(target: &str) -> String {
+    let mut link = "../".repeat(target.matches('/').count());
+    link.push_str(INSTRUCTIONS_SEED);
+    link
 }
 
-/// Which config file a start seeds for this agent. `None` with no agent.
+/// Which config file a start seeds for this agent.
 pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
-    known(manifest.agent.run.as_deref()?).map(|agent| agent.config)
+    known(manifest.agent.product()?).and_then(|agent| agent.config)
+}
+
+/// Why a start that did not name a product cannot go on.
+///
+/// Several products are several boxes. The first name in the list is not
+/// an answer: that would silently open a claude home when the last session
+/// was grok. `--run` is how a script names one; a terminal is shown the
+/// same list the panel's `n` already uses.
+#[must_use]
+pub fn need_run(offered: &[String]) -> String {
+    format!(
+        "this role runs {}; pass --run {}",
+        offered.join(", "),
+        offered.join("|"),
+    )
+}
+
+/// Which product this start runs. `requested` is `--run`; omitted, the
+/// first name in `[agent] run`. `None` when the role runs no agent.
+///
+/// # Errors
+///
+/// Unknown names, and a known name this role does not offer.
+pub fn bind<'a>(
+    manifest: &'a Manifest,
+    requested: Option<&str>,
+) -> Result<Option<&'a str>, ManifestError> {
+    let Some(want) = requested else {
+        return Ok(manifest.agent.product());
+    };
+    if known(want).is_none() {
+        return Err(ManifestError::UnknownAgent(want.to_owned()));
+    }
+    manifest
+        .agent
+        .run
+        .iter()
+        .map(String::as_str)
+        .find(|&name| name == want)
+        .map(Some)
+        .ok_or_else(|| ManifestError::ProductNotInRole {
+            wanted: want.to_owned(),
+            offered: manifest.agent.run.clone(),
+        })
+}
+
+/// Why `--id` cannot take `--run` for a different product, when it
+/// cannot. The recorded product is the home's; switching it would put
+/// the new CLI in the old login's directory.
+#[must_use]
+pub fn product_mismatch(recorded: Option<&str>, bound: Option<&str>) -> Option<String> {
+    match (recorded, bound) {
+        (Some(have), Some(want)) if have != want => Some(format!(
+            "that box runs {have}, not {want}; omit --run to resume it"
+        )),
+        _ => None,
+    }
+}
+
+/// The recipe with `[agent] run` narrowed to the product this start
+/// actually launches, so every later lookup reads one name.
+///
+/// # Errors
+///
+/// The same as [`bind`].
+pub fn bound(mut manifest: Manifest, requested: Option<&str>) -> Result<Manifest, ManifestError> {
+    let chosen = bind(&manifest, requested)?.map(str::to_owned);
+    manifest.agent.run = match chosen {
+        Some(name) => vec![name],
+        None => Vec::new(),
+    };
+    Ok(manifest)
+}
+
+/// Why this start cannot hand the box the login it asked for, when it
+/// cannot. A launch assertion, not a warning: the alternative is the
+/// agent failing on its own save, after a whole login, with an `EBUSY`
+/// nothing in the box explains.
+#[must_use]
+pub fn credentials_refusal(manifest: &Manifest, mode: Credentials) -> Option<String> {
+    if mode != Credentials::Share {
+        return None;
+    }
+    let name = manifest.agent.product()?;
+    let agent = known(name)?;
+    if agent.credential_write == CredentialWrite::InPlace {
+        return None;
+    }
+    let files = agent.credential_files.join(", ");
+    Some(format!(
+        "credentials = \"share\" cannot work for {name}: it saves a login by replacing \
+         {files}, and a shared file is a mount point, which nothing can replace. \
+         Use --credentials copy for your login in the box, or none to log in there"
+    ))
 }
 
 /// The files, relative to a home, that hold this agent's login — what a
@@ -546,8 +762,7 @@ pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
 pub fn credential_files(manifest: &Manifest) -> &'static [&'static str] {
     manifest
         .agent
-        .run
-        .as_deref()
+        .product()
         .and_then(known)
         .map_or(&[], |agent| agent.credential_files)
 }
@@ -685,12 +900,14 @@ pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
     if let Some(model) = manifest.agent.model.as_deref()
         && let Some(var) = manifest
             .agent
-            .run
-            .as_deref()
+            .product()
             .and_then(known)
             .and_then(|agent| agent.model_env)
     {
         declared.insert(var.to_owned(), fixed(model.to_owned()));
+    }
+    if let Some(name) = manifest.agent.product() {
+        declared.insert(RUN_ENV.to_owned(), fixed(name.to_owned()));
     }
     // Mounting the host's bundle is not enough on its own: the clients in
     // the box mostly do not read that path unless they are told to, and
@@ -794,8 +1011,6 @@ pub fn build_script(manifest: &Manifest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -864,7 +1079,7 @@ mod tests {
         let manifest = parse(&minimal()).expect("valid");
         assert_eq!(manifest.image.base, "https://example.test/rootfs.tar.gz");
         assert!(manifest.image.packages.is_empty());
-        assert_eq!(manifest.agent.run, None);
+        assert!(manifest.agent.run.is_empty());
         assert_eq!(manifest.access.dns, None);
         assert_eq!(manifest.agent.preflight, None);
         assert!(manifest.env.is_empty());
@@ -987,7 +1202,47 @@ mod tests {
             credential_files(&full("[agent]\nrun = \"codex\"\n")),
             &[".codex/auth.json"]
         );
+        assert_eq!(
+            credential_files(&full("[agent]\nrun = \"grok\"\n")),
+            &[".grok/auth.json"]
+        );
         assert!(credential_files(&full("")).is_empty());
+    }
+
+    /// `share` binds the credential file itself, and a rename onto a
+    /// mount point is `EBUSY` — so an agent that saves its login by
+    /// replacing the file cannot be handed a shared one. Refused before
+    /// the box starts, because the failure otherwise lands inside the
+    /// agent as `Resource busy (os error 16)` after a whole login.
+    #[test]
+    fn an_agent_that_replaces_its_login_file_is_refused_a_shared_one() {
+        let refusal = credentials_refusal(&full("[agent]\nrun = \"grok\"\n"), Credentials::Share)
+            .expect("refused");
+        assert!(refusal.contains(".grok/auth.json"), "{refusal}");
+        assert!(refusal.contains("copy"), "{refusal}");
+    }
+
+    /// Codex writes its `auth.json` in place — verified by writing one
+    /// through a bind mount — so sharing does what it says.
+    #[test]
+    fn an_agent_that_writes_its_login_file_in_place_may_share_it() {
+        for agent in ["claude", "codex"] {
+            let manifest = full(&format!("[agent]\nrun = \"{agent}\"\n"));
+            assert_eq!(credentials_refusal(&manifest, Credentials::Share), None);
+        }
+        assert_eq!(credentials_refusal(&full(""), Credentials::Share), None);
+    }
+
+    /// Only a share binds anything. A copy is a plain file in the box
+    /// home, which any agent may replace.
+    #[test]
+    fn a_copy_is_never_refused_because_nothing_is_bound() {
+        for mode in [Credentials::None, Credentials::Copy] {
+            assert_eq!(
+                credentials_refusal(&full("[agent]\nrun = \"grok\"\n"), mode),
+                None
+            );
+        }
     }
 
     /// The keys the broker took with it are refused by name, with where
@@ -1037,7 +1292,7 @@ mod tests {
     /// a stand-in key ever reaches its environment.
     #[test]
     fn a_box_is_told_nothing_about_a_proxy_or_a_stand_in_key() {
-        for agent in ["claude", "codex"] {
+        for agent in KNOWN_AGENTS.iter().map(|agent| agent.name) {
             let env = box_env(&full(&format!("[agent]\nrun = \"{agent}\"\n")), &host(&[]));
             for name in [
                 "HTTPS_PROXY",
@@ -1536,17 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn claudes_instructions_live_in_its_own_config_dir() {
-        let manifest = full("[agent]\nrun = \"claude\"\n");
-        assert_eq!(
-            instructions_target(&manifest).map(PathBuf::from),
-            Some(PathBuf::from(".claude/CLAUDE.md"))
-        );
-    }
-
-    #[test]
     fn no_agent_means_no_instructions_file() {
-        assert_eq!(instructions_target(&full("")), None);
         assert_eq!(instructions_pointer(&full("")), None);
     }
 
@@ -1558,7 +1803,7 @@ mod tests {
         let manifest = full("[agent]\nrun = \"claude\"\n");
         assert_eq!(
             instructions_pointer(&manifest),
-            Some(Pointer::Import("@~/AGENTS.md\n"))
+            Some((".claude/CLAUDE.md", Pointer::Import("@~/AGENTS.md\n")))
         );
         assert_eq!(INSTRUCTIONS_SEED, "AGENTS.md");
     }
@@ -1569,10 +1814,9 @@ mod tests {
     fn codexs_instructions_are_a_symlink_into_its_config_dir() {
         let manifest = full("[agent]\nrun = \"codex\"\n");
         assert_eq!(
-            instructions_target(&manifest).map(PathBuf::from),
-            Some(PathBuf::from(".codex/AGENTS.md"))
+            instructions_pointer(&manifest),
+            Some((".codex/AGENTS.md", Pointer::Symlink))
         );
-        assert_eq!(instructions_pointer(&manifest), Some(Pointer::Symlink));
     }
 
     #[test]
@@ -1583,6 +1827,45 @@ mod tests {
             Ok(vec![
                 "codex".to_owned(),
                 "--dangerously-bypass-approvals-and-sandbox".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_pointer_symlink_climbs_back_to_the_canonical_file() {
+        assert_eq!(pointer_link(".codex/AGENTS.md"), "../AGENTS.md");
+        assert_eq!(pointer_link(".grok/rules/AGENTS.md"), "../../AGENTS.md");
+    }
+
+    #[test]
+    fn groks_instructions_are_a_symlink_into_the_rules_it_always_reads() {
+        let manifest = full("[agent]\nrun = \"grok\"\n");
+        assert_eq!(
+            instructions_pointer(&manifest),
+            Some((".grok/rules/AGENTS.md", Pointer::Symlink))
+        );
+    }
+
+    #[test]
+    fn a_grok_model_reaches_it_as_the_variable_grok_reads() {
+        let manifest = full("[agent]\nrun = \"grok\"\nmodel = \"grok-code-fast-1\"\n");
+        let env = box_env(&manifest, &host(&[]));
+        assert_eq!(
+            env.get("GROK_DEFAULT_MODEL").map(String::as_str),
+            Some("grok-code-fast-1")
+        );
+        assert!(!env.contains_key("ANTHROPIC_MODEL"), "{env:?}");
+    }
+
+    #[test]
+    fn grok_starts_approved_and_trusting_because_the_box_holds_the_line() {
+        let manifest = full("[agent]\nrun = \"grok\"\n");
+        assert_eq!(
+            agent_command(&manifest),
+            Ok(vec![
+                "grok".to_owned(),
+                "--always-approve".to_owned(),
+                "--trust".to_owned()
             ])
         );
     }
@@ -1598,16 +1881,33 @@ mod tests {
     }
 
     #[test]
-    fn each_agent_names_the_config_file_a_start_seeds() {
+    fn each_agent_says_which_config_a_start_seeds_and_where() {
         assert_eq!(
             config_seed(&full("[agent]\nrun = \"claude\"\n")),
             Some(ConfigSeed::ClaudeJson)
         );
+        assert_eq!(ConfigSeed::ClaudeJson.file(), ".claude.json");
         assert_eq!(
             config_seed(&full("[agent]\nrun = \"codex\"\n")),
             Some(ConfigSeed::CodexToml)
         );
+        assert_eq!(ConfigSeed::CodexToml.file(), ".codex/config.toml");
+        assert_eq!(config_seed(&full("[agent]\nrun = \"grok\"\n")), None);
         assert_eq!(config_seed(&full("")), None);
+    }
+
+    /// A manifest's `model` must have somewhere to go: an env var the
+    /// agent reads, or the config file a start seeds for it. An agent
+    /// with neither would take a `model` and silently drop it.
+    #[test]
+    fn every_agent_has_somewhere_to_put_a_model() {
+        for agent in &KNOWN_AGENTS {
+            assert!(
+                agent.model_env.is_some() || agent.config == Some(ConfigSeed::CodexToml),
+                "{} takes a model nowhere",
+                agent.name
+            );
+        }
     }
 
     #[test]
@@ -1642,5 +1942,126 @@ mod tests {
             manifest.agent.preflight.as_deref(),
             Some("hooks/preflight.sh")
         );
+    }
+
+    #[test]
+    fn a_run_list_names_every_product_the_role_may_launch() {
+        let manifest = full("[agent]\nrun = [\"claude\", \"codex\", \"grok\"]\n");
+        assert_eq!(
+            manifest.agent.run,
+            vec!["claude".to_owned(), "codex".to_owned(), "grok".to_owned()]
+        );
+        assert_eq!(manifest.agent.product(), Some("claude"));
+    }
+
+    #[test]
+    fn an_empty_run_list_is_refused_rather_than_read_as_no_agent() {
+        let err = parse(&text("[agent]\nrun = []\n")).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Syntax(ref d) if d.contains("at least one")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_run_list_with_a_duplicate_is_refused() {
+        assert_eq!(
+            parse(&text("[agent]\nrun = [\"claude\", \"claude\"]\n")),
+            Err(ManifestError::DuplicateAgent("claude".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_run_list_cannot_carry_a_model() {
+        assert_eq!(
+            parse(&text(
+                "[agent]\nrun = [\"claude\", \"grok\"]\nmodel = \"claude-fable-5\"\n"
+            )),
+            Err(ManifestError::ModelOnManyRuns)
+        );
+    }
+
+    #[test]
+    fn bind_picks_the_first_name_when_none_is_asked_for() {
+        let manifest = full("[agent]\nrun = [\"claude\", \"grok\"]\n");
+        assert_eq!(bind(&manifest, None), Ok(Some("claude")));
+        assert_eq!(bind(&manifest, Some("grok")), Ok(Some("grok")));
+    }
+
+    /// The words a start says when it cannot guess which box. Pinned here
+    /// so the CLI, the picker backing out, and the docs cannot drift.
+    #[test]
+    fn a_role_with_several_products_names_every_one_and_how_to_pick() {
+        assert_eq!(
+            need_run(&["claude".to_owned(), "codex".to_owned(), "grok".to_owned()]),
+            "this role runs claude, codex, grok; pass --run claude|codex|grok"
+        );
+    }
+
+    #[test]
+    fn bind_refuses_a_product_the_role_does_not_offer() {
+        let manifest = full("[agent]\nrun = [\"claude\"]\n");
+        assert_eq!(
+            bind(&manifest, Some("grok")),
+            Err(ManifestError::ProductNotInRole {
+                wanted: "grok".to_owned(),
+                offered: vec!["claude".to_owned()],
+            })
+        );
+        assert_eq!(
+            bind(&full(""), Some("claude")),
+            Err(ManifestError::ProductNotInRole {
+                wanted: "claude".to_owned(),
+                offered: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_refuses_an_unknown_product_before_the_role_list() {
+        let manifest = full("[agent]\nrun = [\"claude\", \"grok\"]\n");
+        assert_eq!(
+            bind(&manifest, Some("telepathy")),
+            Err(ManifestError::UnknownAgent("telepathy".to_owned()))
+        );
+    }
+
+    #[test]
+    fn bound_narrows_the_recipe_to_the_product_this_start_runs() {
+        let manifest = bound(
+            full("[agent]\nrun = [\"claude\", \"grok\"]\n"),
+            Some("grok"),
+        )
+        .expect("bound");
+        assert_eq!(manifest.agent.run, vec!["grok".to_owned()]);
+        assert_eq!(
+            agent_command(&manifest),
+            Ok(vec![
+                "grok".to_owned(),
+                "--always-approve".to_owned(),
+                "--trust".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn an_id_cannot_switch_the_product_a_home_already_runs() {
+        assert_eq!(
+            product_mismatch(Some("claude"), Some("grok")).as_deref(),
+            Some("that box runs claude, not grok; omit --run to resume it")
+        );
+        assert_eq!(product_mismatch(Some("grok"), Some("grok")), None);
+        assert_eq!(product_mismatch(None, Some("grok")), None);
+    }
+
+    #[test]
+    fn the_bound_product_is_a_fixed_variable_the_preflight_can_read() {
+        let manifest = bound(
+            full("[agent]\nrun = [\"claude\", \"grok\"]\n"),
+            Some("grok"),
+        )
+        .expect("bound");
+        let env = box_env(&manifest, &host(&[]));
+        assert_eq!(env.get(RUN_ENV).map(String::as_str), Some("grok"));
     }
 }

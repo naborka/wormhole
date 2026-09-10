@@ -1,7 +1,11 @@
 # Alphaca: the chief-staff-engineer role, boxed.
 #
 #   ln -s "$(pwd)/roles/alphaca" ~/.config/wormhole/roles/alphaca
-#   wormhole box --role alphaca
+#   wormhole box --role alphaca            # pick which CLI
+#   wormhole box --role alphaca --run grok # skip the pick
+#
+# One role, one image. Each CLI is its own box. Claude plugins have no
+# grok/codex analogue; the preflight skips them there.
 
 version = 1
 name = "Alphaca"
@@ -31,10 +35,12 @@ packages = [
   "eza",
   "btop",
   "ncdu",
+  "zstd",
 ]
 
-# Claude Code and rtk are not in the image: the preflight hook keeps the
-# latest of both in the box home's ~/.local/bin.
+# The product binary and rtk are not in the image: the preflight hook
+# keeps the latest of both in the box home's ~/.local/bin. zstd is here
+# because grok's installer prefers the zstd build; the others ignore it.
 build = [
   # rustup-init reads its own argv[0], so it keeps its name.
   "mkdir -p /tmp/rustup && cp /tmp/rustup-init /tmp/rustup/ && chmod +x /tmp/rustup/rustup-init",
@@ -49,8 +55,7 @@ sha256 = "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1"
 into = "/tmp/rustup-init"
 
 [agent]
-run = "claude"
-model = "claude-fable-5"
+run = ["claude", "codex", "grok"]
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
 
@@ -60,6 +65,8 @@ credentials = "none"
 # rustup fetches the toolchain over TLS; on an intercepting network only
 # the host's CA bundle makes that work.
 host_ca = true
+
+grants = ["~/.ssh"]
 
 # CARGO_HOME stays unset: ~/.cargo is in the kept home, so the registry
 # survives between boxes.
@@ -78,6 +85,16 @@ ask = true
 [env.GITHUB_TOKEN]
 ask = true
 
-# Claude Code dies without one, and it must exist in the box.
+# Empty: a host that exports one can hand it over. ChatGPT sign-in
+# needs no key; a set one switches codex to usage-based billing.
+[env.OPENAI_API_KEY]
+default = ""
+
+# Empty: a box signs in with `grok login`. Declared so a host that has a
+# key can hand it over, and so nothing else can.
+[env.XAI_API_KEY]
+default = ""
+
+# The agent hands it to hooks and commands, and it must exist in the box.
 [env.SHELL]
 fixed = "/bin/bash"

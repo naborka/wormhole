@@ -49,6 +49,7 @@ The rest of the commands:
 | `wormhole role add <dir\|url@sha>` | install a role from a directory or a pinned commit |
 | `wormhole role list\|show\|remove` | what is installed, the whole recipe, and taking a name back |
 | `wormhole box --as <name>` | give a box a name to type instead of its id |
+| `wormhole box --run claude\|codex\|grok` | which CLI; omit to pick. each is its own box |
 | `wormhole box --credentials none\|copy\|share` | which login the agent starts with, for this start |
 | `wormhole gc` | what the data home holds, and what of it can go |
 

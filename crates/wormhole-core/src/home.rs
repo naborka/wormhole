@@ -281,6 +281,9 @@ pub struct Wanted<'a> {
     pub source: Option<&'a str>,
     /// The reference as the user wrote it this time.
     pub typed: Option<&'a str>,
+    /// The product this start will run. Two products of one role are two
+    /// boxes: each home holds that product's login and history.
+    pub run: Option<&'a str>,
 }
 
 impl Record {
@@ -290,10 +293,22 @@ impl Record {
     /// reference is one of several spellings, and comparing spellings is
     /// what made two names for one role into two boxes. A record from
     /// before identities existed has nothing else to be judged on.
+    ///
+    /// The product is a third axis: one role, two products, two homes.
+    /// A home written before products were identity matches any product
+    /// of that role, and the first start fills `agent` in.
     fn is_role(&self, wanted: Wanted<'_>) -> bool {
-        match self.source {
+        let same_role = match self.source {
             Some(_) => self.source.as_deref() == wanted.source,
             None => self.role.as_deref() == wanted.typed,
+        };
+        same_role && self.is_product(wanted.run)
+    }
+
+    fn is_product(&self, wanted: Option<&str>) -> bool {
+        match (self.agent.as_deref(), wanted) {
+            (_, None) | (None, Some(_)) => true,
+            (Some(have), Some(want)) => have == want,
         }
     }
 }
@@ -308,7 +323,9 @@ impl Record {
 ///
 /// The role is part of the match because a box's home carries that role's
 /// toolchain and persona. Resuming an `alphaca` box for an `alphaca-java`
-/// run would hand the agent the wrong home and call it continuity.
+/// run would hand the agent the wrong home and call it continuity. The
+/// product is part of the match for the same reason: a grok login does
+/// not belong in a claude home.
 pub fn resumable<'a>(
     records: &'a [Record],
     workspace: &Path,
@@ -626,6 +643,7 @@ mod tests {
         Wanted {
             source: None,
             typed: Some(reference),
+            run: None,
         }
     }
 
@@ -652,6 +670,7 @@ mod tests {
                 Wanted {
                     source: Some("/w/roles/alphaca"),
                     typed: Some(spelling),
+                    run: None,
                 },
             );
             assert_eq!(found.len(), 1, "{spelling}");
@@ -670,6 +689,7 @@ mod tests {
                 source: Some("/w/roles/b"),
                 // The same name it was installed under, pointing elsewhere.
                 typed: Some("alphaca"),
+                run: None,
             },
         );
         assert!(found.is_empty(), "{found:?}");
@@ -687,6 +707,7 @@ mod tests {
             Wanted {
                 source: Some("/w/roles/alphaca"),
                 typed: Some("alphaca"),
+                run: None,
             },
         );
         assert_eq!(found.len(), 1, "{found:?}");
@@ -707,6 +728,74 @@ mod tests {
             Wanted {
                 source: Some("https://github.com/you/r"),
                 typed: Some("github:you/r@0000000000000000000000000000000000000000"),
+                run: None,
+            },
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    /// One role, two products, two homes: a grok login is not continuity
+    /// with a claude history.
+    #[test]
+    fn two_products_of_one_role_are_two_boxes() {
+        let claude = from(record("a", "/w", Some("alphaca"), 100), "/w/roles/alphaca");
+        let mut grok = claude.clone();
+        grok.id = "b".to_owned();
+        grok.agent = Some("grok".to_owned());
+        let records = [claude, grok];
+        let found = resumable(
+            &records,
+            Path::new("/w"),
+            Wanted {
+                source: Some("/w/roles/alphaca"),
+                typed: Some("alphaca"),
+                run: Some("grok"),
+            },
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].id, "b");
+        assert_eq!(found[0].agent.as_deref(), Some("grok"));
+    }
+
+    /// A bare start that has not named a product yet still has a box to
+    /// go back to: the most recently used one of this role, whichever
+    /// product it runs. `--run` is what narrows that to one CLI.
+    #[test]
+    fn an_unspecified_product_resumes_either_and_the_newer_one_first() {
+        let claude = from(record("a", "/w", Some("alphaca"), 100), "/w/roles/alphaca");
+        let mut grok = claude.clone();
+        grok.id = "b".to_owned();
+        grok.agent = Some("grok".to_owned());
+        grok.started_unix = 200;
+        let records = [claude, grok];
+        let found = resumable(
+            &records,
+            Path::new("/w"),
+            Wanted {
+                source: Some("/w/roles/alphaca"),
+                typed: Some("alphaca"),
+                run: None,
+            },
+        );
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].agent.as_deref(), Some("grok"));
+        assert_eq!(found[1].agent.as_deref(), Some("claude"));
+    }
+
+    /// A home written before the product was identity still resumes for
+    /// any product of that role; the first start fills `agent` in.
+    #[test]
+    fn a_home_from_before_products_resumes_for_the_product_now_asked() {
+        let mut old = from(record("a", "/w", Some("alphaca"), 100), "/w/roles/alphaca");
+        old.agent = None;
+        let records = [old];
+        let found = resumable(
+            &records,
+            Path::new("/w"),
+            Wanted {
+                source: Some("/w/roles/alphaca"),
+                typed: Some("alphaca"),
+                run: Some("grok"),
             },
         );
         assert_eq!(found.len(), 1, "{found:?}");

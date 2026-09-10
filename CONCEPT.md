@@ -78,9 +78,11 @@ This is a deliberate reversal. An earlier design gave the box no route and put a
 | `copy` | the host's credential files copied into the box home once, where absent | the box refreshes its own copy; the host copy is never written |
 | `share` | the host's credential files bound read-write at the same place in the box home | lands on the host; one login, refreshed by whoever runs next |
 
-The files are the agent's own: `~/.claude/.credentials.json` for `claude`, `~/.codex/auth.json` for `codex`. For `claude`, `copy` and `share` also carry the account fields from the host's `.claude.json` into the box's, only where the box has none — a token without its account is half a login.
+The files are the agent's own: `~/.claude/.credentials.json` for `claude`, `~/.codex/auth.json` for `codex`, `~/.grok/auth.json` for `grok`. For `claude`, `copy` and `share` also carry the account fields from the host's `.claude.json` into the box's, only where the box has none — a token without its account is half a login.
 
 `share` names one race honestly: the refresh token rotates on every use, so the host agent and a box refreshing the same file can invalidate each other. Cost is one `/login`. Not defended, named.
+
+`share` also has a limit nothing can lift: it binds the file, a bind is a mount point, and no rename can replace a mount point. An agent that saves a login by writing a new file and moving it into place therefore cannot share one — so each agent says which it does, and a `share` that would break is refused before the box starts rather than failing inside the agent.
 
 A copied or shared login is a grant like any other and the banner counts it: it is the one host secret a box can be handed, and the preview screen says which mode it got.
 

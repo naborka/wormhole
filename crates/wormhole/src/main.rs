@@ -208,6 +208,18 @@ pub(crate) fn claim_build(data_home: &Path, digest: &str, what: &str) -> Flock<s
         .unwrap_or_else(|e| fail(&e))
 }
 
+/// The product a multi-run start did not name. On a terminal, the same
+/// list `n` in the panel already shows; off one, `--run` is the answer.
+fn pick_product(names: &[String]) -> String {
+    if !roles::someone_is_present() {
+        fail(&manifest::need_run(names));
+    }
+    match panel::choose_from(tui::RUN_HEADING, names).unwrap_or_else(|e| fail(&e)) {
+        Some(index) => names[index].clone(),
+        None => fail(&manifest::need_run(names)),
+    }
+}
+
 /// Runs this workspace's agent in a fresh copy of its image. The copy is
 /// thrown away afterwards, so nothing the agent does can reach the image
 /// the next box starts from. Any command after `--` replaces the agent.
@@ -231,6 +243,43 @@ fn run_box(args: &[String]) -> ! {
     // and only resolving them says so.
     let resolved = roles::resolve_manifest(parsed.role.as_deref());
 
+    // `--id` already names the box, so its recorded product is the one
+    // this start runs unless `--run` says otherwise — and a disagreement
+    // is a refusal, not a silent switch of the home's agent.
+    let recorded = named.as_ref().and_then(|(id, _)| {
+        let home = paths::home_dir(&data_home, &paths::box_key(&workspace, id));
+        read_record(&home).ok().and_then(|record| record.agent)
+    });
+    let mut requested = parsed.run.clone().or(recorded.clone());
+    let roles::Resolved {
+        manifest,
+        dir: manifest_dir,
+        source: role_source,
+        typed: role_typed,
+        ..
+    } = resolved;
+    // A new box with several products and no `--run` has nothing to
+    // resume, so the product is asked before the box exists. `--id` and
+    // `--run` already named one; a single product is not a choice.
+    if requested.is_none()
+        && parsed.new
+        && let Some(names) = tui::pick_run(&manifest)
+    {
+        requested = Some(pick_product(names));
+    }
+    let unbound = requested.is_none() && tui::pick_run(&manifest).is_some();
+    let mut manifest = if unbound {
+        manifest
+    } else {
+        manifest::bound(manifest, requested.as_deref()).unwrap_or_else(|e| fail(&e.to_string()))
+    };
+    if !unbound
+        && let Some(refusal) =
+            manifest::product_mismatch(recorded.as_deref(), manifest.agent.product())
+    {
+        fail(&refusal);
+    }
+
     // Which box this is. A workspace holds as many as you make: this
     // resumes the most recently used one that is free, or starts another.
     // The root is thrown away, the home is kept — per box, so each keeps
@@ -238,8 +287,31 @@ fn run_box(args: &[String]) -> ! {
     //
     // Held until this process exits — `exit` runs no destructor, so the
     // kernel is what ends it.
-    let (box_id, _claim) = named
-        .unwrap_or_else(|| lock::claim_free(&data_home, &workspace, parsed.new, resolved.wanted()));
+    let (box_id, _claim) = named.unwrap_or_else(|| {
+        lock::claim_free(
+            &data_home,
+            &workspace,
+            parsed.new,
+            home::Wanted {
+                source: role_source.as_deref(),
+                typed: role_typed.as_deref(),
+                run: if unbound {
+                    None
+                } else {
+                    manifest.agent.product()
+                },
+            },
+        )
+    });
+    if unbound {
+        let home = paths::home_dir(&data_home, &paths::box_key(&workspace, &box_id));
+        requested = read_record(&home)
+            .ok()
+            .and_then(|record| record.agent)
+            .or_else(|| tui::pick_run(&manifest).map(pick_product));
+        manifest = manifest::bound(manifest, requested.as_deref())
+            .unwrap_or_else(|e| fail(&e.to_string()));
+    }
     let box_key = paths::box_key(&workspace, &box_id);
 
     // What this box answers to besides its id. `--as` renames it; without
@@ -254,13 +326,12 @@ fn run_box(args: &[String]) -> ! {
         parsed.alias.as_deref(),
     );
 
-    let roles::Resolved {
-        manifest,
-        dir: manifest_dir,
-        source: role_source,
-        typed: role_typed,
-        ..
-    } = resolved;
+    // Before the home and the image: a login this start cannot deliver is
+    // not something to find out after a build.
+    let credentials = parsed.credentials.unwrap_or(manifest.access.credentials);
+    if let Some(refusal) = manifest::credentials_refusal(&manifest, credentials) {
+        fail(&refusal);
+    }
 
     let home = paths::home_dir(&data_home, &box_key);
     std::fs::create_dir_all(&home)
@@ -324,7 +395,6 @@ fn run_box(args: &[String]) -> ! {
     );
     seed::seed_instructions(&manifest, &manifest_dir, &home);
     seed::seed_preflight(&manifest, &manifest_dir, &home);
-    let credentials = parsed.credentials.unwrap_or(manifest.access.credentials);
     seed::seed_agent_config(&manifest, &workspace, &home, credentials);
     let shared_credentials = seed::seed_credentials(credentials, &manifest, &home);
     if manifest.access.dns.is_none() && !Path::new("/etc/resolv.conf").exists() {
@@ -451,7 +521,7 @@ fn write_record(
         source: source.map(str::to_owned),
         alias: alias.map(str::to_owned),
         name: manifest.name.clone(),
-        agent: manifest.agent.run.clone(),
+        agent: manifest.agent.product().map(str::to_owned),
         created_unix: created,
         started_unix: now,
     };
@@ -478,7 +548,7 @@ fn register_box(
         box_id: box_id.to_owned(),
         workspace: workspace.to_owned(),
         image: image.display().to_string(),
-        agent: manifest.agent.run.clone(),
+        agent: manifest.agent.product().map(str::to_owned),
         name: manifest.name.clone(),
         alias: alias.map(str::to_owned),
         started_unix: now_unix(),
@@ -982,19 +1052,31 @@ fn new_box_from_panel(data_home: &Path) {
         // startable by name, and needs `wormhole role add` first. Shown on
         // a screen and returned from, because taking the whole panel down
         // over one unready row would lose every other one with it.
-        let text = match roles::try_resolve_manifest(role) {
-            Ok(resolved) => {
-                let digest = manifest::recipe_digest(&resolved.manifest);
-                let image = paths::image_dir(data_home, &digest);
-                wormhole_core::tui::preview(&resolved.manifest, &labels[index], image.is_dir())
-                    + wormhole_core::tui::PREVIEW_HINTS
-            }
+        let resolved = match roles::try_resolve_manifest(role) {
+            Ok(resolved) => resolved,
             Err(why) => {
                 let _ = panel::confirm(&format!("{}\n\n{why}\n\nq back\n", labels[index]))
                     .unwrap_or_else(|e| fail(&e));
                 continue;
             }
         };
+        // Several products: pick one. One product: nothing to choose.
+        // Backing out returns to the role list, not the box list.
+        let run = if let Some(names) = wormhole_core::tui::pick_run(&resolved.manifest) {
+            let names = names.to_vec();
+            match panel::choose_from(tui::RUN_HEADING, &names).unwrap_or_else(|e| fail(&e)) {
+                Some(i) => Some(names[i].clone()),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let shown = manifest::bound(resolved.manifest, run.as_deref())
+            .unwrap_or_else(|e| fail(&e.to_string()));
+        let digest = manifest::recipe_digest(&shown);
+        let image = paths::image_dir(data_home, &digest);
+        let text = wormhole_core::tui::preview(&shown, &labels[index], image.is_dir())
+            + wormhole_core::tui::PREVIEW_HINTS;
         if panel::confirm(&text).unwrap_or_else(|e| fail(&e)) {
             // `--new`, because the key is `n` for new: an idle box is
             // resumed with Enter on its own row, where you can see which
@@ -1003,6 +1085,10 @@ fn new_box_from_panel(data_home: &Path) {
             if let Some(role) = role {
                 args.push("--role".to_owned());
                 args.push(role.to_owned());
+            }
+            if let Some(run) = run {
+                args.push("--run".to_owned());
+                args.push(run);
             }
             run_box(&args);
         }

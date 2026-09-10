@@ -83,6 +83,7 @@ pub enum ParseError {
     RootNotAMode(String),
     AttachUsage,
     RoleWithoutName,
+    RunWithoutName,
     IdWithoutValue,
     NewAndId,
     AliasWithoutName,
@@ -135,6 +136,7 @@ impl fmt::Display for ParseError {
                 )
             }
             ParseError::RoleWithoutName => write!(f, "--role needs a name"),
+            ParseError::RunWithoutName => write!(f, "--run needs claude, codex or grok"),
             ParseError::AliasWithoutName => write!(f, "--as needs a name"),
             ParseError::EnvWithoutName => write!(f, "--env needs NAME or NAME=VALUE"),
             ParseError::UnusableEnvName(name) => write!(
@@ -155,7 +157,7 @@ impl fmt::Display for ParseError {
             ParseError::BoxUsage => {
                 write!(
                     f,
-                    "usage: wormhole box [--role <name|dir|ref>] [--new | --id <id|name>] [--as <name>] [-- <command> [args...]]"
+                    "usage: wormhole box [--role <name|dir|ref>] [--run claude|codex|grok] [--new | --id <id|name>] [--as <name>] [-- <command> [args...]]"
                 )
             }
             ParseError::PsUsage => write!(f, "usage: wormhole ps [--all | <id|name>]"),
@@ -313,6 +315,9 @@ pub struct BoxArgs {
     /// Where this start's agent login comes from, when typed; `None`
     /// takes the manifest's answer.
     pub credentials: Option<crate::manifest::Credentials>,
+    /// Which product this start runs, when typed; `None` takes the
+    /// recorded product of `--id`, or asks when the role offers several.
+    pub run: Option<String>,
 }
 
 /// One `--env` flag: a variable named with the host's value (`NAME`) or
@@ -356,12 +361,14 @@ pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
     let mut alias = None;
     let mut env = Vec::new();
     let mut credentials = None;
+    let mut run = None;
     let mut flags = before.iter();
     while let Some(flag) = flags.next() {
         match flag.as_str() {
             "--env" => env.push(parse_env_arg(
                 flags.next().ok_or(ParseError::EnvWithoutName)?,
             )?),
+            "--run" => run = Some(flags.next().ok_or(ParseError::RunWithoutName)?.clone()),
             "--credentials" => {
                 let mode = flags.next().ok_or(ParseError::CredentialsWithoutMode)?;
                 credentials = Some(match mode.as_str() {
@@ -402,6 +409,7 @@ pub fn parse_box_args(args: &[String]) -> Result<BoxArgs, ParseError> {
         command,
         env,
         credentials,
+        run,
     })
 }
 
@@ -852,6 +860,7 @@ mod tests {
                 command: None,
                 env: Vec::new(),
                 credentials: None,
+                run: None,
             })
         );
     }
@@ -868,6 +877,7 @@ mod tests {
                 command: Some(strings(&["sh"])),
                 env: Vec::new(),
                 credentials: None,
+                run: None,
             })
         );
         assert_eq!(
@@ -880,6 +890,7 @@ mod tests {
                 command: None,
                 env: Vec::new(),
                 credentials: None,
+                run: None,
             })
         );
     }
@@ -904,6 +915,20 @@ mod tests {
                 .expect("valid")
                 .id,
             Some("0123456789ab".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_box_takes_the_product_by_name() {
+        assert_eq!(
+            parse_box_args(&strings(&["--run", "grok"]))
+                .expect("valid")
+                .run,
+            Some("grok".to_owned())
+        );
+        assert_eq!(
+            parse_box_args(&strings(&["--run"])),
+            Err(ParseError::RunWithoutName)
         );
     }
 

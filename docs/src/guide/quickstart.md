@@ -58,6 +58,7 @@ whatever it installed. A folder holds as many boxes as you make — see
 ```sh
 wormhole box -- sh        # your command instead of the agent
 wormhole box --new        # another box here, its own home
+wormhole box --run grok   # which CLI; omit to pick
 wormhole box --new --as <name>  # another box, under a name you pick
 wormhole box --id <id|name>     # that exact box, whenever
 wormhole ps               # running boxes
@@ -85,13 +86,16 @@ wormhole
 
 A live list of every box, running and idle, most recently used first.
 `Enter` does the one thing that row allows — join a running box's agent,
-or start an idle one again in its own workspace. `d` stops a running box,
-and says so under the hints; on a box that is not running it says that
-instead of doing nothing. `n` makes another box here: it lists every
-launchable source (the workspace's manifest and each installed
-[role](roles.md)) and shows a full preview of what the box will see before
-anything starts. `x` removes a box and `r` resets one — both ask first,
-and `y` is the only key that answers. `q` quits, or takes back a question.
+or start an idle one again in its own workspace. `d` stops a running box.
+`n` makes another box here: pick a [role](roles.md), then the CLI if that
+role lists more than one, then a preview of what the box will see. `x`
+removes a box and `r` resets one — both ask first, and `y` is the only
+key that answers. `q` quits, or takes back a question.
+
+```sh
+wormhole box --role alphaca            # pick which CLI
+wormhole box --role alphaca --run grok # skip the pick
+```
 
 The same things, from anywhere and without the panel:
 

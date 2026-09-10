@@ -9,6 +9,62 @@ true.
 
 ## Unreleased
 
+### Changed: a multi-product role asks which CLI
+
+A list in `[agent] run` used to start the first name. A terminal now
+picks. `--run` names one. Off a terminal, a new box needs `--run`. A
+kept box resumes the CLI it already runs.
+
+### Fixed: a shared login an agent could never save
+
+`credentials = "share"` binds your credential file into the box. A bind
+is a mount point, and nothing can rename over a mount point — so an
+agent that saves a login by writing a new file and moving it into place
+got `Resource busy (os error 16)` from its own save, after the whole
+login, with nothing in the box explaining why. Grok is such an agent.
+
+Each agent now says how it writes a login, and a `share` that cannot
+work is refused before the box starts, naming `copy` and `none`. Codex
+writes its `auth.json` in place — checked by saving one through a bind
+mount — so sharing still does what it says there. The `alphaca-grok`
+role takes `none`: `grok login --device-auth` prints a URL and a code,
+which is what a box with no browser needs.
+
+### A third agent: grok
+
+`run = "grok"` launches xAI's Grok Build CLI. Grok has two gates, and a
+box answers both: approvals, and the folder trust that decides whether a
+headless start reads the workspace's instructions at all. Its own
+sandbox is off by default, so there was nothing there to turn off.
+
+Adding it was one entry in the agent table, which is what that table was
+built for. One thing the table could not say yet: grok asks nothing a
+start could answer for it — its trust comes from a flag and its model
+from `GROK_DEFAULT_MODEL` — so "which config file a start seeds" is now
+allowed to be *none*, instead of every agent having to name one.
+
+Grok reads no instructions file at the box home root. What it reads
+whatever directory it starts in is `~/.grok/rules/`, so the pointer to
+the canonical `AGENTS.md` goes there, as a symlink. That is the first
+pointer two directories deep, and it moved the "how far back is the home
+root" arithmetic out of the file-writing code into the pure core, where
+a test can reach it. Two more per-agent facts went with it: the path an
+agent reads its instructions from now comes back with the pointer, from
+one lookup, and each config seeding names its own file.
+
+A new `alphaca-grok` role carries the whole alphaca kit under grok: the
+Rust toolchain, `gh`, rtk as a rules file (grok has no rewrite hook),
+the caveman, mattpocock and rust skills in grok's own skills directory,
+and context7 as an MCP server in `~/.grok/config.toml`.
+
+### Fixed: a failed Claude Code install looked like one that worked
+
+The alphaca role's preflight installs Claude Code with `curl | bash`. A
+`curl` that fails there feeds bash an empty script, which exits 0 — so
+the hook announced an install that had not happened, and the box then
+started with no agent to run. The binary being on `PATH` is what says
+it now.
+
 ### Changed: the codex role installs codex and rtk the way alphaca does
 
 The `alphaca-codex` role no longer bakes codex and rtk into its image —

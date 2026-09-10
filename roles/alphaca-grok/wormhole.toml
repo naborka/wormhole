@@ -1,11 +1,11 @@
-# Alphaca Codex — kept so existing boxes keep their homes.
-# New starts:  wormhole box --role alphaca --run codex
+# Alphaca Grok — kept so existing boxes keep their homes.
+# New starts:  wormhole box --role alphaca --run grok
 #
-#   ln -s "$(pwd)/roles/alphaca-codex" ~/.config/wormhole/roles/alphaca-codex
-#   wormhole box --role alphaca-codex
+#   ln -s "$(pwd)/roles/alphaca-grok" ~/.config/wormhole/roles/alphaca-grok
+#   wormhole box --role alphaca-grok
 
 version = 1
-name = "Alphaca Codex"
+name = "Alphaca Grok"
 
 [image]
 base = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.2-x86_64.tar.gz"
@@ -17,6 +17,8 @@ package_sources = [
   "http://dl-cdn.alpinelinux.org/alpine/v3.22/community",
 ]
 
+# zstd: grok's installer prefers the zstd build and falls back to a gzip
+# one that is 15 MiB larger.
 packages = [
   "bash",
   "nodejs",
@@ -32,9 +34,10 @@ packages = [
   "eza",
   "btop",
   "ncdu",
+  "zstd",
 ]
 
-# Codex and rtk are not in the image: the preflight hook keeps the latest
+# Grok and rtk are not in the image: the preflight hook keeps the latest
 # of both in the box home's ~/.local/bin.
 build = [
   # rustup-init reads its own argv[0], so it keeps its name.
@@ -50,19 +53,21 @@ sha256 = "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1"
 into = "/tmp/rustup-init"
 
 [agent]
-run = "codex"
+run = "grok"
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
 
-# One `codex login` on the host serves every box.
+# `grok login --device-auth` in the box: it prints a URL and a code, so a
+# box with no browser can still sign in. Not `share` — grok saves a login
+# by replacing ~/.grok/auth.json, and a shared file is a mount point.
 [access]
 dns = "1.1.1.1"
-credentials = "share"
+credentials = "none"
 host_ca = true
 
-# Empty: ChatGPT sign-in needs no key; a host that exports one would
-# switch codex to usage-based billing.
-[env.OPENAI_API_KEY]
+# Empty: a box signs in with `grok login`. Declared so a host that has a
+# key can hand it over, and so nothing else can.
+[env.XAI_API_KEY]
 default = ""
 
 # CARGO_HOME stays unset: ~/.cargo is in the kept home, so the registry
@@ -82,6 +87,6 @@ ask = true
 [env.GITHUB_TOKEN]
 ask = true
 
-# Codex hands it to hooks and commands, and it must exist in the box.
+# Grok hands it to hooks and commands, and it must exist in the box.
 [env.SHELL]
 fixed = "/bin/bash"

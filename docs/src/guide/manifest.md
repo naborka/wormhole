@@ -137,18 +137,17 @@ is what `[access] host_ca` is for, and it now reaches the build box too.
 
 ```toml
 [agent]
-run = "claude"
-model = "claude-fable-5"
+run = "claude"                    # or ["claude", "codex", "grok"]
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
 ```
 
 | Key | Meaning |
 |---|---|
-| `run` | Which agent wormhole launches. `claude` and `codex` are known; each starts with its own permission prompts and sandbox bypassed, because the box holds the line. Absent means a box with no agent |
-| `model` | Passed the way the agent reads a model: `ANTHROPIC_MODEL` in the box for `claude`, the `model` key in `.codex/config.toml` for `codex` |
+| `run` | `claude`, `codex`, `grok`. A list: pick on a terminal, or `--run`. Each name is its own box. Absent: no agent. A list cannot carry `model` |
+| `model` | Passed the way the product reads a model: `ANTHROPIC_MODEL` in the box for `claude`, `GROK_DEFAULT_MODEL` for `grok`, the `model` key in `.codex/config.toml` for `codex`. Only with a single `run` name |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
-| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts; the agent then replaces the shell. A failing hook stops the box. Non-secret setup only — plugins, skills, tool init. It runs inside the box, so a credential it saved would sit where the agent reads; secrets belong to `ask` (host-side store), and the agent's login to `[access] credentials`, never here |
+| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts. `WORMHOLE_RUN` is set to this box's product, so one hook can install skills and MCP the way that CLI understands. The agent then replaces the shell. A failing hook stops the box. Non-secret setup only. Secrets belong to `ask`; the login to `[access] credentials` |
 
 ## `[access]` — what the box can reach
 

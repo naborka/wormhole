@@ -35,10 +35,11 @@ is the honest answer to [what a login really carries](access.md#what-a-credentia
 
 On a start that finds the box home without a login, the agent's
 credential files are copied in from your home — `~/.claude/.credentials.json`
-for `claude`, `~/.codex/auth.json` for `codex` — and, for `claude`, the
-account fields beside it in `.claude.json`, because the token alone is
-half a login. Once: a box that already has a login keeps it, so a
-refresh the box made is never clobbered by the next start.
+for `claude`, `~/.codex/auth.json` for `codex`, `~/.grok/auth.json` for
+`grok` — and, for `claude`, the account fields beside it in
+`.claude.json`, because the token alone is half a login. Once: a box that
+already has a login keeps it, so a refresh the box made is never
+clobbered by the next start.
 
 From then on the box and the host hold two tokens for one account, and
 each refreshes its own. Your host file is never written by a box.
@@ -48,6 +49,13 @@ each refreshes its own. Your host file is never written by a box.
 Your credential file is bound read-write at the same path in the box
 home. One login, and a refresh in the box lands on the host. The banner
 counts it as a grant, because it is one: a host path the box can write.
+
+Only for an agent that writes that file in place. A bind is a mount
+point, and nothing can rename over a mount point — so an agent that
+saves a login by writing a new file and moving it into place gets
+`Resource busy` instead, after the whole login. `grok` is one, so a
+`share` naming it is refused before the box starts, with `copy` and
+`none` named as the two that work.
 For `claude` the account fields in `.claude.json` are carried into the
 box home the same way `copy` does it; that file stays the box's own.
 

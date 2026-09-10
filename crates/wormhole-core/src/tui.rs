@@ -294,6 +294,7 @@ impl Tui {
 pub struct Picker {
     pub items: Vec<String>,
     pub selected: usize,
+    heading: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +308,15 @@ pub enum PickAction {
 
 impl Picker {
     pub fn new(items: Vec<String>) -> Self {
-        Picker { items, selected: 0 }
+        Self::with_heading("start a new box from:", items)
+    }
+
+    pub fn with_heading(heading: &'static str, items: Vec<String>) -> Self {
+        Picker {
+            items,
+            selected: 0,
+            heading,
+        }
     }
 
     pub fn update(&mut self, key: Key) -> PickAction {
@@ -325,7 +334,7 @@ impl Picker {
     }
 
     pub fn view(&self) -> String {
-        let mut screen = String::from("start a new box from:\n\n");
+        let mut screen = format!("{}\n\n", self.heading);
         for (row, item) in self.items.iter().enumerate() {
             screen.push_str(cursor(row == self.selected));
             screen.push_str(item);
@@ -344,15 +353,17 @@ pub fn preview(manifest: &Manifest, source: &str, image_ready: bool) -> String {
     if let Some(name) = &manifest.name {
         text.push_str(&format!("name: {name}\n"));
     }
-    match &manifest.agent.run {
-        Some(agent) => {
-            text.push_str(&format!("agent: {agent}"));
-            if let Some(model) = &manifest.agent.model {
+    match manifest.agent.run.as_slice() {
+        [] => text.push_str("agent: none\n"),
+        names => {
+            text.push_str(&format!("agent: {}", names.join(", ")));
+            if names.len() == 1
+                && let Some(model) = &manifest.agent.model
+            {
                 text.push_str(&format!(" (model {model})"));
             }
             text.push('\n');
         }
-        None => text.push_str("agent: none\n"),
     }
     text.push_str("\nthe box will see:\n");
     text.push_str("  workspace (read-write)\n");
@@ -462,6 +473,18 @@ pub fn preview(manifest: &Manifest, source: &str, image_ready: bool) -> String {
 /// with nobody at it, where offering a key to press would be a lie.
 pub const PREVIEW_HINTS: &str = "\nenter start   q back\n";
 
+/// What the product list is choosing. One string, so the panel's `n` and
+/// `wormhole box` cannot ask the same question in two wordings.
+pub const RUN_HEADING: &str = "run as:";
+
+/// Products a start should offer a pick for. `None` when there is
+/// nothing to choose: no agent, or only one.
+#[must_use]
+pub fn pick_run(manifest: &Manifest) -> Option<&[String]> {
+    let names = manifest.agent.run.as_slice();
+    (names.len() > 1).then_some(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +564,43 @@ mod tests {
         ] {
             assert!(view.contains(expected), "missing {expected:?} in:\n{view}");
         }
+    }
+
+    #[test]
+    fn a_role_with_one_product_skips_the_picker() {
+        assert_eq!(pick_run(&manifest("[agent]\nrun = \"claude\"\n")), None);
+        assert_eq!(pick_run(&manifest("")), None);
+    }
+
+    #[test]
+    fn a_role_with_several_products_is_a_list_to_pick_from() {
+        let m = manifest("[agent]\nrun = [\"claude\", \"codex\", \"grok\"]\n");
+        assert_eq!(
+            pick_run(&m).map(<[String]>::to_vec),
+            Some(vec![
+                "claude".to_owned(),
+                "codex".to_owned(),
+                "grok".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_product_picker_says_what_it_is_choosing() {
+        let picker =
+            Picker::with_heading(RUN_HEADING, vec!["claude".to_owned(), "grok".to_owned()]);
+        let view = picker.view();
+        assert!(view.contains("run as:"), "{view}");
+        assert!(view.contains("> claude"), "{view}");
+        assert!(view.contains("  grok"), "{view}");
+    }
+
+    #[test]
+    fn the_preview_lists_every_product_a_role_may_run() {
+        let m = manifest("[agent]\nrun = [\"claude\", \"codex\", \"grok\"]\n");
+        let view = preview(&m, "role alphaca", false);
+        assert!(view.contains("agent: claude, codex, grok"), "{view}");
+        assert!(!view.contains("model"), "{view}");
     }
 
     /// The preview is what stands between a role somebody else wrote and
