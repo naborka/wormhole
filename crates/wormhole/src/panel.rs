@@ -83,7 +83,15 @@ fn screen<T>(
 
 /// Shows a list until the user picks an item or backs out.
 pub fn choose(items: &[String]) -> Result<Option<usize>, String> {
-    let picker = std::cell::RefCell::new(wormhole_core::tui::Picker::new(items.to_vec()));
+    choose_from("start a new box from:", items)
+}
+
+/// Same list, with a heading that says what is being picked.
+pub fn choose_from(heading: &'static str, items: &[String]) -> Result<Option<usize>, String> {
+    let picker = std::cell::RefCell::new(wormhole_core::tui::Picker::with_heading(
+        heading,
+        items.to_vec(),
+    ));
     screen(
         || picker.borrow().view(),
         |key| match picker.borrow_mut().update(key) {

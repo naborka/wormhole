@@ -19,7 +19,7 @@ The `wormhole.toml` that is the whole recipe for a box — image, agent, access,
 _Avoid_: config, settings, profile
 
 **Box**:
-The running sandbox for one workspace. Its root filesystem is a throwaway copy of the image, deleted when the box exits. A workspace holds as many boxes as you make, each with its own id and its own home.
+The running sandbox for one workspace. Its root filesystem is a throwaway copy of the image, deleted when the box exits. A workspace holds as many boxes as you make, each with its own id and its own home. Two products of one role are two boxes: the home holds that product's login and history.
 _Avoid_: container, sandbox, VM
 
 **Session**:
@@ -27,11 +27,15 @@ One terminal attached to a box. The launch holds the first; `wormhole attach` op
 _Avoid_: tab, instance, agent run
 
 **Role**:
-A directory holding a manifest and whatever that manifest names — an instructions file, a preflight hook — that is not tied to one workspace. Reached by path, by installed name, or by pinned commit; those are three ways to *reach* one role, never three roles.
+A directory holding a manifest and whatever that manifest names — an instructions file, a preflight hook — that is not tied to one workspace. Reached by path, by installed name, or by pinned commit; those are three ways to *reach* one role, never three roles. A role may offer more than one product; that does not make it more than one role.
 _Avoid_: profile, template, persona (a persona is a file a role ships, not the role)
 
+**Product**:
+The vendor CLI a box runs as PID 1: `claude`, `codex`, `grok`. Named by `[agent] run`, or by `--run`. Omit `--run` and a terminal picks; a resume keeps the recorded product. Not the process (that is the agent), not the model, not the role.
+_Avoid_: agent (the hostile process in the box), client (an MCP server), runner, backend
+
 **Source**:
-Where a role comes from, and therefore which role it is: the canonical directory of one on this machine, the repository URL of one that was fetched. What a box records, and what decides whether two starts mean one box. Not the commit — that is which *version* — and not the name, which is one of several spellings.
+Where a role comes from, and therefore which role it is: the canonical directory of one on this machine, the repository URL of one that was fetched. What a box records, together with the product, to decide whether two starts mean one box. Not the commit — that is which *version* — and not the name, which is one of several spellings.
 _Avoid_: origin, identity, ref (a ref is what the user types)
 
 **Alias**:

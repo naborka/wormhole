@@ -1,12 +1,8 @@
-# Alphaca Codex: the alphaca role, run by OpenAI's Codex CLI.
+# Alphaca Codex — kept so existing boxes keep their homes.
+# New starts:  wormhole box --role alphaca --run codex
 #
 #   ln -s "$(pwd)/roles/alphaca-codex" ~/.config/wormhole/roles/alphaca-codex
 #   wormhole box --role alphaca-codex
-#
-# Versus alphaca: rtk is a rules file (codex has no PreToolUse hook),
-# skills go in via the `skills` installer, context7 is an MCP server in
-# ~/.codex/config.toml. ROLE.md repeats alphaca's because a manifest
-# names one instructions file.
 
 version = 1
 name = "Alphaca Codex"

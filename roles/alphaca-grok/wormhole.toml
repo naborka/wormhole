@@ -1,12 +1,8 @@
-# Alphaca Grok: the alphaca role, run by xAI's Grok Build CLI.
+# Alphaca Grok — kept so existing boxes keep their homes.
+# New starts:  wormhole box --role alphaca --run grok
 #
 #   ln -s "$(pwd)/roles/alphaca-grok" ~/.config/wormhole/roles/alphaca-grok
 #   wormhole box --role alphaca-grok
-#
-# Versus alphaca: rtk is a rules file (grok has no rewrite hook), skills
-# go in through the `skills` installer, context7 is an MCP server in
-# ~/.grok/config.toml. ROLE.md repeats alphaca's because a manifest names
-# one instructions file.
 
 version = 1
 name = "Alphaca Grok"

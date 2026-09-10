@@ -85,15 +85,14 @@ $ wormhole box              # box: a3f9c1e40b2d (resumed)
 $ wormhole box --new        # box: 7d2e04ab91ff (new)
 ```
 
-The role is part of the match. A box's home carries that role's toolchain
-and persona, so a `rust` run never resumes a `java` box —
-that would be the wrong home wearing the name of continuity.
+The role is part of the match. A `rust` run never resumes a `java` box.
+The CLI is too: grok and claude are two boxes.
 
-What is matched is *where the role comes from* — the directory a local one
-lives in, the repository a fetched one came from — and never the spelling
-you used. `--role alphaca` and `--role ./roles/alphaca` are one role and
-one box, and re-pinning a fetched role to a newer commit keeps the box you
-were working in. See [roles](roles.md).
+New box, several CLIs: the start asks which. `--run grok` skips that.
+`wormhole box` resumes the last one, whichever CLI it was.
+
+`--role alphaca` and `--role ./roles/alphaca` are one role. Re-pinning a
+fetched role keeps the box you were working in. See [roles](roles.md).
 
 ## Stopping one
 
@@ -261,7 +260,7 @@ start one that is not.
 | Key | What it does |
 |---|---|
 | `enter` | join a running box, or start an idle one |
-| `n` | another box here, from a manifest or role you pick |
+| `n` | new box: pick a role, then the CLI |
 | `d` | stop the running box on this row |
 | `x` | remove this box — asks first |
 | `r` | reset this box, keeping the box — asks first |

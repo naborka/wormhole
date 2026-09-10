@@ -1,9 +1,7 @@
 # Roles
 
-A role is a box recipe that is not tied to one workspace: a directory
-holding a `wormhole.toml`, plus whatever that manifest names — an
-instructions file, a preflight hook. Point wormhole at it from any
-workspace.
+A role is a box recipe that is not tied to one workspace: persona, image,
+and a hook that sets up tools. Point wormhole at it from any workspace.
 
 ```
 my-role/
@@ -12,8 +10,42 @@ my-role/
   hooks/preflight.sh  # runtime setup, named by `[agent] preflight`
 ```
 
-This repository ships one role — `alphaca`, the role wormhole itself is
-built with. Every other role lives in a repository of its own.
+This repository ships `alphaca`. It can run as claude, codex, or grok.
+
+## Role vs product
+
+| | |
+|---|---|
+| **Role** | Who it is. One directory. |
+| **Product** | Which CLI: `claude`, `codex`, or `grok`. |
+
+Same role, three boxes — own home, login, history.
+
+```sh
+wormhole box --role alphaca            # pick which CLI
+wormhole box --role alphaca --run grok # skip the pick
+```
+
+A kept box resumes the CLI it already runs. Off a terminal, a new box
+needs `--run`.
+
+## What the hook installs
+
+Before the agent starts, `hooks/preflight.sh` runs *inside the box*. It
+reads `WORMHOLE_RUN` and sets up only that product:
+
+1. the CLI binary (claude / codex / grok)
+2. skills: `npx skills add <repo> -a $RUN` (caveman, mattpocock, rust-skills)
+3. MCP: `claude|codex|grok mcp add context7`
+4. rtk, aimed at that product
+
+Claude plugins (for example rust-analyzer-lsp) have no grok/codex
+analogue. The hook installs them only for claude and prints that it
+skipped them otherwise.
+
+Nothing of this is a wormhole schema. The hook calls each CLI's own
+commands. A failing required install stops the box; the rest warn and
+continue.
 
 ## The three ways to name one
 
@@ -92,6 +124,8 @@ Two different roles stay two boxes. That is the whole reason a role is
 part of a box's identity: a box's home carries that role's toolchain and
 persona, and resuming across roles would be the wrong home wearing the
 name of continuity.
+
+See [role vs product](#role-vs-product) for `--run`.
 
 ## Managing what is installed
 
@@ -252,9 +286,9 @@ Either way, the first start builds the role's image. `wormhole build
 wait for it then than at the start of a session.
 
 An installed role shows up in the panel (`wormhole`, then `n`) alongside
-the workspace's own manifest, with the full permission preview before
-anything starts. A `--role ./path` does not — it was never installed, and
-nothing knows to look there. One `role add` is what puts it on that list.
+the workspace's own manifest. If `run` lists several products, `n` asks
+which CLI next. Then the permission preview. A `--role ./path` does not
+show in that list — it was never installed. One `role add` puts it there.
 
 A role is also part of a box's identity, and it is *where the role comes
 from* that counts, never how you spelled it. See
@@ -273,8 +307,9 @@ travel by seeding into the box's kept home before start:
   `.grok/rules/AGENTS.md` — so the text exists once however many agents
   learn to read it
 - `[agent] preflight` is copied to `.wormhole/preflight` in the box home
-  and run from there, fresh on every start — and removed when the manifest
-  stops naming one, so nothing stale survives a recipe change
+  and run from there, fresh on every start, with `WORMHOLE_RUN` set to the
+  product this box is. Removed when the manifest stops naming one, so
+  nothing stale survives a recipe change
 
 A hook the manifest names but the role does not carry stops the launch on
 the host, with the path in the error.

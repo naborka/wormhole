@@ -40,7 +40,28 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// machine is drawn on one. Both are driven the same way — wait for the
 /// screen to say it is ready, then send the one key that answers it — so
 /// there is one body for it rather than a copy per test.
-pub fn on_a_terminal(mut command: Command, wait_for: &str, answer: &[u8]) -> String {
+pub fn on_a_terminal(command: Command, wait_for: &str, answer: &[u8]) -> String {
+    let (seen, status) = drive_terminal(command, wait_for, answer);
+    assert!(status.success(), "exited {status}:\n{seen}");
+    seen
+}
+
+/// The same drive, for a question whose answer is a refusal.
+pub fn on_a_refused_terminal(command: Command, wait_for: &str, answer: &[u8]) -> String {
+    let (seen, status) = drive_terminal(command, wait_for, answer);
+    assert!(
+        !status.success(),
+        "exited {status}, should have refused:\n{seen}"
+    );
+    seen
+}
+
+/// The pty loop both wrappers share. The caller judges the exit.
+pub fn drive_terminal(
+    mut command: Command,
+    wait_for: &str,
+    answer: &[u8],
+) -> (String, std::process::ExitStatus) {
     let pty = nix::pty::openpty(None, None).expect("a pty");
     let child = command
         .env("TERM", "xterm")
@@ -86,8 +107,7 @@ pub fn on_a_terminal(mut command: Command, wait_for: &str, answer: &[u8]) -> Str
     let status = child.lock().expect("the child").wait().expect("it exits");
     let _ = done.send(());
     assert!(answered, "never drew {wait_for:?}:\n{seen}");
-    assert!(status.success(), "exited {status}:\n{seen}");
-    seen
+    (seen, status)
 }
 
 /// A gzipped tarball of `content`, and its sha256 — what `[image] base`

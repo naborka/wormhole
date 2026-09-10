@@ -56,6 +56,11 @@ const BOXES: &[Line] = &[
     },
     Line {
         name: "box",
+        args: "--run claude|codex|grok",
+        blurb: "which CLI; omit to pick",
+    },
+    Line {
+        name: "box",
         args: "-- CMD...",
         blurb: "your command in the box instead of the agent",
     },
@@ -197,7 +202,8 @@ const AFTER_BOXES: &str = r#"
 
 PANEL   (bare `wormhole`)
   enter join or start · n new · d stop · x remove · r reset · q quit
-  x and r ask first; y answers, anything else cancels.
+  n: pick a role, then claude/codex/grok if the role lists more than one.
+  Enter on a row resumes that box's product. x and r ask; y answers.
 
 MANIFEST
   ./wormhole.toml is the whole recipe; nothing reaches the box unless it
@@ -217,7 +223,7 @@ MANIFEST
   into = "/tmp/tool.tgz"            # connection for it
 
   [agent]
-  run = "claude"                    # or "codex" / "grok"; starts bypassed
+  run = "claude"                    # or ["claude", "codex", "grok"]
   model = "claude-opus-5"           # the way this agent reads a model
   instructions = "ROLE.md"          # added to the built-in instructions
   preflight = "hooks/setup.sh"      # runs in the box before the agent
@@ -245,10 +251,11 @@ MAKE A ROLE
   # myrole/ROLE.md          extra instructions for the agent   (optional)
   # myrole/hooks/setup.sh   runs in the box before the agent   (optional)
   wormhole role add ./myrole --as mine
-  wormhole box --role mine
+  wormhole box --role mine               # pick which CLI
+  wormhole box --role mine --run grok    # skip the pick
 
-  A role is identified by where it comes from, never by what you typed:
-  every spelling of one role gets you the same box back.
+  A role is identified by where it comes from, never by what you typed.
+  Two products of one role are two boxes.
 
 "#;
 
@@ -365,6 +372,8 @@ mod tests {
             "gc --delete --unreferenced",
             "~/.local/share/wormhole/homes/",
             "unreferenced",
+            "--run",
+            "pick which CLI",
         ] {
             assert!(page.contains(topic), "the page never mentions {topic:?}");
         }

@@ -9,6 +9,12 @@ true.
 
 ## Unreleased
 
+### Changed: a multi-product role asks which CLI
+
+A list in `[agent] run` used to start the first name. A terminal now
+picks. `--run` names one. Off a terminal, a new box needs `--run`. A
+kept box resumes the CLI it already runs.
+
 ### Fixed: a shared login an agent could never save
 
 `credentials = "share"` binds your credential file into the box. A bind

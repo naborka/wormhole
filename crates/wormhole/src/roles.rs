@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wormhole_core::{home, manifest, paths, source};
+use wormhole_core::{manifest, paths, source};
 
 use crate::{MANIFEST, config_home, data_home, fail, image, panel, replace_file, usage};
 
@@ -412,15 +412,6 @@ pub(crate) struct Resolved {
     pub(crate) label: Option<String>,
 }
 
-impl Resolved {
-    pub(crate) fn wanted(&self) -> home::Wanted<'_> {
-        home::Wanted {
-            source: self.source.as_deref(),
-            typed: self.typed.as_deref(),
-        }
-    }
-}
-
 /// The manifest a box or build uses, and the directory its relative paths
 /// (`instructions`, `hooks`) resolve against. An explicit `--role` is the
 /// user speaking and wins; the workspace's own `wormhole.toml` is the
@@ -616,7 +607,7 @@ fn canonical(dir: &Path) -> PathBuf {
 ///
 /// A question nobody can see must never be treated as answered: without a
 /// terminal, everything that would have asked refuses instead.
-fn someone_is_present() -> bool {
+pub(crate) fn someone_is_present() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
