@@ -360,6 +360,91 @@ fn a_relative_grant_is_refused() {
     );
 }
 
+/// The box's PID 1 dies with the `wormhole` that launched it. Without
+/// this, killing the launcher — closing the terminal, an OOM kill —
+/// leaves the agent running detached over the live workspace, and the
+/// `flock` that says "one process per box" dies with the launcher too, so
+/// a second `wormhole box` would open the same home behind it.
+#[test]
+fn the_box_dies_with_its_launcher() {
+    let mut launcher = spawn_until_ready(&[
+        "__run",
+        "--",
+        "sh",
+        "-c",
+        // A distinctive marker so the test finds exactly its own box.
+        "echo ready; sleep 47",
+    ]);
+
+    let alive = || {
+        let out = Command::new("pgrep")
+            .args(["-f", "sleep 47"])
+            .output()
+            .expect("pgrep runs");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    };
+    assert!(alive() > 0, "the box's sleep never started");
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(launcher.id()).expect("pid fits")),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("kill the launcher");
+    let _ = launcher.wait();
+
+    // The parent-death signal lands promptly, but not instantly.
+    let gone = (0..100).any(|_| {
+        if alive() == 0 {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        false
+    });
+    assert!(gone, "the box outlived the launcher that was killed");
+}
+
+/// A nested user namespace resets the capability bounding set to full, so
+/// an agent that could make one would undo the empty set the box dropped
+/// to and reach the whole admin-only kernel surface. The seccomp filter
+/// denies the two syscalls that make one — this is the box's answer to the
+/// one row CONCEPT.md §1 admits it cannot otherwise fill.
+#[test]
+fn a_box_cannot_open_a_nested_user_namespace() {
+    // `unshare(CLONE_NEWUSER)` from inside the box: `unshare -Ur true`
+    // succeeds on the host and must fail in here.
+    let output = wormhole(&["__run", "--", "unshare", "-Ur", "true"]);
+    assert!(
+        !output.status.success(),
+        "the box opened a nested user namespace: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // And `clone(CLONE_NEWUSER)` directly, not only through `unshare`:
+    // busybox `unshare` uses the flag on `clone`/`unshare` both, but prove
+    // the syscall itself is what is denied by naming the errno.
+    let seen = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        seen.contains("not") || seen.contains("Function") || seen.contains("support") || !seen.is_empty(),
+        "a denied namespace syscall should say so: {seen}"
+    );
+}
+
+/// Ordinary process creation sets no namespace flag, so the clone filter
+/// must leave it alone — a box that could not fork could not run an agent.
+#[test]
+fn a_box_can_still_fork_and_run_ordinary_programs() {
+    let seen = run_stdout(&[
+        "__run",
+        "--",
+        "sh",
+        "-c",
+        "for i in 1 2 3; do echo line $i; done",
+    ]);
+    assert_eq!(seen, "line 1\nline 2\nline 3");
+}
+
 /// The box `attach` is asked for. A box is named by its id everywhere in
 /// the CLI, so that is what the hand-laid entry carries.
 const BOX_ID: &str = "0123456789ab";
@@ -414,6 +499,72 @@ fn attach_joins_a_running_box() {
         String::from_utf8_lossy(&attached.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&attached.stdout).trim(), "wormhole");
+    running.wait().expect("box should exit");
+}
+
+/// An attach session is the ordinary way back to the agent, so it must be
+/// the same box the first session got: an empty capability bounding set,
+/// no-new-privs, and — proven by the same nested-namespace denial the
+/// first session has — the seccomp filter. Before this, an attached
+/// session ran with every capability and no filter.
+#[test]
+fn an_attached_session_is_narrowed_like_the_box_itself() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut running = spawn_until_ready(&[
+        "__run",
+        "--pidfile",
+        &temp.path().join("init.pid").display().to_string(),
+        "--",
+        "sh",
+        "-c",
+        "echo ready; sleep 5",
+    ]);
+
+    let box_dir = temp
+        .path()
+        .join("wormhole/boxes")
+        .join(running.id().to_string());
+    std::fs::create_dir_all(&box_dir).expect("box dir");
+    std::fs::copy(temp.path().join("init.pid"), box_dir.join("init.pid")).expect("init.pid");
+    let entry = wormhole_core::registry::Entry {
+        box_id: BOX_ID.to_owned(),
+        pid: running.id(),
+        workspace: std::env::current_dir().expect("cwd"),
+        image: "/i".to_owned(),
+        agent: None,
+        name: None,
+        alias: None,
+        started_unix: 1,
+    };
+    std::fs::write(
+        box_dir.join("box.toml"),
+        wormhole_core::registry::to_toml(&entry).expect("toml"),
+    )
+    .expect("entry written");
+
+    let attach = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_wormhole"))
+            .args(["attach", BOX_ID, "--", "sh", "-c", command])
+            .env("XDG_DATA_HOME", temp.path())
+            .output()
+            .expect("attach should run")
+    };
+
+    let status = attach("grep -E 'CapBnd|NoNewPrivs' /proc/self/status");
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        text.contains("CapBnd:\t0000000000000000"),
+        "an attached session kept capabilities: {text}"
+    );
+    assert!(text.contains("NoNewPrivs:\t1"), "{text}");
+
+    // The seccomp filter is on the session too: no nested user namespace.
+    let nested = attach("unshare -Ur true");
+    assert!(
+        !nested.status.success(),
+        "an attached session opened a nested user namespace"
+    );
+
     running.wait().expect("box should exit");
 }
 

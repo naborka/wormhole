@@ -34,12 +34,28 @@ default deny — see [what it can dial](#what-it-can-dial). Inside:
 - **DNS** — the manifest's named resolver, or the host's own
   `/etc/resolv.conf` bound read-only.
 
-Four things hold that are not mounts, and none of them can be turned off:
+Five things hold that are not mounts, and none of them can be turned off:
 
 - **No capability, and none regainable.** The box starts with an empty
   capability bounding set and `no_new_privs`. Nothing in it can regain a
   capability or raise privilege through any `execve` — a setuid binary in
   the image is just a file.
+- **A seccomp filter shrinks the kernel surface.** The one thing that
+  could hand the capabilities back is a *new* user namespace, which starts
+  with a full set again — so the filter denies `unshare` and `setns`, and
+  `clone` when it asks for any namespace. It also denies the syscalls with
+  the worst container-escape record: `io_uring` (60% of the kernel
+  exploits in Google's kCTF programme), the kernel keyring, BPF, `kexec`
+  and module loading. Each returns "not supported", so an ordinary tool
+  that probes for one simply does without it, while the box keeps `fork`,
+  threads and everything a build needs. This is the box's answer to the
+  one weakness it cannot fully close — a shared host kernel — and it is
+  proven from inside a running box, not just planned. The build box is
+  left unfiltered on purpose: it installs packages as root, holds nothing
+  of yours, and is thrown away.
+  A tool whose own sandbox needs user namespaces — Chromium, and things
+  built on it — runs with that sandbox off in the box (`--no-sandbox`);
+  the box is the sandbox.
 - **The box checks its own mounts.** After pivoting, PID 1 reads its own
   `/proc/self/mountinfo` and refuses to start if any read-write mount is
   not in the plan. The plan being exhaustively tested was never proof that
@@ -49,8 +65,15 @@ Four things hold that are not mounts, and none of them can be turned off:
 - **One process per box.** An `flock` the kernel holds for the process's
   whole life, so the same box can never be started twice into one home. A
   box killed at any point leaves nothing stale behind and nothing a second
-  start can mistake for free. A workspace may hold as many *different*
-  boxes as you make — see [boxes](boxes.md).
+  start can mistake for free. The box's own PID 1 dies with the `wormhole`
+  that launched it, so closing the terminal takes the agent down rather
+  than leaving it running detached over your workspace. A workspace may
+  hold as many *different* boxes as you make — see [boxes](boxes.md).
+
+An attach session — a second terminal into a running box — is narrowed
+the same way the first is: the empty capability set, `no_new_privs` and
+the seccomp filter all apply to it too, so there is no weaker way into
+the box than the one it started with.
 
 ## What it can dial
 

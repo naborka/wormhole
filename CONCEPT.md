@@ -27,11 +27,11 @@ Three consequences, and they are not the ones people expect:
 | Exfil / C2 | **not protected** — the box has the host's network (§2) | — |
 | Remote repo destruction | only what the login you handed over can reach; nothing else of yours is mounted | no |
 | Host filesystem outside the workspace | mount namespace — unmounted paths do not exist | no |
-| **Host kernel compromise** | **not protected** — only a separate guest kernel would, and wormhole has none | **yes — only this** |
+| **Host kernel compromise** | **weak, narrowed** — a seccomp filter denies the syscalls that hand back capabilities (nested user namespaces) or open a known escalation surface (`io_uring`, keyring, BPF, kexec, modules); the residual is a kernel LPE reachable through an *allowed* syscall, which only a separate guest kernel would close, and wormhole has none | **yes — only a guest kernel closes the residual** |
 
 ### One boundary, and why that is not a compromise
 
-wormhole has one boundary, `Namespaces`: our own `clone` + `unshare` + `pivot_root` + `mount` + seccomp + Landlock. Linux only.
+wormhole has one boundary, `Namespaces`: our own `clone` + `unshare` + `pivot_root` + `mount` + an empty capability bounding set + `no_new_privs` + a seccomp filter. Linux only. (Landlock is a probed prerequisite the boundary does not yet apply — §10.)
 
 A guest kernel is not built and not planned. It is the only thing that would fill the kernel row, and it is a different program: a hypervisor, a virtio-fs server, a guest image. §13 keeps the record of what it would need (`/dev/kvm`, libkrun issue #329) in case that ever changes.
 
@@ -48,7 +48,7 @@ The count is read off the whole launch, not assembled from hand-picked fields, s
 | Rung | Escape requires |
 |---|---|
 | Rootful Docker | one kernel LPE, or a runc CVE (three shipped Nov 2025: CVE-2025-31133, -52565, -52881) |
-| **`Namespaces` — userns + own mount/pid ns + seccomp + Landlock** | **kernel LPE reachable from an unprivileged user namespace** |
+| **`Namespaces` — userns + own mount/pid ns + seccomp** | **kernel LPE through a syscall the filter still allows — the box cannot open a fresh namespace to widen the set** |
 | gVisor (`runsc`) | Sentry escape, *then* a kernel bug — 5–15× syscall latency, fatal for builds |
 | MicroVM — separate guest kernel (libkrun, Firecracker) | hypervisor escape |
 
@@ -326,9 +326,12 @@ Before the PTY is handed over, and refusing to start if any assertion fails:
 - no credential file is readable inside the box beyond the one `credentials` handed over
 - the workspace is the only host path mounted rw, plus explicitly granted ones
 - capability bounding set dropped and not reacquirable
+- the seccomp filter denies a nested user namespace — the box cannot open one to hand its capabilities back — proven from inside the box, not only from the plan
 - the workspace lockfile was acquired
 
 Then the banner (§1), the grant set, and the role name.
+
+The same drop-and-narrow runs before every session, not only the first: `wormhole attach` opens a second terminal into the box, and a session that ran with a full capability set and no filter would be a hole the size of the feature. One body applies the capability drop, `no_new_privs` and the seccomp filter, and both PID 1 and every attach cross it.
 
 A security tool that only checks when asked is checked when it does not matter. A kernel upgrade or a distro userns-policy change must not land silently. Failure is refusal, never degradation — that choice follows directly from assuming the agent is hostile.
 
@@ -391,7 +394,7 @@ Every decision lives in a headless core the TUI renders. `--role X` bypasses the
 | Arbitrary C2 / exfil | **none** — the box has the host's network | by choice |
 | Remote repo destruction | bounded by the login handed over; nothing else of yours is reachable | as strong as the account's scope |
 | Host filesystem outside the workspace | unmounted paths do not exist in the box's mount namespace | strong; Landlock as a second layer |
-| Host root compromise | unprivileged userns; a kernel LPE reachable from it defeats the box | **weak, by construction** |
+| Host root compromise | unprivileged userns; empty capability bounding set; a seccomp filter that denies nested namespaces, `io_uring`, the keyring, BPF, kexec and modules; a kernel LPE through a still-allowed syscall defeats the box | **weak by construction, narrowed** |
 | Runaway resource use | cgroup limits, host-side ceiling | enforced |
 
 ### What wormhole does not protect — accepted risks
@@ -406,7 +409,7 @@ A pre-session reflink snapshot (`cp -a --reflink=always`, instant on btrfs and x
 
 **3. The login you handed over.** `copy` and `share` put your credential where the agent reads it, with every capability the account has — hosted connectors included, which execute server-side and never cross the box at all. If a box must not reach something, the account you hand it must not have it.
 
-**4. `Namespaces` shares the host kernel.** A kernel LPE reachable from an unprivileged user namespace defeats it. Only a guest kernel would close this, and there is none (§1).
+**4. `Namespaces` shares the host kernel.** A seccomp filter now denies the syscalls that widen the box's reach — a nested user namespace (which would hand every capability back), `io_uring`, the kernel keyring, BPF, `kexec` and module loading — so an agent is held to the syscall surface it started with and cannot escalate to a fresh namespace. What remains is a kernel LPE through a syscall the filter still allows; only a guest kernel would close that, and there is none (§1). The residual is narrower than before, not gone.
 
 **5. Guest disk and inode exhaustion through the workspace mount.** Quotas required, portable enforcement unproven — assumption #5.
 

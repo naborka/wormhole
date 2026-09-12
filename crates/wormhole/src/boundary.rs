@@ -69,6 +69,7 @@ pub fn run(
     if let Some(env) = env {
         child.env_clear().envs(env);
     }
+    die_with_launcher(&mut child);
     let mut child = match child.spawn() {
         Ok(child) => child,
         Err(e) => fail(&format!("cannot spawn boxed child: {e}")),
@@ -190,6 +191,8 @@ pub fn attach(
             report(child)
         }
         Ok(ForkResult::Child) => {
+            // The session dies with the `wormhole attach` that opened it.
+            arm_pdeathsig();
             if let Err(e) = std::env::set_current_dir(workspace) {
                 fail(&format!("cannot enter {}: {e}", workspace.display()));
             }
@@ -202,9 +205,54 @@ pub fn attach(
                     }
                 }
             }
+            // The same narrowing the box's PID 1 went through. Attaching is
+            // the ordinary way to reach the agent — its terminal, in fact,
+            // for a second session — so a session that ran with a full
+            // capability set and no seccomp would be a hole the size of the
+            // feature. Done after the setns above, which needed the caller
+            // whole to join the namespaces.
+            if let Err(e) = narrow_to_agent() {
+                fail(&e);
+            }
             exec(command, &home_in_box(&user))
         }
         Err(e) => fail(&format!("cannot fork into the box: {e}")),
+    }
+}
+
+/// Ties a spawned child's life to this process's: when `wormhole` dies —
+/// the terminal closed, an OOM kill, a `kill` — the child gets `SIGKILL`
+/// rather than living on.
+///
+/// This is what makes the one-process-per-box claim survive the launcher
+/// being killed. The `flock` a box holds ends with `wormhole`, so a
+/// launcher killed while the box ran used to leave the agent running,
+/// detached, over the live workspace — and a second `wormhole box` then
+/// opened the same home behind it, two agents writing one history, which
+/// is the exact corruption the lock exists to prevent.
+///
+/// The parent-death signal is delivered on the death of the thread that
+/// forked, so it is only sound because `wormhole` is single-threaded. The
+/// child re-checks its parent after arming the signal, closing the race
+/// where the launcher dies in the window between the fork and the arming.
+fn die_with_launcher(child: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    let launcher = std::process::id();
+    #[expect(
+        unsafe_code,
+        reason = "pre_exec runs in the forked child; both calls are async-signal-safe"
+    )]
+    unsafe {
+        child.pre_exec(move || {
+            nix::sys::prctl::set_pdeathsig(Signal::SIGKILL)
+                .map_err(std::io::Error::from)?;
+            // The launcher may already be gone; then the signal will never
+            // come, so leave now rather than run on as an orphan.
+            if nix::unistd::getppid().as_raw() as u32 != launcher {
+                exit(0);
+            }
+            Ok(())
+        });
     }
 }
 
@@ -285,8 +333,26 @@ fn fork_into_box(
             ignore_terminal_signals();
             report(child)
         }
-        Ok(ForkResult::Child) => match init() {},
+        Ok(ForkResult::Child) => {
+            // PID 1 dies with the process waiting on it — `__boxed`, which
+            // itself dies with the launcher. So a killed launcher takes the
+            // whole box down through this chain rather than orphaning it.
+            arm_pdeathsig();
+            match init() {}
+        }
         Err(e) => fail(&format!("cannot fork the box: {e}")),
+    }
+}
+
+/// Arms `SIGKILL` on the death of this process's parent, for a forked
+/// child that has entered a new PID namespace and so cannot see its parent
+/// to re-check the race. The parent it depends on lives for the box's
+/// whole life by construction, so the only way to lose the signal is the
+/// launcher dying in the fork's first instants — far narrower than the
+/// unconditional orphan this replaces.
+fn arm_pdeathsig() {
+    if let Err(e) = nix::sys::prctl::set_pdeathsig(Signal::SIGKILL) {
+        fail(&format!("cannot tie the box's life to the launcher: {e}"));
     }
 }
 
@@ -302,10 +368,20 @@ fn box_init(scratch: &Path, home: &Path, args: &RunArgs) -> ! {
     }
     // Last, because the mounts above needed CAP_SYS_ADMIN and nothing
     // after this point needs any capability at all.
-    if let Err(e) = drop_all_capabilities() {
+    if let Err(e) = narrow_to_agent() {
         fail(&e);
     }
     exec(&args.command, &home_in_box(&user))
+}
+
+/// Everything that stands between the box's setup and the agent: drop
+/// every capability, forbid regaining privilege, and narrow the kernel
+/// surface with seccomp. One body, because a session that skipped any of
+/// the three would be a weaker box wearing the same banner — which is
+/// exactly what `attach` was before it called this too.
+fn narrow_to_agent() -> Result<(), String> {
+    drop_all_capabilities()?;
+    crate::seccomp::narrow()
 }
 
 /// Empties the capability bounding set and sets no-new-privs, then proves

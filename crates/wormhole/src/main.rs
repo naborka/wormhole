@@ -4,6 +4,7 @@ mod lock;
 mod panel;
 mod probes;
 mod roles;
+mod seccomp;
 mod seed;
 mod terminfo;
 

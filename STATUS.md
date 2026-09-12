@@ -46,8 +46,13 @@ throwaway root from the image; the workspace read-write at its host path; the
 granted paths and nothing else; the host's network and its resolver, or one named resolver; only the environment the
 manifest declares; its own `PATH`; an **empty capability bounding set and
 no-new-privs**, so nothing in the box can regain a capability or raise
-privilege through any `execve`; `Ctrl-C` that reaches the agent and not
-wormhole. The agent is PID 1 and its uid matches yours, so files it writes in the
+privilege through any `execve`; a **seccomp filter** that denies a nested
+user namespace (which would hand every capability back), `io_uring`, the
+kernel keyring, BPF, `kexec` and module loading, and `clone` when it asks
+for a namespace — inherited across `execve` and by every child, applied
+before the agent and before every attach session alike; `Ctrl-C` that
+reaches the agent and not wormhole. The box's PID 1 dies with the
+`wormhole` that launched it, so nothing survives the terminal closing. The agent is PID 1 and its uid matches yours, so files it writes in the
 workspace belong to you. Its `$HOME` is kept per box under
 `~/.local/share/wormhole/homes/<workspace>-<box id>`, so history, settings, logins
 and installed toolchains survive every restart of that box while the root stays
@@ -242,6 +247,31 @@ What a review on 2026-09-12 found by running real boxes, each fixed at the root:
   Alpine — or any host that keeps real top-level directories — 27 of 33
   kernel tests found no shell. The box now borrows each program directory
   as the host has it: a link stays a link, a directory is lent read-only.
+- **A nested user namespace handed every capability back.** The box drops
+  its whole capability bounding set, but `unshare(CLONE_NEWUSER)` from
+  inside makes a fresh namespace with a full set again — proven live:
+  `unshare(0x50000000)` returned exit 0 on the host and now `Function not
+  implemented` in the box. A seccomp filter (rust-vmm `seccompiler`, pure
+  Rust) denies `unshare`/`setns`/`clone3`, `clone` with any namespace flag,
+  and `io_uring`, keyring, BPF, `kexec` and module loading — all ENOSYS, so
+  a probing tool degrades rather than breaks. The filter is pure to build
+  (`seccomp::filter`) and applied in `narrow_to_agent`, which also drops
+  capabilities and sets no-new-privs.
+- **An attach session ran with every capability and no filter.** `wormhole
+  attach` — the ordinary way to a second terminal on the agent — dropped
+  the session into the box without the capability drop, no-new-privs or
+  seccomp the first session got: proven, `CapBnd: 000001ffffffffff` in an
+  attached session against `0000000000000000` in PID 1. Both cross
+  `narrow_to_agent` now, and a kernel test reads the attached session's own
+  `/proc/self/status` and denies its nested namespace.
+- **A killed launcher orphaned the agent, and let a second one in.** Proven
+  live: `kill -9` the `wormhole box` process left the boxed agent running
+  over the workspace, and a second `wormhole box --id` into the same home
+  then succeeded — two agents, one home, the exact corruption the `flock`
+  exists to prevent, because the lock dies with the launcher. `PR_SET_PDEATHSIG`
+  now ties `__boxed` to the launcher and PID 1 to `__boxed`, so a killed or
+  hung-up launcher takes the whole box down. Kernel test kills the launcher
+  and asserts the box's process is gone.
 
 ## Next — what to build now
 

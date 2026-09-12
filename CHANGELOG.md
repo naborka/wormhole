@@ -9,6 +9,37 @@ true.
 
 ## Unreleased
 
+### A seccomp filter closes the box's one open escalation path
+
+The box drops every capability, but a *new* user namespace starts with a
+full set again — so an agent that ran `unshare(CLONE_NEWUSER)` got its
+capabilities straight back and reached `mount`, overlayfs and the rest of
+the admin-only kernel. The box now carries a seccomp filter that denies
+the syscalls that make a namespace (`unshare`, `setns`, `clone` with a
+namespace flag, `clone3`) and the ones with the worst container-escape
+record (`io_uring`, the kernel keyring, BPF, `kexec`, module loading).
+Each returns "not supported", so an ordinary tool that probes for one
+does without it while the box keeps `fork`, threads and everything a
+build needs. `CONCEPT.md` had promised this filter all along; now it is
+real, and proven from inside a running box.
+
+### Fixed: an attach session was a weaker box than the one it joined
+
+`wormhole attach` opens a second terminal into a running box — usually
+onto the agent itself. It dropped that session in with a full capability
+set, no `no_new_privs`, and no seccomp filter, so the second way into the
+box was weaker than the first. Now one path narrows both: the capability
+drop, `no_new_privs` and the filter apply to every session.
+
+### Fixed: closing the terminal left the agent running over your files
+
+Killing the `wormhole` that launched a box — closing the terminal, an OOM
+kill — left the agent running, detached, over the live workspace. Worse,
+the `flock` that means "one process per box" dies with the launcher, so a
+second `wormhole box` would open the same home behind the orphan: two
+agents writing one history. The box's process is now tied to its
+launcher's life, so it goes down when the launcher does.
+
 ### Fixed: `--as` names and role identity were filed the wrong way round
 
 A start wrote its box name where the role's identity belongs, and the
