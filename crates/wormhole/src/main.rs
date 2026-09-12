@@ -32,6 +32,13 @@ fn main() {
             print!("{}", help::page());
             std::process::exit(0);
         }
+        // Asked for, so it prints to stdout and exits 0. A person checking
+        // which wormhole they have, or a bug report quoting it, wants a
+        // plain line and a zero exit, not a refusal's usage wall.
+        Some("version" | "--version" | "-V") => {
+            println!("wormhole {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         Some("doctor") => {
             let verdict = doctor::evaluate(probes::run_all());
             print!("{verdict}");

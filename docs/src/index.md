@@ -52,6 +52,7 @@ The rest of the commands:
 | `wormhole box --run claude\|codex\|grok` | which CLI; omit to pick. each is its own box |
 | `wormhole box --credentials none\|copy\|share` | which login the agent starts with, for this start |
 | `wormhole gc` | what the data home holds, and what of it can go |
+| `wormhole version` | which wormhole this is |
 
 Start with [Install](guide/install.md), then the
 [Quickstart](guide/quickstart.md). The [manifest reference](guide/manifest.md)

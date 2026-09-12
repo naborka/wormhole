@@ -83,6 +83,15 @@ connection, and nothing pretends to. The line that holds is the
 filesystem one above — what the box can *read* and *write* of your
 machine — plus what it logs in as, which is the next section.
 
+Abstract-namespace UNIX sockets belong to the network namespace, and the
+box shares the host's, so a host service listening on one — an X11
+display, a D-Bus bus — is reachable from the box the same way a TCP port
+is. This is the same open-network posture, not a separate hole: the
+services that gate on their own credential (X11 wants its cookie, which
+is a file the box does not have) stay shut, and anything that must be
+unreachable belongs behind that gate or off the host, exactly as for any
+other agent you run un-sandboxed on your network.
+
 Every launch prints what it got beyond the baseline — the workspace, the
 host's own resolver, a copied root:
 

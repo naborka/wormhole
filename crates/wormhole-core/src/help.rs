@@ -146,6 +146,11 @@ const REST: &[Line] = &[
         blurb: "values `ask` keeps, shared by every box",
     },
     Line {
+        name: "version",
+        args: "",
+        blurb: "which wormhole this is",
+    },
+    Line {
         name: "help",
         args: "",
         blurb: "this page",
