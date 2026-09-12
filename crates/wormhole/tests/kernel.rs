@@ -117,10 +117,15 @@ fn run_without_separator_is_a_usage_error() {
 fn root_shows_exactly_the_plan() {
     let listing = run_stdout(&["__run", "--", "ls", "-a", "/"]);
     let seen: BTreeSet<&str> = listing.split_whitespace().collect();
-    let expected: BTreeSet<&str> = [
-        ".", "..", "bin", "dev", "etc", "home", "lib", "lib64", "proc", "run", "sbin", "tmp", "usr",
-    ]
-    .into();
+    let mut expected: BTreeSet<&str> =
+        [".", "..", "dev", "etc", "home", "proc", "run", "tmp"].into();
+    // The program directories are the host's own, as the host has them.
+    expected.extend(
+        wormhole_core::mount_plan::HOST_ROOT_ENTRIES
+            .iter()
+            .filter(|path| std::fs::symlink_metadata(path).is_ok())
+            .map(|path| path.trim_start_matches('/')),
+    );
     assert_eq!(seen, expected);
 }
 

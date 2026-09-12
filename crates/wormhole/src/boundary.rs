@@ -569,16 +569,31 @@ fn build_box(scratch: &Path, home: &Path, user: &User, args: &RunArgs) -> Result
         ));
     }
     let image = args.image.as_ref().map(PathBuf::from);
+    let host = host_root_entries();
     let root = match (&image, args.root) {
         (Some(image), RootMode::Copy) => Root::Image(image),
         (Some(image), RootMode::Readonly) => Root::ImageReadOnly(image),
-        (None, _) => Root::HostUsr,
+        (None, _) => Root::Host(&host),
     };
     let resolver = resolver(args.dns)?;
     let ops = mount_plan::compute(&workspace, home, root, user, &grants, &resolver)
         .map_err(|e| format!("mount plan refused: {e}"))?;
     enter_and_pivot(scratch, &ops, &workspace)?;
     Ok(())
+}
+
+/// What each of the host's program directories is, so a bare `__run`
+/// lends them as the host has them.
+fn host_root_entries() -> Vec<mount_plan::HostEntry> {
+    mount_plan::HOST_ROOT_ENTRIES
+        .iter()
+        .map(PathBuf::from)
+        .filter_map(|path| match fs::read_link(&path) {
+            Ok(to) => Some(mount_plan::HostEntry::Link { link: path, to }),
+            Err(_) if path.is_dir() => Some(mount_plan::HostEntry::Dir(path)),
+            Err(_) => None,
+        })
+        .collect()
 }
 
 /// The named resolver, or the host's own `resolv.conf` with its symlink

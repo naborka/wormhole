@@ -237,6 +237,11 @@ What a review on 2026-09-12 found by running real boxes, each fixed at the root:
   wrote records by hand, so none started a box and read what it wrote.
   The record is built with named fields now, old records heal on read,
   and `tests/build.rs` starts a box and reads the record back.
+- **The kernel suite only ran on a usr-merged host.** A bare `__run`
+  borrowed the host's `/usr` and linked `/bin` and `/lib` into it, so on
+  Alpine — or any host that keeps real top-level directories — 27 of 33
+  kernel tests found no shell. The box now borrows each program directory
+  as the host has it: a link stays a link, a directory is lent read-only.
 
 ## Next — what to build now
 
