@@ -414,20 +414,13 @@ fn the_box_dies_with_its_launcher() {
 #[test]
 fn a_box_cannot_open_a_nested_user_namespace() {
     // `unshare(CLONE_NEWUSER)` from inside the box: `unshare -Ur true`
-    // succeeds on the host and must fail in here.
+    // succeeds on the host and must fail in here, because the filter
+    // returns ENOSYS for the syscall.
     let output = wormhole(&["__run", "--", "unshare", "-Ur", "true"]);
     assert!(
         !output.status.success(),
         "the box opened a nested user namespace: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    // And `clone(CLONE_NEWUSER)` directly, not only through `unshare`:
-    // busybox `unshare` uses the flag on `clone`/`unshare` both, but prove
-    // the syscall itself is what is denied by naming the errno.
-    let seen = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        seen.contains("not") || seen.contains("Function") || seen.contains("support") || !seen.is_empty(),
-        "a denied namespace syscall should say so: {seen}"
     );
 }
 

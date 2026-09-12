@@ -60,36 +60,36 @@ const CLONE_NAMESPACE_FLAGS: [libc::c_int; 7] = [
 
 /// Syscalls denied whatever their arguments: a new namespace, a known
 /// container-escape primitive, or a kernel surface too broad to reason
-/// about. The reason beside each is why it is here and not merely why it
-/// is unusual.
-const DENIED: &[(libc::c_long, &str)] = &[
+/// about. The comment on each is why it is here, not merely why it is
+/// unusual.
+const DENIED: &[libc::c_long] = &[
     // A new namespace undoes the empty capability bounding set.
-    (libc::SYS_unshare, "new namespaces"),
-    (libc::SYS_setns, "join a namespace"),
+    libc::SYS_unshare,
+    libc::SYS_setns,
     // clone3's flags hide behind a pointer the filter cannot read, so it
     // cannot be inspected like clone; ENOSYS pushes glibc onto clone.
-    (libc::SYS_clone3, "the uninspectable clone"),
+    libc::SYS_clone3,
     // The largest kernel-LPE surface Linux has.
-    (libc::SYS_io_uring_setup, "io_uring"),
-    (libc::SYS_io_uring_enter, "io_uring"),
-    (libc::SYS_io_uring_register, "io_uring"),
+    libc::SYS_io_uring_setup,
+    libc::SYS_io_uring_enter,
+    libc::SYS_io_uring_register,
     // The kernel keyring is not namespaced.
-    (libc::SYS_keyctl, "the kernel keyring"),
-    (libc::SYS_add_key, "the kernel keyring"),
-    (libc::SYS_request_key, "the kernel keyring"),
+    libc::SYS_keyctl,
+    libc::SYS_add_key,
+    libc::SYS_request_key,
     // Persistent kernel programs and host-wide profiling.
-    (libc::SYS_bpf, "loading BPF"),
-    (libc::SYS_perf_event_open, "kernel profiling"),
+    libc::SYS_bpf,
+    libc::SYS_perf_event_open,
     // Handing the kernel a page-fault handler in userspace.
-    (libc::SYS_userfaultfd, "userspace page faults"),
+    libc::SYS_userfaultfd,
     // Replacing or extending the running kernel.
-    (libc::SYS_kexec_load, "loading a kernel"),
-    (libc::SYS_kexec_file_load, "loading a kernel"),
-    (libc::SYS_init_module, "kernel modules"),
-    (libc::SYS_finit_module, "kernel modules"),
-    (libc::SYS_delete_module, "kernel modules"),
+    libc::SYS_kexec_load,
+    libc::SYS_kexec_file_load,
+    libc::SYS_init_module,
+    libc::SYS_finit_module,
+    libc::SYS_delete_module,
     // A file handle sidesteps the mount namespace — an old breakout.
-    (libc::SYS_open_by_handle_at, "opening by file handle"),
+    libc::SYS_open_by_handle_at,
 ];
 
 /// ENOSYS: "the kernel does not have it". See the module note for why this
@@ -105,7 +105,7 @@ pub fn filter() -> Result<BpfProgram, String> {
 
     // The outright denials carry no argument conditions: an empty rule
     // vector means "this syscall, whatever its arguments".
-    for (syscall, _) in DENIED {
+    for syscall in DENIED {
         rules.insert(*syscall, Vec::new());
     }
 
@@ -182,10 +182,7 @@ mod tests {
     #[test]
     fn the_namespace_syscalls_are_denied() {
         for wanted in [libc::SYS_unshare, libc::SYS_setns, libc::SYS_clone3] {
-            assert!(
-                DENIED.iter().any(|(syscall, _)| *syscall == wanted),
-                "syscall {wanted} is not denied"
-            );
+            assert!(DENIED.contains(&wanted), "syscall {wanted} is not denied");
         }
     }
 }

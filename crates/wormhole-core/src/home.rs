@@ -79,19 +79,17 @@ pub fn parse(text: &str) -> Result<Record, String> {
 
 impl Record {
     /// A wormhole once wrote a start's name into `source` and its role's
-    /// identity into `alias`. An identity is tagged and a name holds no
-    /// `:`, so each value goes back to the one field it can be.
+    /// identity into `alias`. An identity is tagged (`dir:`/`repo:`) and a
+    /// usable alias holds no `:`, so the two are mutually exclusive: route
+    /// each written value to the one field it can belong to.
     fn healed(mut self) -> Self {
-        let written = [self.alias.take(), self.source.take()];
-        let first = |fits: fn(&str) -> bool| {
-            written
-                .iter()
-                .flatten()
-                .find(|value| fits(value))
-                .cloned()
-        };
-        self.alias = first(is_usable_alias);
-        self.source = first(crate::source::is_source);
+        for value in [self.alias.take(), self.source.take()].into_iter().flatten() {
+            if crate::source::is_source(&value) {
+                self.source = Some(value);
+            } else if is_usable_alias(&value) {
+                self.alias = Some(value);
+            }
+        }
         self
     }
 }
