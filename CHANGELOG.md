@@ -23,6 +23,19 @@ does without it while the box keeps `fork`, threads and everything a
 build needs. `CONCEPT.md` had promised this filter all along; now it is
 real, and proven from inside a running box.
 
+### Fixed: `doctor` said "cannot run wormhole" on hosts that run it fine
+
+`wormhole doctor` failed the whole host — exit 1, "this host cannot run
+wormhole" — when `/etc/subuid` had no range or the cgroup hierarchy was
+not delegated. Neither stops a box: wormhole maps only your own uid (no
+range needed) and a box with no `[limits]` needs no cgroup delegation.
+Both are now informational, with a line saying what each is actually for,
+so the verdict is `ok` exactly when a box will start. Overlayfs and
+Landlock, which the boundary does not use or does not yet apply, moved to
+informational for the same reason. Only the two things a box truly needs —
+unprivileged user namespaces, and a non-zero limit on them — still fail
+the host.
+
 ### Fixed: an attach session was a weaker box than the one it joined
 
 `wormhole attach` opens a second terminal into a running box — usually
