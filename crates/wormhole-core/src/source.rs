@@ -119,11 +119,19 @@ fn pin_of(text: &str) -> Option<(&str, &str)> {
 /// directory of that same path are different roles, and an untagged
 /// string would make them one.
 pub fn dir_source(canonical: &std::path::Path) -> String {
-    format!("dir:{}", canonical.display())
+    format!("{DIR}{}", canonical.display())
 }
 
 pub fn repo_source(url: &str) -> String {
-    format!("repo:{url}")
+    format!("{REPO}{url}")
+}
+
+const DIR: &str = "dir:";
+const REPO: &str = "repo:";
+
+/// Whether a string is one of the identities above.
+pub fn is_source(text: &str) -> bool {
+    text.starts_with(DIR) || text.starts_with(REPO)
 }
 
 /// A remote ref as the user types it: a URL or `github:owner/repo`, then

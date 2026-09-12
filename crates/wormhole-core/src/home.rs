@@ -72,7 +72,28 @@ pub fn to_toml(record: &Record) -> Result<String, String> {
 }
 
 pub fn parse(text: &str) -> Result<Record, String> {
-    toml::from_str(text).map_err(|e| format!("box.toml is not valid: {}", e.message()))
+    toml::from_str(text)
+        .map(Record::healed)
+        .map_err(|e| format!("box.toml is not valid: {}", e.message()))
+}
+
+impl Record {
+    /// A wormhole once wrote a start's name into `source` and its role's
+    /// identity into `alias`. An identity is tagged and a name holds no
+    /// `:`, so each value goes back to the one field it can be.
+    fn healed(mut self) -> Self {
+        let written = [self.alias.take(), self.source.take()];
+        let first = |fits: fn(&str) -> bool| {
+            written
+                .iter()
+                .flatten()
+                .find(|value| fits(value))
+                .cloned()
+        };
+        self.alias = first(is_usable_alias);
+        self.source = first(crate::source::is_source);
+        self
+    }
 }
 
 /// The record a pre-id home implies: the workspace it stamped, and the id
@@ -805,6 +826,38 @@ mod tests {
     fn a_record_survives_the_round_trip() {
         let written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
         assert_eq!(parse(&to_toml(&written).expect("toml")), Ok(written));
+    }
+
+    /// A wormhole once filed a start's name under `source` and the role's
+    /// identity under `alias`. The two cannot be mistaken for each other —
+    /// an identity is tagged and a name may hold no `:` — so such a record
+    /// reads back the right way round instead of orphaning its box.
+    #[test]
+    fn a_record_written_with_name_and_identity_swapped_reads_back_the_right_way_round() {
+        let mut swapped = record("0123456789ab", "/w", Some("./roles/a"), 100);
+        swapped.alias = Some("dir:/w/roles/a".to_owned());
+        swapped.source = Some("api".to_owned());
+        let healed = parse(&to_toml(&swapped).expect("toml")).expect("parses");
+        assert_eq!(healed.alias.as_deref(), Some("api"));
+        assert_eq!(healed.source.as_deref(), Some("dir:/w/roles/a"));
+
+        let mut unnamed = record("0123456789ab", "/w", Some("r"), 100);
+        unnamed.alias = Some("repo:https://example.test/r".to_owned());
+        let healed = parse(&to_toml(&unnamed).expect("toml")).expect("parses");
+        assert_eq!(healed.alias, None);
+        assert_eq!(
+            healed.source.as_deref(),
+            Some("repo:https://example.test/r")
+        );
+
+        let mut named_only = record("0123456789ab", "/w", None, 100);
+        named_only.source = Some("api".to_owned());
+        let healed = parse(&to_toml(&named_only).expect("toml")).expect("parses");
+        assert_eq!(healed.alias.as_deref(), Some("api"));
+        assert_eq!(healed.source, None);
+
+        let right = from(called(record("0123456789ab", "/w", None, 1), "api"), "dir:/r");
+        assert_eq!(parse(&to_toml(&right).expect("toml")), Ok(right));
     }
 
     #[test]

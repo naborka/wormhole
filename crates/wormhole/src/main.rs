@@ -384,14 +384,20 @@ fn run_box(args: &[String]) -> ! {
     // ran it. A home is named by a digest, and a digest cannot be
     // inverted: without this nothing could say which workspace a home
     // belongs to, list it for resuming, or tell whether it is still wanted.
+    let now = now_unix();
     write_record(
         &home,
-        &box_id,
-        &manifest,
-        &workspace,
-        role_typed.as_deref(),
-        role_source.as_deref(),
-        box_alias.as_deref(),
+        home::Record {
+            id: box_id.clone(),
+            workspace: workspace.clone(),
+            role: role_typed,
+            source: role_source,
+            alias: box_alias.clone(),
+            name: manifest.name.clone(),
+            agent: manifest.agent.product().map(str::to_owned),
+            created_unix: now,
+            started_unix: now,
+        },
     );
     seed::seed_instructions(&manifest, &manifest_dir, &home);
     seed::seed_preflight(&manifest, &manifest_dir, &home);
@@ -499,33 +505,25 @@ fn report_problems(problems: &[String]) {
 
 /// Writes the box's own record into its home, fresh on every start: what
 /// it is, where it works and when it last ran, so `ps --all` can list it
-/// and `--id` can bring it back.
-fn write_record(
-    home: &Path,
-    id: &str,
-    manifest: &manifest::Manifest,
-    workspace: &Path,
-    role: Option<&str>,
-    alias: Option<&str>,
-    source: Option<&str>,
-) {
-    let now = now_unix();
-    let created = read_record(home).map_or(now, |record| match record.created_unix {
-        0 => now,
-        created => created,
-    });
-    let record = home::Record {
-        id: id.to_owned(),
-        workspace: workspace.to_owned(),
-        role: role.map(str::to_owned),
-        source: source.map(str::to_owned),
-        alias: alias.map(str::to_owned),
-        name: manifest.name.clone(),
-        agent: manifest.agent.product().map(str::to_owned),
-        created_unix: created,
-        started_unix: now,
-    };
-    write_box_record(home, &record).unwrap_or_else(|e| fail(&e));
+/// and `--id` can bring it back. The first start's time is kept.
+///
+/// Takes the record whole: three `Option<&str>` in a row once let a start
+/// file its name as its role's identity, and named fields cannot be passed
+/// in the wrong order.
+fn write_record(home: &Path, record: home::Record) {
+    let created_unix = read_record(home)
+        .ok()
+        .map(|kept| kept.created_unix)
+        .filter(|created| *created != 0)
+        .unwrap_or(record.created_unix);
+    write_box_record(
+        home,
+        &home::Record {
+            created_unix,
+            ..record
+        },
+    )
+    .unwrap_or_else(|e| fail(&e));
 }
 
 /// Writes this box's registry entry beside its root copy. A failure here

@@ -42,7 +42,14 @@ pub fn to_toml(entry: &Entry) -> Result<String, String> {
 }
 
 pub fn parse(text: &str) -> Result<Entry, String> {
-    toml::from_str(text).map_err(|e| format!("box.toml is not valid: {}", e.message()))
+    toml::from_str(text)
+        .map(|mut entry: Entry| {
+            // A box started by a wormhole that misfiled its role's identity
+            // here; that is no name anybody can type.
+            entry.alias = entry.alias.filter(|alias| crate::home::is_usable_alias(alias));
+            entry
+        })
+        .map_err(|e| format!("box.toml is not valid: {}", e.message()))
 }
 
 #[cfg(test)]

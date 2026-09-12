@@ -9,6 +9,20 @@ true.
 
 ## Unreleased
 
+### Fixed: `--as` names and role identity were filed the wrong way round
+
+A start wrote its box name where the role's identity belongs, and the
+identity where the name belongs. So `wormhole box --new --as api` gave a
+box that `ps --all` showed with no name, that `box --id api` could not
+find, and that a bare `wormhole box` no longer resumed: it made a new
+box instead. A role box without `--as` showed `dir:/path/to/role` as its
+name, and its role was matched by spelling again.
+
+The record is now built with named fields, so the two cannot swap. A
+record the old version wrote is read back the right way round — an
+identity always starts `dir:` or `repo:` and a name holds no `:` — so
+every box it misfiled answers to its name and resumes again.
+
 ### Changed: a multi-product role asks which CLI
 
 A list in `[agent] run` used to start the first name. A terminal now

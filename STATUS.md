@@ -228,6 +228,16 @@ What running the panel on a real terminal found:
   now all take the default under `$HOME`, which is what the XDG spec says
   and what the store's whole purpose needs.
 
+What a review on 2026-09-12 found by running real boxes, each fixed at the root:
+
+- **A start filed the box's name and its role's identity the wrong way
+  round.** `write_record` took three `Option<&str>` in a row and the call
+  passed two of them swapped, so `--as` names were lost, resume after
+  `--as` made a new box, and role identity was never matched. Every test
+  wrote records by hand, so none started a box and read what it wrote.
+  The record is built with named fields now, old records heal on read,
+  and `tests/build.rs` starts a box and reads the record back.
+
 ## Next — what to build now
 
 Ordered. Each step ends with something runnable.

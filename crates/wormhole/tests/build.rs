@@ -388,6 +388,55 @@ fn a_workspace_holds_as_many_boxes_as_you_make() {
     );
 }
 
+/// What a start is told lands where it means it: the name after `--as`
+/// is the name the box answers to, and where its role comes from is what
+/// the next start matches on. Every earlier test wrote records by hand, so
+/// a start that filed the two the wrong way round passed all of them.
+#[test]
+fn a_start_records_its_name_and_its_role_where_each_belongs() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (url, digest) = rootfs_tarball(temp.path());
+    let workspace = temp.path().join("workspace");
+    let data_home = temp.path().join("data");
+    let role = temp.path().join("roles/tester");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&role).expect("role dir");
+    write_manifest(&role, &url, &digest, "");
+    let role = role.canonicalize().expect("real role dir");
+    let role_arg = role.display().to_string();
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_wormhole"))
+            .args(args)
+            .current_dir(&workspace)
+            .env("XDG_DATA_HOME", &data_home)
+            .output()
+            .expect("wormhole binary should spawn");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr)
+    };
+
+    let first = run(&["box", "--role", &role_arg, "--new", "--as", "api", "--", "/bin/true"]);
+    let text = std::fs::read_to_string(kept_home(&data_home).join(".wormhole/box.toml"))
+        .unwrap_or_else(|e| panic!("record written: {e}\n{first}"));
+    let record = wormhole_core::home::parse(&text).expect("record");
+    assert_eq!(record.alias.as_deref(), Some("api"), "{text}");
+    assert_eq!(
+        record.source,
+        Some(wormhole_core::source::dir_source(&role)),
+        "{text}"
+    );
+
+    assert!(run(&["ps", "--all"]).contains("api"));
+    let again = run(&["box", "--role", &role_arg, "--", "/bin/true"]);
+    assert!(
+        again.contains(&format!("box: {} (resumed)", record.id)),
+        "{again}"
+    );
+    let named = run(&["box", "--id", "api", "--role", &role_arg, "--", "/bin/true"]);
+    assert!(!named.contains("no box api"), "{named}");
+}
+
 /// A home kept before boxes had ids must be picked up as its workspace's
 /// first box. Orphaning it would throw away the agent's whole history and
 /// everything the preflight hook installed, for a change that renames
