@@ -244,8 +244,7 @@ fn die_with_launcher(child: &mut Command) {
     )]
     unsafe {
         child.pre_exec(move || {
-            nix::sys::prctl::set_pdeathsig(Signal::SIGKILL)
-                .map_err(std::io::Error::from)?;
+            nix::sys::prctl::set_pdeathsig(Signal::SIGKILL).map_err(std::io::Error::from)?;
             // The launcher may already be gone; then the signal will never
             // come, so leave now rather than run on as an orphan.
             if nix::unistd::getppid().as_raw() as u32 != launcher {

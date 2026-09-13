@@ -83,7 +83,10 @@ impl Record {
     /// usable alias holds no `:`, so the two are mutually exclusive: route
     /// each written value to the one field it can belong to.
     fn healed(mut self) -> Self {
-        for value in [self.alias.take(), self.source.take()].into_iter().flatten() {
+        for value in [self.alias.take(), self.source.take()]
+            .into_iter()
+            .flatten()
+        {
             if crate::source::is_source(&value) {
                 self.source = Some(value);
             } else if is_usable_alias(&value) {
@@ -854,7 +857,10 @@ mod tests {
         assert_eq!(healed.alias.as_deref(), Some("api"));
         assert_eq!(healed.source, None);
 
-        let right = from(called(record("0123456789ab", "/w", None, 1), "api"), "dir:/r");
+        let right = from(
+            called(record("0123456789ab", "/w", None, 1), "api"),
+            "dir:/r",
+        );
         assert_eq!(parse(&to_toml(&right).expect("toml")), Ok(right));
     }
 

@@ -416,7 +416,16 @@ fn a_start_records_its_name_and_its_role_where_each_belongs() {
             + &String::from_utf8_lossy(&output.stderr)
     };
 
-    let first = run(&["box", "--role", &role_arg, "--new", "--as", "api", "--", "/bin/true"]);
+    let first = run(&[
+        "box",
+        "--role",
+        &role_arg,
+        "--new",
+        "--as",
+        "api",
+        "--",
+        "/bin/true",
+    ]);
     let text = std::fs::read_to_string(kept_home(&data_home).join(".wormhole/box.toml"))
         .unwrap_or_else(|e| panic!("record written: {e}\n{first}"));
     let record = wormhole_core::home::parse(&text).expect("record");

@@ -46,7 +46,9 @@ pub fn parse(text: &str) -> Result<Entry, String> {
         .map(|mut entry: Entry| {
             // A box started by a wormhole that misfiled its role's identity
             // here; that is no name anybody can type.
-            entry.alias = entry.alias.filter(|alias| crate::home::is_usable_alias(alias));
+            entry.alias = entry
+                .alias
+                .filter(|alias| crate::home::is_usable_alias(alias));
             entry
         })
         .map_err(|e| format!("box.toml is not valid: {}", e.message()))
