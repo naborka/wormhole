@@ -58,8 +58,12 @@ hex characters is always an id, which is why a name may never be twelve hex
 characters.
 
 `--as` on a box that already has a name renames it; leaving it off keeps
-the name it had. A name belongs to one box in one workspace, so a name
-already taken here is refused rather than silently moved.
+the name it had. A name names one box on this host, because a box may run
+in any workspace and its name has to reach it from each. A name another
+box already answers to is refused rather than silently moved. Two boxes
+an older wormhole let share a name in two workspaces keep answering to it
+where each has run; from anywhere else that name is refused, and both ids
+are named.
 
 ```
 $ wormhole ps --all
@@ -73,8 +77,10 @@ a3f9c1e40b2d  Alphaca  api    running 8213  alphaca  claude  2m         /home/me
 
 ## What a bare `wormhole box` does
 
-It resumes this workspace's most recently used box for this role. If every
-one of them is already running, it makes another.
+It resumes the most recently used box for this role that has run in this
+workspace. If every one of them is already running, it makes another. A
+role that says `resume = "anywhere"` widens that to its boxes from every
+workspace — see [one box, many workspaces](#one-box-many-workspaces).
 
 So typing the same command twice gets you back the same box, and you never
 pile up strangers by accident. Making another is something you ask for.
@@ -93,6 +99,56 @@ New box, several CLIs: the start asks which. `--run grok` skips that.
 
 `--role alphaca` and `--role ./roles/alphaca` are one role. Re-pinning a
 fetched role keeps the box you were working in. See [roles](roles.md).
+
+## One box, many workspaces
+
+A box is its home: the login, the installed CLI, the skills, MCP servers
+and plugins its hook set up, `~/.cargo`. By default each workspace gets
+its own, so every new project starts all of that over. A role can say
+that its box follows you instead:
+
+```toml
+[agent]
+resume = "anywhere"
+```
+
+```sh
+cd ~/rust/a && wormhole box --role alphaca   # box: a3f9c1e40b2d (new)
+cd ~/rust/b && wormhole box --role alphaca   # box: a3f9c1e40b2d (resumed; last used in /home/me/rust/a)
+```
+
+The box's claim still holds: one process per box. Started in a second
+workspace while it runs in the first, a bare start takes another free box
+of the role, or makes one, and that one follows you from then on too. So
+a role that says `anywhere` keeps as many homes as you run it at once, not
+one per project.
+
+Where it looks, in order: boxes of this role that already ran here, most
+recent first, then boxes of this role from anywhere else. The line says
+which workspace a resumed box last ran in. Only a role can say this; a
+workspace's own `wormhole.toml` that says `anywhere` is refused, because
+its box is made from that one file and a cloned repository must not decide
+how far its own box reaches.
+
+Any role's box can be shared on purpose, whatever the role says, by naming
+it in the new workspace:
+
+```sh
+cd ~/rust/b && wormhole box --id rust
+```
+
+`--id` from anywhere starts the box with the role it was made from, never
+with the manifest of the directory you typed it in. A different `--role`
+is refused, and so is a box made from another workspace's own manifest:
+its recipe is that file, which no other workspace has.
+
+Each workspace keeps its own conversations inside the one home: the
+products key transcripts, memory and trust to the workspace path, and the
+workspace is mounted at its real path. What a shared box does widen is
+reach: the agent in one project can read what the others left in the
+home, and an injection in one reaches the next. Share boxes between
+projects you would trust with each other, and reset a box that has been
+fed something hostile. See [what the box can reach](access.md).
 
 ## Stopping one
 
@@ -115,9 +171,9 @@ Sets what a box answers to instead of twelve hex characters. `--as` does
 the same at start; this does it without starting anything, so a box you
 named badly in a hurry is not a box you have to boot to fix.
 
-The name belongs to the box's own workspace, and no two boxes there may
-share one — a name that already answers for another box is refused, with
-that box's id in the message. A name may never be spellable as an id.
+No two boxes on the host may share a name — one that already answers for
+another box is refused, with that box's id in the message. A name may
+never be spellable as an id.
 
 Refused while the box is running: the running box's registry entry carries
 the name it started under, nothing rewrites that entry in flight, and a
@@ -130,7 +186,7 @@ wormhole reset <id|name>
 ```
 
 Empties the box's home and keeps the box. Same id, same name, same
-workspace, same role — nothing the agent put there. The next start seeds
+workspaces, same role — nothing the agent put there. The next start seeds
 the instructions and the first-run answers again, and the
 agent logs in again.
 
@@ -171,9 +227,16 @@ have.
 |---|---|
 | `$HOME` — history, logins, toolchain, caches | `~/.local/share/wormhole/homes/<workspace>-<id>/` |
 | Its claim, so the same box cannot start twice | `~/.local/share/wormhole/locks/<workspace>-<id>.lock` |
+| Its record: where it ran, its role, its CLI, its name | `~/.local/share/wormhole/records/<workspace>-<id>.toml` |
 
-Two boxes never share either. One shared `$HOME` would be two agents
-writing one history, one config and one instructions file at the same time.
+`<workspace>` is the basename of the workspace the box was made in, for
+you to find it by eye; wormhole finds a box by its id. Two boxes never
+share any of these. One shared `$HOME` would be two agents writing one
+history, one config and one instructions file at the same time.
+
+The record is beside the claim and not in the home, because the home is
+the agent's to write. A record the agent could rewrite would let it pick
+which workspace the next start mounts, or which role picks its home up.
 
 The image is shared, because it is read-only in effect: a box gets a
 throwaway copy and deletes it on exit.
@@ -233,6 +296,9 @@ $ wormhole box --id a3f9c1e40b2d
 wormhole: box a3f9c1e40b2d is already running (pid 8213)
 ```
 
+That holds wherever the box is started: a box running in one workspace is
+refused by name in another too.
+
 The claim is an `flock`, held by the kernel for the process's whole life.
 Nothing has to be reaped: a box killed at any point stops holding it that
 instant. Whether a box is free is asked by *taking* its lock, never by
@@ -281,8 +347,11 @@ under the hints, and the next key clears it. `d` on a box that is not
 running is that case: it kills nothing, and it tells you rather than
 redrawing a screen that looks unchanged.
 
-Resuming from the panel starts the box in **its own** workspace, not
-wherever the panel was opened.
+Resuming from the panel starts the box where it has already run: in the
+workspace the panel was opened in when the box has run there, otherwise in
+the latest of its workspaces that still exists. Never anywhere it has not
+run — the panel may be open in `~`, and Enter names a box, not a folder
+to hand it. To start a box somewhere new, `wormhole box --id` there.
 
 A home the panel cannot read is named under `could not read:`, on the
 panel's own screen — nothing prints over the box list while the panel is
@@ -303,14 +372,31 @@ carries only the reference somebody typed at the time, so it is matched on
 that, exactly as it used to be; the first start under this wormhole writes
 the identity into it and it behaves like any other from then on.
 
+Records an older wormhole kept inside the home are read as they are, and
+moved out to `records/` at the box's next start, or at a `rename` or
+`reset`. An older wormhole run after that sees such a box as a home that
+holds no record: it lists it as a problem, never resumes it by a bare
+start, and `gc` keeps it; `--id` and `remove` still find it by its
+directory.
+
 ## Reclaiming
 
-`wormhole gc` deletes only what it can prove. It reads each home's own
-record to decide: a home whose workspace no longer exists is proven dead
-and can go; one whose workspace is still there is kept, however long it
-has been idle. A lock file whose box is gone is dead too — `remove` leaves
-those behind on purpose, because unlinking a lock while holding it would
-let another start take a second, different one for the same box.
+`wormhole gc` deletes only what it can prove. A box is dead when nothing
+can start it again, and its record and its recipe say so together:
+
+| Box | Dead when | Otherwise |
+|---|---|---|
+| made from a workspace's own manifest | that workspace is gone | live |
+| of a role that resumes `here` | every workspace it ran in is gone | live |
+| of a role that resumes `anywhere` | never by its workspaces: the next project resumes it | live |
+| of a role whose directory is gone | always: no start can resolve its role | |
+| of a role that cannot be read | never | live while a workspace it ran in exists, unproven after |
+
+A box kept however long it has been idle is still kept. A lock file or a
+record whose box is gone is dead too — `remove` leaves the lock behind on
+purpose, because unlinking a lock while holding it would let another start
+take a second, different one for the same box. A build's claim lives
+beside the box claims and is never taken.
 
 ```sh
 wormhole gc                            # report only

@@ -19,8 +19,12 @@ The `wormhole.toml` that is the whole recipe for a box — image, agent, access,
 _Avoid_: config, settings, profile
 
 **Box**:
-The running sandbox for one workspace. Its root filesystem is a throwaway copy of the image, deleted when the box exits. A workspace holds as many boxes as you make, each with its own id and its own home. Two products of one role are two boxes: the home holds that product's login and history.
+A kept home with an id, and the sandbox that runs from it. Made from one workspace's own manifest or from one role, and one product, fixed for its life. Runs in one workspace at a time; its root filesystem is a throwaway copy of the image, deleted when it exits. A workspace holds as many boxes as you make. Two products of one role are two boxes: the home holds that product's login and history.
 _Avoid_: container, sandbox, VM
+
+**Shared box**:
+A box that has run in more than one workspace: one home for several trees, so each tree's agent can read what the others left there. Made by a role that says `resume = "anywhere"`, or by naming a box with `--id` in a new workspace. A box made from a workspace's own manifest is never one.
+_Avoid_: global box, pooled box
 
 **Session**:
 One terminal attached to a box. The launch holds the first; `wormhole attach` opens more.
@@ -39,7 +43,7 @@ Where a role comes from, and therefore which role it is: the canonical directory
 _Avoid_: origin, identity, ref (a ref is what the user types)
 
 **Alias**:
-A name you gave something that already has an identity of its own — a box, which has an id; a role, which has a source. Yours, local to this machine, and changeable at any time; the identity under it is none of those. `wormhole box --as api` sets a box's, `wormhole role add <dir> --as java` sets a role's. An alias never looks like the identity it stands in for: a box's may not be twelve hex characters, because that is what an id is.
+A name you gave something that already has an identity of its own — a box, which has an id; a role, which has a source. Yours, local to this machine, and changeable at any time; the identity under it is none of those. One alias names one box on this host. `wormhole box --as api` sets a box's, `wormhole role add <dir> --as java` sets a role's. An alias never looks like the identity it stands in for: a box's may not be twelve hex characters, because that is what an id is.
 _Avoid_: name (a manifest has one of those, and several boxes share it), label, tag, handle
 
 **Boundary**:
@@ -61,17 +65,25 @@ The finished read-only tree — base, packages, build lines — cached under a d
 _Avoid_: layer, snapshot, container image
 
 **Home**:
-The per-box directory mounted as the box's `$HOME`. The only box state that outlives the box: logins, history, and whatever the agent installed there.
+The per-box directory mounted as the box's `$HOME`. The only box state the agent keeps between starts: logins, history, and whatever the agent installed there. The agent's: nothing wormhole decides by is kept in it.
 _Avoid_: home volume, state dir
 
 ### A box's life
 
 **Key**:
-What a box's store entries are named by: its workspace's basename and its id, `proj-a3f9c1e40b2d`. One string behind the home and the lock, so the two can never disagree about which box they are. A key carries the id, which is why a box whose record cannot be read can still be named by one.
+What a box's store entries are named by: the basename of the workspace it was made in, and its id, `proj-a3f9c1e40b2d`. One string behind the home, the lock and the record, so they can never disagree about which box they are. Found by the id, never rebuilt from where a command is typed. A key carries the id, which is why a box whose record cannot be read can still be named by one.
 _Avoid_: slug, path, dirname
 
+**Record**:
+What wormhole knows about a box: every workspace it ran in, its role, its product, its alias. Kept host-side beside the claim, never in the home, because an identity the agent can rewrite is not an identity.
+_Avoid_: stamp, metadata, box file
+
+**Resume**:
+Starting a kept box again. A bare start resumes a free box of the same role and product that already ran in this workspace; a role that says `resume = "anywhere"` lets it resume one from any workspace.
+_Avoid_: reuse, reattach (that is `attach`)
+
 **Claim**:
-The `flock` a box holds for as long as something is using it. The only honest answer to "is this box running": a list can go stale between the reading and the acting, and taking the lock cannot. Every command that touches a home takes it first.
+The `flock` a box holds for as long as something is using it. The only honest answer to "is this box running": a list can go stale between the reading and the acting, and taking the lock cannot. Every command that touches a home takes it first. One per box, so a box runs in one workspace at a time.
 _Avoid_: lock (that is the file; the claim is the hold on it), pidfile, mutex
 
 **Stop**:
@@ -79,7 +91,7 @@ Ending a box's process. The box survives — its home is untouched and the next 
 _Avoid_: kill, close, delete
 
 **Reset**:
-Emptying a box's home while keeping the box: same id, same alias, same workspace, same role. The difference between starting over and starting somewhere else, which is what a new box would be.
+Emptying a box's home while keeping the box: same id, same alias, same workspaces, same role. The difference between starting over and starting somewhere else, which is what a new box would be.
 _Avoid_: clear, wipe, reinit
 
 **Remove**:
@@ -91,7 +103,7 @@ _Avoid_: delete, destroy, prune
 Four verdicts, and the differences between them are the point. `gc` deletes only what it can prove, so each verdict says exactly what was proven.
 
 **Dead**:
-Proven finished with: a box directory whose process is gone, a home whose workspace no longer exists, a lock whose box is gone. What a bare `--delete` takes.
+Proven finished with: a box directory whose process is gone; a home nothing can start again, because every workspace it ran in is gone and its recipe resumes only where it ran, or because its role is gone; a lock or record whose box is gone. What a bare `--delete` takes.
 
 **Live**:
 In use, or claimed by something still running. Never taken, however the flags are set.

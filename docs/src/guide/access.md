@@ -28,7 +28,18 @@ default deny — see [what it can dial](#what-it-can-dial). Inside:
   and history survive between boxes. Wormhole also writes into it: the
   agent's instructions, the preflight hook, and — only in the
   `credentials` mode you named — your login. See
-  [credentials](credentials.md).
+  [credentials](credentials.md). Nothing wormhole decides by lives there:
+  which workspaces a box ran in, its role and its name are kept host-side,
+  beside its claim, where the agent cannot rewrite them.
+- **Other workspaces' traces, in a shared box** — a box that has run in
+  several workspaces keeps one home for all of them. Its agent can read
+  what the others left there: transcripts, memory, the settings and hooks
+  a session wrote, `~/.cargo`, the login. An injection in one project
+  reaches the next project's session the same way. Only a role with
+  `resume = "anywhere"`, or a box you name with `--id` in a new
+  workspace, is shared; a box that has been fed something hostile is
+  reset (`wormhole reset`), not trusted. See
+  [boxes](boxes.md#one-box-many-workspaces).
 - **Environment** — only declared variables. An undeclared host variable
   never reaches the box.
 - **DNS** — the manifest's named resolver, or the host's own
