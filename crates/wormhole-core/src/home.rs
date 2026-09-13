@@ -1,20 +1,23 @@
-//! What a kept home records about the box it belongs to, and which box a
-//! `wormhole box` should be.
+//! What wormhole records about a kept box, and which box a `wormhole box`
+//! should be.
 //!
 //! A box outlives every process that ever ran it: its home holds the
 //! agent's history, its logins and whatever the preflight hook installed.
-//! So the home is where the box's own record lives — one file, written by
-//! the box itself on every start. Nothing else has to be kept in step,
-//! and a home carried to another machine carries its box with it.
+//! Its record does not live there. The home is the agent's to write, and a
+//! record the agent could rewrite would let it pick which workspace the
+//! next start mounts and which role resumes it. So the record sits beside
+//! the lock, host-side.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::manifest::Resume;
 use crate::table;
 
-/// Where a box's record sits, relative to its home.
-pub const RECORD: &str = ".wormhole/box.toml";
+/// Where an older wormhole kept a box's record, relative to its home.
+/// Read until that box's next start moves it host-side.
+pub const LEGACY_RECORD: &str = ".wormhole/box.toml";
 
 /// What wormhole wrote there before boxes had ids: the workspace path,
 /// alone. Still read, so a home from before this change is picked up as
@@ -28,11 +31,18 @@ pub const LEGACY_STAMP: &str = ".wormhole/workspace";
 /// that stops parsing is a box that can no longer be listed or resumed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
+    /// What the box's store entries are named by: its home, its lock and
+    /// this record's own file. Taken from where the record was found and
+    /// never written into it, so the two cannot disagree.
+    #[serde(skip)]
+    pub key: String,
     pub id: String,
-    /// The workspace this box works in. A home is named by a digest, and
-    /// a digest cannot be inverted: without this nothing could ever tell
-    /// which workspace a home belongs to, or whether it still exists.
+    /// Where this box last ran. Nothing else says which trees a home has
+    /// seen, or whether any of them still exists.
     pub workspace: PathBuf,
+    /// Every other workspace it has run in, most recent first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<PathBuf>,
     /// The role this box was started from, as the user wrote it. `None`
     /// means the workspace's own manifest.
     ///
@@ -71,13 +81,40 @@ pub fn to_toml(record: &Record) -> Result<String, String> {
     toml::to_string(record).map_err(|e| format!("cannot serialize the box record: {e}"))
 }
 
-pub fn parse(text: &str) -> Result<Record, String> {
+/// A record's text, read as the box `key` names.
+pub fn parse(text: &str, key: &str) -> Result<Record, String> {
     toml::from_str(text)
-        .map(Record::healed)
-        .map_err(|e| format!("box.toml is not valid: {}", e.message()))
+        .map(|record: Record| Record {
+            key: key.to_owned(),
+            ..record.healed()
+        })
+        .map_err(|e| format!("box record is not valid: {}", e.message()))
 }
 
 impl Record {
+    /// This record once the box has run in `here`: there first, and
+    /// every other workspace kept once, most recent first.
+    #[must_use]
+    pub fn ran_in(mut self, here: &Path) -> Record {
+        if self.workspace != here {
+            let previous = std::mem::replace(&mut self.workspace, here.to_owned());
+            self.earlier.retain(|workspace| workspace != here);
+            self.earlier.insert(0, previous);
+        }
+        self
+    }
+
+    /// Every workspace this box has run in, the latest first.
+    pub fn workspaces(&self) -> impl Iterator<Item = &Path> {
+        std::iter::once(self.workspace.as_path()).chain(self.earlier.iter().map(PathBuf::as_path))
+    }
+
+    /// Whether this box has ever run in `here`.
+    #[must_use]
+    pub fn serves(&self, here: &Path) -> bool {
+        self.workspaces().any(|workspace| workspace == here)
+    }
+
     /// A wormhole once wrote a start's name into `source` and its role's
     /// identity into `alias`. An identity is tagged (`dir:`/`repo:`) and a
     /// usable alias holds no `:`, so the two are mutually exclusive: route
@@ -101,14 +138,17 @@ impl Record {
 /// its directory name already ends in. Both zero times, so a listing sorts
 /// it last and the first start writes the real thing.
 pub fn from_legacy(home: &Path, stamped: &str) -> Option<Record> {
-    let id = crate::paths::key_id(home.file_name()?.to_str()?)?.to_owned();
+    let key = home.file_name()?.to_str()?;
+    let id = crate::paths::key_id(key)?.to_owned();
     let workspace = stamped.trim();
     if workspace.is_empty() {
         return None;
     }
     Some(Record {
+        key: key.to_owned(),
         id,
         workspace: PathBuf::from(workspace),
+        earlier: Vec::new(),
         role: None,
         source: None,
         alias: None,
@@ -148,59 +188,9 @@ pub fn answers_to(id: &str, alias: Option<&str>, wanted: &str) -> bool {
 }
 
 /// The one sentence every command says when nothing answers to what was
-/// typed, whichever form it was and whichever store was searched.
-pub fn no_box(wanted: &str) -> String {
-    no_box_in(wanted, "in this workspace")
-}
-
-/// The one body behind every "nothing answers to that" sentence, so the
-/// scope is the only thing that ever differs and the rest cannot drift.
-fn no_box_in(wanted: &str, scope: &str) -> String {
-    format!("no box {wanted} {scope}; `wormhole ps --all` lists the kept ones")
-}
-
-/// The box in this workspace that `wanted` names.
-///
-/// Scoped to the workspace, because an alias belongs to the one it was set
-/// in; the id is what reaches across.
-pub fn by_name<'a>(records: &'a [Record], workspace: &Path, wanted: &str) -> Option<&'a Record> {
-    records.iter().find(|record| {
-        record.workspace == workspace && answers_to(&record.id, record.alias.as_deref(), wanted)
-    })
-}
-
-/// The box `wanted` names for a command that may reach any box on this
-/// host.
-///
-/// An id is derived from a workspace and an ordinal, so it names exactly
-/// one box everywhere and needs no workspace to be found by. A name
-/// belongs to the workspace it was set in, exactly as it does elsewhere.
-///
-/// [`by_name`] is the same question asked strictly inside one workspace,
-/// which is what *starting* a box needs: `--id` may only name a box of
-/// the tree you are standing in. `rm`, `reset` and `rename` are reached
-/// from the panel too, and the panel lists every box on the host — one
-/// it can show has to be one they can name.
-pub fn find<'a>(records: &'a [Record], workspace: &Path, wanted: &str) -> Option<&'a Record> {
-    match by_id(records, wanted) {
-        Some(found) => Some(found),
-        // Not an id at all, or an id nothing kept. Either way the name
-        // rule is what is left to try.
-        None if crate::paths::is_box_id(wanted) => None,
-        None => by_name(records, workspace, wanted),
-    }
-}
-
-/// The box with this id, from anywhere. `None` when the string is not an
-/// id at all, so a caller that has only an id — the panel, whose rows all
-/// carry one — needs no workspace to pass in.
-pub fn by_id<'a>(records: &'a [Record], wanted: &str) -> Option<&'a Record> {
-    if !crate::paths::is_box_id(wanted) {
-        return None;
-    }
-    records
-        .iter()
-        .find(|record| answers_to(&record.id, record.alias.as_deref(), wanted))
+/// typed, whichever form it was.
+pub fn no_box_found(wanted: &str) -> String {
+    format!("no box {wanted} on this host; `wormhole ps --all` lists the kept ones")
 }
 
 /// A box a lifecycle command is about to act on.
@@ -219,76 +209,80 @@ pub struct Target {
     pub record: Option<Record>,
 }
 
-/// The box `wanted` names: by its record where there is one, and by its
-/// home directory where there is not.
+/// The box `wanted` names, from any workspace: by its record where there
+/// is one, and by its home directory where there is not.
 ///
-/// The second half is the rule `--id` already lives by — an id names a box
-/// by its directory, and nothing in that directory has to be readable for
-/// it to. Only an id can do it: a name lives *in* the record, so a box
-/// with no record has none.
+/// An id names exactly one box everywhere, and names a box by its
+/// directory even when nothing in it can be read. A name lives *in* the
+/// record, so only boxes with one answer to it. It is looked for first
+/// among the boxes that ran `here`, so two boxes an older wormhole let
+/// share a name in two workspaces each keep answering to it in their
+/// own; two elsewhere is a refusal that names both.
 ///
 /// `keys` is every home directory the store holds. Pure, so the rule that
 /// decides which box gets deleted is testable without a store.
 pub fn target(
     records: &[Record],
     keys: &[String],
-    workspace: &Path,
+    here: &Path,
     wanted: &str,
-) -> Option<Target> {
-    if let Some(record) = find(records, workspace, wanted) {
-        return Some(Target {
-            id: record.id.clone(),
-            key: crate::paths::box_key(&record.workspace, &record.id),
-            record: Some(record.clone()),
-        });
+) -> Result<Target, String> {
+    let of = |record: &Record| Target {
+        id: record.id.clone(),
+        key: record.key.clone(),
+        record: Some(record.clone()),
+    };
+    if crate::paths::is_box_id(wanted) {
+        if let Some(record) = records.iter().find(|record| record.id == wanted) {
+            return Ok(of(record));
+        }
+        return keys
+            .iter()
+            .find(|key| crate::paths::key_id(key) == Some(wanted))
+            .map(|key| Target {
+                id: wanted.to_owned(),
+                key: key.clone(),
+                record: None,
+            })
+            .ok_or_else(|| no_box_found(wanted));
     }
-    if !crate::paths::is_box_id(wanted) {
-        return None;
+    let answering: Vec<&Record> = records
+        .iter()
+        .filter(|record| record.alias.as_deref() == Some(wanted))
+        .collect();
+    let ran_here: Vec<&Record> = answering
+        .iter()
+        .copied()
+        .filter(|record| record.serves(here))
+        .collect();
+    match (ran_here.as_slice(), answering.as_slice()) {
+        ([one], _) | ([], [one]) => Ok(of(one)),
+        ([], []) => Err(no_box_found(wanted)),
+        ([], many) | (many, _) => Err(format!(
+            "{wanted} names boxes {}; use the id",
+            many.iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )),
     }
-    keys.iter()
-        .find(|key| crate::paths::key_id(key) == Some(wanted))
-        .map(|key| Target {
-            id: wanted.to_owned(),
-            key: key.clone(),
-            record: None,
-        })
 }
 
-/// The box in `workspace` already answering to `alias`, when it is not
-/// `self_id`.
+/// The box already answering to `alias`, when it is not `self_id`.
 ///
-/// One rule and one sentence for "that name is taken", because a start,
-/// a rename and the panel all have to give the same answer — and the
-/// answer names the box holding it, so the way out is on the screen.
-pub fn alias_conflict<'a>(
-    records: &'a [Record],
-    workspace: &Path,
-    alias: &str,
-    self_id: &str,
-) -> Option<&'a Record> {
-    by_name(records, workspace, alias).filter(|taken| taken.id != self_id)
+/// One name names one box on this host, because a box may run in any
+/// workspace and its name has to reach it from each. One rule and one
+/// sentence, because a start, a rename and the panel all have to give the
+/// same answer, and the answer names the box holding it.
+pub fn alias_conflict<'a>(records: &'a [Record], alias: &str, self_id: &str) -> Option<&'a Record> {
+    records
+        .iter()
+        .find(|record| record.alias.as_deref() == Some(alias) && record.id != self_id)
 }
 
 /// What to say when it is. Beside the rule, so the two cannot drift.
 pub fn alias_taken(alias: &str, by: &str) -> String {
-    format!(
-        "{alias} already names box {by} in that workspace; \
-         `wormhole rename {by} <other>` frees the name"
-    )
-}
-
-/// Why [`find`] came back empty, said in the scope it actually searched.
-///
-/// [`no_box`] is the same sentence for the workspace-scoped lookup a
-/// start does. Both exist because they answer different questions, and
-/// one sentence claiming a scope it did not search is how a person ends
-/// up looking for a box in the wrong place.
-pub fn no_box_found(wanted: &str) -> String {
-    if crate::paths::is_box_id(wanted) {
-        no_box_in(wanted, "on this host")
-    } else {
-        no_box(wanted)
-    }
+    format!("{alias} already names box {by}; `wormhole rename {by} <other>` frees the name")
 }
 
 /// The role a start is asking for.
@@ -336,33 +330,125 @@ impl Record {
 }
 
 /// Which box a bare `wormhole box` should be, in order of preference:
-/// this workspace's boxes for this role, most recently used first.
+/// this role's boxes that ran in `here`, most recently used first; then,
+/// when the role resumes `anywhere`, its boxes that ran elsewhere.
 ///
 /// The caller starts the first one it can claim, so this never has to ask
 /// whether a box is running — taking its lock is that question, asked
-/// without a race. A workspace with nothing free gets a new box, which is
-/// what "no limit of one per folder" means.
+/// without a race. Nothing free gets a new box, which is what "no limit
+/// of one per folder" means.
 ///
 /// The role is part of the match because a box's home carries that role's
 /// toolchain and persona. Resuming an `alphaca` box for an `alphaca-java`
 /// run would hand the agent the wrong home and call it continuity. The
 /// product is part of the match for the same reason: a grok login does
-/// not belong in a claude home.
+/// not belong in a claude home. Only a box whose role identity is known
+/// is taken from elsewhere: a spelling is not proof of the same role.
 pub fn resumable<'a>(
     records: &'a [Record],
-    workspace: &Path,
+    here: &Path,
     wanted: Wanted<'_>,
+    resume: Resume,
 ) -> Vec<&'a Record> {
-    let mut found: Vec<&Record> = records
+    let (mut found, mut elsewhere): (Vec<&Record>, Vec<&Record>) = records
         .iter()
-        .filter(|record| record.workspace == workspace && record.is_role(wanted))
-        .collect();
-    found.sort_by(|a, b| {
-        b.started_unix
-            .cmp(&a.started_unix)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+        .filter(|record| record.is_role(wanted))
+        .partition(|record| record.serves(here));
+    found.sort_by(|a, b| recent(a, b));
+    if resume == Resume::Anywhere && wanted.source.is_some() {
+        elsewhere.retain(|record| record.source.is_some());
+        elsewhere.sort_by(|a, b| recent(a, b));
+        found.extend(elsewhere);
+    }
     found
+}
+
+/// Most recently started first, then by id, so boxes that never ran still
+/// have one order. Resume order and listing order are this one order.
+fn recent(a: &Record, b: &Record) -> std::cmp::Ordering {
+    b.started_unix
+        .cmp(&a.started_unix)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// Why a start that named this box cannot run it in `here` at all, asked
+/// before any recipe is read: a box made from a workspace's own manifest
+/// runs only there, because its recipe is that file.
+pub fn refused_elsewhere(record: &Record, here: &Path) -> Option<String> {
+    (record.role.is_none() && record.source.is_none() && record.workspace != here).then(|| {
+        format!(
+            "box {} is made from {}'s own wormhole.toml, so it runs only there",
+            record.id,
+            record.workspace.display()
+        )
+    })
+}
+
+/// Why a start that named this box cannot run it from the recipe it
+/// resolved, whose role identity is `source`: a box runs only as the
+/// recipe it was made from. A record from before roles had an identity is
+/// the one exception; the start fills it in.
+pub fn refused_as(record: &Record, source: Option<&str>) -> Option<String> {
+    let id = &record.id;
+    match (record.source.as_deref(), record.role.is_some(), source) {
+        (Some(have), _, Some(asked)) if have == asked => None,
+        (Some(have), _, Some(asked)) => Some(format!("box {id} runs {have}, not {asked}")),
+        (Some(have), _, None) => Some(format!(
+            "box {id} runs {have}, not this workspace's own wormhole.toml"
+        )),
+        (None, false, Some(asked)) => Some(format!(
+            "box {id} is made from its workspace's own wormhole.toml, not {asked}"
+        )),
+        (None, false, None) | (None, true, _) => None,
+    }
+}
+
+impl Record {
+    /// The `--role` that starts this box again, wherever it starts: the
+    /// directory of a local role, the ref typed for one from a repository.
+    /// `None` for a box made from its workspace's own manifest.
+    ///
+    /// A relative path typed before roles had an identity meant the
+    /// workspace it was typed in, not wherever the next start stands.
+    #[must_use]
+    pub fn role_ref(&self) -> Option<String> {
+        if let Some(dir) = self.source.as_deref().and_then(crate::source::dir_of) {
+            return Some(dir.to_owned());
+        }
+        let typed = self.role.as_deref()?;
+        match crate::source::names(typed) {
+            crate::source::Names::Dir(path) if Path::new(path).is_relative() => {
+                Some(self.workspace.join(path).display().to_string())
+            }
+            _ => Some(typed.to_owned()),
+        }
+    }
+}
+
+/// Where the panel starts an idle box: `here` when the box has run here,
+/// otherwise the latest workspace it ran in that still exists.
+///
+/// Never a directory it has not run in. Enter names a box, not a place to
+/// mount, and the panel may be open anywhere, `~` included.
+pub fn resume_in(
+    record: &Record,
+    here: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, String> {
+    if record.serves(here) && exists(here) {
+        return Ok(here.to_owned());
+    }
+    record
+        .workspaces()
+        .find(|workspace| exists(workspace))
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "no workspace box {id} ran in exists any more; \
+                 `wormhole box --id {id}` in the one it should run in",
+                id = record.id
+            )
+        })
 }
 
 /// The smallest ordinal this workspace has no box for. Ordinals are dense
@@ -411,11 +497,7 @@ pub fn scan(mut kept: Vec<Record>, live: &[crate::registry::Entry]) -> Vec<Listi
         .map(Record::from_entry)
         .collect();
     kept.extend(unrecorded);
-    kept.sort_by(|a, b| {
-        b.started_unix
-            .cmp(&a.started_unix)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    kept.sort_by(recent);
     kept.into_iter()
         .map(|record| Listing {
             running: running.get(record.id.as_str()).copied(),
@@ -430,8 +512,10 @@ impl Record {
     /// carry one.
     fn from_entry(entry: &crate::registry::Entry) -> Record {
         Record {
+            key: entry.key(),
             id: entry.box_id.clone(),
             workspace: entry.workspace.clone(),
+            earlier: Vec::new(),
             role: None,
             source: None,
             alias: entry.alias.clone(),
@@ -497,7 +581,10 @@ pub fn list(boxes: &[Listing], now_unix: u64) -> String {
                 0 => "never".to_owned(),
                 started => table::age(now_unix.saturating_sub(started)),
             },
-            record.workspace.display().to_string(),
+            match record.earlier.len() {
+                0 => record.workspace.display().to_string(),
+                more => format!("{} +{more}", record.workspace.display()),
+            },
         ]);
     }
     table::render(&rows)
@@ -509,8 +596,10 @@ mod tests {
 
     fn record(id: &str, workspace: &str, role: Option<&str>, started: u64) -> Record {
         Record {
+            key: crate::paths::box_key(Path::new(workspace), id),
             id: id.to_owned(),
             workspace: PathBuf::from(workspace),
+            earlier: Vec::new(),
             role: role.map(str::to_owned),
             source: None,
             alias: None,
@@ -526,6 +615,10 @@ mod tests {
         record
     }
 
+    fn named(records: &[Record], here: &str, wanted: &str) -> Result<String, String> {
+        target(records, &[], Path::new(here), wanted).map(|found| found.id)
+    }
+
     /// The id is derived and unmemorable; the alias is what a person
     /// types. Both name one box, and every command takes either.
     #[test]
@@ -533,20 +626,42 @@ mod tests {
         let records = [called(record("0123456789ab", "/w", None, 1), "api")];
         for wanted in ["0123456789ab", "api"] {
             assert_eq!(
-                by_name(&records, Path::new("/w"), wanted).map(|r| r.id.as_str()),
-                Some("0123456789ab"),
+                named(&records, "/w", wanted),
+                Ok("0123456789ab".to_owned()),
                 "{wanted}"
             );
         }
-        assert_eq!(by_name(&records, Path::new("/w"), "web"), None);
+        assert!(named(&records, "/w", "web").is_err());
     }
 
-    /// An alias belongs to the workspace it was set in — the id is what
-    /// reaches across, exactly as it does everywhere else.
+    /// A box may run in several workspaces, so its name has to reach it
+    /// from any of them, or from a new one.
     #[test]
-    fn an_alias_from_another_workspace_is_not_found() {
+    fn an_alias_names_its_box_from_any_workspace() {
         let records = [called(record("0123456789ab", "/other", None, 1), "api")];
-        assert_eq!(by_name(&records, Path::new("/w"), "api"), None);
+        assert_eq!(named(&records, "/w", "api"), Ok("0123456789ab".to_owned()));
+    }
+
+    /// Two boxes an older wormhole let share a name in two workspaces keep
+    /// answering to it in their own.
+    #[test]
+    fn an_alias_on_a_box_that_ran_here_wins_over_one_elsewhere() {
+        let records = [
+            called(record("aaaaaaaaaaaa", "/other", None, 1), "api"),
+            called(record("bbbbbbbbbbbb", "/w", None, 1), "api"),
+        ];
+        assert_eq!(named(&records, "/w", "api"), Ok("bbbbbbbbbbbb".to_owned()));
+    }
+
+    #[test]
+    fn an_alias_two_boxes_elsewhere_answer_to_is_refused_naming_both() {
+        let records = [
+            called(record("aaaaaaaaaaaa", "/a", None, 1), "api"),
+            called(record("bbbbbbbbbbbb", "/b", None, 1), "api"),
+        ];
+        let refused = named(&records, "/w", "api").unwrap_err();
+        assert!(refused.contains("aaaaaaaaaaaa"), "{refused}");
+        assert!(refused.contains("bbbbbbbbbbbb"), "{refused}");
     }
 
     /// The gap this closes: a home whose record cannot be read is listed
@@ -566,7 +681,8 @@ mod tests {
     #[test]
     fn only_an_id_reaches_a_box_that_has_no_record() {
         let keys = ["proj-0123456789ab".to_owned()];
-        assert_eq!(target(&[], &keys, Path::new("/w"), "api"), None);
+        let refused = target(&[], &keys, Path::new("/w"), "api").unwrap_err();
+        assert!(refused.contains("no box api"), "{refused}");
     }
 
     #[test]
@@ -581,27 +697,20 @@ mod tests {
     }
 
     /// One rule for "that name is taken", so a start, a rename and the
-    /// panel cannot answer it three ways.
+    /// panel cannot answer it three ways. A box may run anywhere, so its
+    /// name is taken everywhere.
     #[test]
-    fn a_name_another_box_here_holds_is_a_conflict_and_the_box_itself_is_not() {
+    fn a_name_another_box_holds_anywhere_is_a_conflict_and_the_box_itself_is_not() {
         let records = [
-            called(record("0123456789ab", "/w", None, 1), "api"),
+            called(record("0123456789ab", "/other", None, 1), "api"),
             record("0123456789ac", "/w", None, 1),
         ];
         assert_eq!(
-            alias_conflict(&records, Path::new("/w"), "api", "0123456789ac").map(|r| r.id.as_str()),
+            alias_conflict(&records, "api", "0123456789ac").map(|r| r.id.as_str()),
             Some("0123456789ab")
         );
         // Its own name is not a conflict with itself.
-        assert_eq!(
-            alias_conflict(&records, Path::new("/w"), "api", "0123456789ab"),
-            None
-        );
-        // And a name is workspace-scoped, here as everywhere.
-        assert_eq!(
-            alias_conflict(&records, Path::new("/other"), "api", "0123456789ac"),
-            None
-        );
+        assert_eq!(alias_conflict(&records, "api", "0123456789ab"), None);
     }
 
     /// The refusal names the box holding the name, so the way out is on
@@ -617,16 +726,11 @@ mod tests {
     /// to reach it. An id is derived from a workspace and an ordinal, so
     /// it already names exactly one box everywhere.
     #[test]
-    fn an_id_names_its_box_from_any_workspace_but_a_name_does_not() {
+    fn an_id_names_its_box_from_any_workspace() {
         let records = [called(record("0123456789ab", "/other", None, 1), "api")];
         assert_eq!(
-            find(&records, Path::new("/w"), "0123456789ab").map(|r| r.id.as_str()),
-            Some("0123456789ab")
-        );
-        assert_eq!(find(&records, Path::new("/w"), "api"), None);
-        assert_eq!(
-            find(&records, Path::new("/other"), "api").map(|r| r.id.as_str()),
-            Some("0123456789ab")
+            named(&records, "/w", "0123456789ab"),
+            Ok("0123456789ab".to_owned())
         );
     }
 
@@ -694,6 +798,7 @@ mod tests {
                     typed: Some(spelling),
                     run: None,
                 },
+                Resume::Here,
             );
             assert_eq!(found.len(), 1, "{spelling}");
         }
@@ -713,6 +818,7 @@ mod tests {
                 typed: Some("alphaca"),
                 run: None,
             },
+            Resume::Here,
         );
         assert!(found.is_empty(), "{found:?}");
     }
@@ -731,6 +837,7 @@ mod tests {
                 typed: Some("alphaca"),
                 run: None,
             },
+            Resume::Here,
         );
         assert_eq!(found.len(), 1, "{found:?}");
     }
@@ -752,6 +859,7 @@ mod tests {
                 typed: Some("github:you/r@0000000000000000000000000000000000000000"),
                 run: None,
             },
+            Resume::Here,
         );
         assert_eq!(found.len(), 1, "{found:?}");
     }
@@ -773,6 +881,7 @@ mod tests {
                 typed: Some("alphaca"),
                 run: Some("grok"),
             },
+            Resume::Here,
         );
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].id, "b");
@@ -798,6 +907,7 @@ mod tests {
                 typed: Some("alphaca"),
                 run: None,
             },
+            Resume::Here,
         );
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[0].agent.as_deref(), Some("grok"));
@@ -819,14 +929,48 @@ mod tests {
                 typed: Some("alphaca"),
                 run: Some("grok"),
             },
+            Resume::Here,
         );
         assert_eq!(found.len(), 1, "{found:?}");
     }
 
     #[test]
     fn a_record_survives_the_round_trip() {
-        let written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
-        assert_eq!(parse(&to_toml(&written).expect("toml")), Ok(written));
+        let mut written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
+        written.earlier = vec![PathBuf::from("/w/other")];
+        assert_eq!(
+            parse(&to_toml(&written).expect("toml"), &written.key),
+            Ok(written)
+        );
+    }
+
+    /// The key names the file, so it is never written into it: a record
+    /// that said one key inside a file named by another would be two
+    /// answers to which box this is.
+    #[test]
+    fn the_key_comes_from_where_the_record_was_found_not_from_its_text() {
+        let written = record("0123456789ab", "/w/proj", None, 100);
+        let text = to_toml(&written).expect("toml");
+        assert!(!text.contains("key"), "{text}");
+        assert_eq!(
+            parse(&text, "elsewhere-0123456789ab").expect("parses").key,
+            "elsewhere-0123456789ab"
+        );
+    }
+
+    /// A box that runs somewhere new keeps every place it ran before, and
+    /// the new one is where it last ran.
+    #[test]
+    fn running_in_a_workspace_puts_it_first_and_keeps_the_rest_once() {
+        let mut kept = record("0123456789ab", "/a", Some("alphaca"), 100);
+        kept.earlier = vec![PathBuf::from("/b")];
+        let moved = kept.ran_in(Path::new("/b"));
+        assert_eq!(moved.workspace, PathBuf::from("/b"));
+        assert_eq!(moved.earlier, [PathBuf::from("/a")]);
+        let again = moved.clone().ran_in(Path::new("/b"));
+        assert_eq!(again, moved);
+        assert!(again.serves(Path::new("/a")));
+        assert!(!again.serves(Path::new("/c")));
     }
 
     /// A wormhole once filed a start's name under `source` and the role's
@@ -838,13 +982,13 @@ mod tests {
         let mut swapped = record("0123456789ab", "/w", Some("./roles/a"), 100);
         swapped.alias = Some("dir:/w/roles/a".to_owned());
         swapped.source = Some("api".to_owned());
-        let healed = parse(&to_toml(&swapped).expect("toml")).expect("parses");
+        let healed = parse(&to_toml(&swapped).expect("toml"), "w-0123456789ab").expect("parses");
         assert_eq!(healed.alias.as_deref(), Some("api"));
         assert_eq!(healed.source.as_deref(), Some("dir:/w/roles/a"));
 
         let mut unnamed = record("0123456789ab", "/w", Some("r"), 100);
         unnamed.alias = Some("repo:https://example.test/r".to_owned());
-        let healed = parse(&to_toml(&unnamed).expect("toml")).expect("parses");
+        let healed = parse(&to_toml(&unnamed).expect("toml"), "w-0123456789ab").expect("parses");
         assert_eq!(healed.alias, None);
         assert_eq!(
             healed.source.as_deref(),
@@ -853,7 +997,7 @@ mod tests {
 
         let mut named_only = record("0123456789ab", "/w", None, 100);
         named_only.source = Some("api".to_owned());
-        let healed = parse(&to_toml(&named_only).expect("toml")).expect("parses");
+        let healed = parse(&to_toml(&named_only).expect("toml"), "w-0123456789ab").expect("parses");
         assert_eq!(healed.alias.as_deref(), Some("api"));
         assert_eq!(healed.source, None);
 
@@ -861,13 +1005,16 @@ mod tests {
             called(record("0123456789ab", "/w", None, 1), "api"),
             "dir:/r",
         );
-        assert_eq!(parse(&to_toml(&right).expect("toml")), Ok(right));
+        assert_eq!(
+            parse(&to_toml(&right).expect("toml"), "w-0123456789ab"),
+            Ok(right)
+        );
     }
 
     #[test]
     fn an_unreadable_record_is_refused_rather_than_guessed_at() {
-        assert!(parse("id = 4\n").is_err());
-        assert!(parse("").is_err());
+        assert!(parse("id = 4\n", "w-0123456789ab").is_err());
+        assert!(parse("", "w-0123456789ab").is_err());
     }
 
     /// A key wormhole has stopped writing must not orphan the box that
@@ -878,7 +1025,7 @@ mod tests {
         let written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
         let mut text = to_toml(&written).expect("toml");
         text.push_str("member = \"ship\"\n");
-        assert_eq!(parse(&text), Ok(written));
+        assert_eq!(parse(&text, &written.key), Ok(written));
     }
 
     /// A home written before boxes had ids is that workspace's first box.
@@ -912,7 +1059,7 @@ mod tests {
             record("b", "/w", Some("alphaca"), 300),
             record("c", "/w", Some("alphaca"), 200),
         ];
-        let order: Vec<&str> = resumable(&records, Path::new("/w"), typed("alphaca"))
+        let order: Vec<&str> = resumable(&records, Path::new("/w"), typed("alphaca"), Resume::Here)
             .iter()
             .map(|r| r.id.as_str())
             .collect();
@@ -924,17 +1071,166 @@ mod tests {
     #[test]
     fn boxes_that_never_ran_still_have_one_order() {
         let records = [record("b", "/w", None, 0), record("a", "/w", None, 0)];
-        let order: Vec<&str> = resumable(&records, Path::new("/w"), Wanted::default())
-            .iter()
-            .map(|r| r.id.as_str())
-            .collect();
+        let order: Vec<&str> =
+            resumable(&records, Path::new("/w"), Wanted::default(), Resume::Here)
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect();
         assert_eq!(order, ["a", "b"]);
     }
 
     #[test]
     fn a_box_from_another_workspace_is_never_resumed() {
         let records = [record("a", "/other", Some("alphaca"), 100)];
-        assert!(resumable(&records, Path::new("/w"), typed("alphaca")).is_empty());
+        assert!(resumable(&records, Path::new("/w"), typed("alphaca"), Resume::Here).is_empty());
+    }
+
+    const ALPHACA: Wanted<'static> = Wanted {
+        source: Some("dir:/roles/alphaca"),
+        typed: Some("alphaca"),
+        run: None,
+    };
+
+    fn role_box(id: &str, workspace: &str, started: u64) -> Record {
+        from(
+            record(id, workspace, Some("alphaca"), started),
+            "dir:/roles/alphaca",
+        )
+    }
+
+    fn ids<'a>(records: &[&'a Record]) -> Vec<&'a str> {
+        records.iter().map(|record| record.id.as_str()).collect()
+    }
+
+    /// The point of a role that says `anywhere`: one home, its login and
+    /// its setup, for every project it is started in.
+    #[test]
+    fn a_role_that_resumes_anywhere_takes_its_box_from_another_workspace() {
+        let records = [role_box("a", "/other", 100)];
+        let here = Path::new("/w");
+        assert_eq!(
+            ids(&resumable(&records, here, ALPHACA, Resume::Anywhere)),
+            ["a"]
+        );
+        assert!(resumable(&records, here, ALPHACA, Resume::Here).is_empty());
+    }
+
+    /// Its transcripts for this tree are in the box that ran here, so that
+    /// one comes first even when another is newer.
+    #[test]
+    fn a_box_that_ran_here_is_resumed_before_a_newer_one_from_elsewhere() {
+        let mut older = role_box("a", "/elsewhere", 100);
+        older.earlier = vec![PathBuf::from("/w")];
+        let records = [role_box("b", "/other", 300), older];
+        assert_eq!(
+            ids(&resumable(
+                &records,
+                Path::new("/w"),
+                ALPHACA,
+                Resume::Anywhere
+            )),
+            ["a", "b"]
+        );
+    }
+
+    /// Its recipe is that workspace's file, which no other start reads.
+    #[test]
+    fn a_box_made_from_a_workspace_manifest_is_never_resumed_elsewhere() {
+        let records = [record("a", "/other", None, 100)];
+        let found = resumable(
+            &records,
+            Path::new("/w"),
+            Wanted::default(),
+            Resume::Anywhere,
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// Naming a box is the consent: a role box runs wherever it is named,
+    /// as the role it is.
+    #[test]
+    fn a_role_box_named_from_another_workspace_runs_there_as_its_own_role_only() {
+        let kept = role_box("0123456789ab", "/a", 1);
+        assert_eq!(refused_elsewhere(&kept, Path::new("/w")), None);
+        assert_eq!(refused_as(&kept, ALPHACA.source), None);
+        let refused = refused_as(&kept, Some("dir:/roles/java")).expect("refused");
+        assert!(refused.contains("dir:/roles/alphaca"), "{refused}");
+        assert!(refused.contains("dir:/roles/java"), "{refused}");
+        assert!(refused_as(&kept, None).is_some());
+    }
+
+    #[test]
+    fn a_box_made_from_a_workspace_manifest_runs_only_there() {
+        let kept = record("0123456789ab", "/a", None, 1);
+        let refused = refused_elsewhere(&kept, Path::new("/w")).expect("refused");
+        assert!(refused.contains("/a"), "{refused}");
+        assert_eq!(refused_elsewhere(&kept, Path::new("/a")), None);
+        assert_eq!(refused_as(&kept, None), None);
+        assert!(refused_as(&kept, ALPHACA.source).is_some());
+    }
+
+    /// What `--id` and the panel start from when no `--role` is typed: the
+    /// role the box records, never whatever the current directory holds.
+    #[test]
+    fn a_box_names_its_own_role_whatever_was_typed_and_where() {
+        let local = from(
+            record("a", "/w", Some("./roles/alphaca"), 1),
+            "dir:/w/roles/alphaca",
+        );
+        assert_eq!(local.role_ref().as_deref(), Some("/w/roles/alphaca"));
+        let fetched = from(
+            record("a", "/w", Some("github:you/r@abc"), 1),
+            "repo:https://github.com/you/r",
+        );
+        assert_eq!(fetched.role_ref().as_deref(), Some("github:you/r@abc"));
+        let older = record("a", "/w", Some("./roles/alphaca"), 1);
+        assert_eq!(older.role_ref().as_deref(), Some("/w/./roles/alphaca"));
+        assert_eq!(
+            record("a", "/w", Some("alphaca"), 1).role_ref().as_deref(),
+            Some("alphaca")
+        );
+        assert_eq!(record("a", "/w", None, 1).role_ref(), None);
+    }
+
+    /// Enter on an idle row never mounts wherever the panel happened to be
+    /// opened: here only if the box already ran here.
+    #[test]
+    fn the_panel_resumes_a_box_here_only_where_it_has_run() {
+        let mut kept = role_box("0123456789ab", "/b", 1);
+        kept.earlier = vec![PathBuf::from("/a")];
+        let all = |_: &Path| true;
+        assert_eq!(
+            resume_in(&kept, Path::new("/a"), all),
+            Ok(PathBuf::from("/a"))
+        );
+        assert_eq!(
+            resume_in(&kept, Path::new("/home/me"), all),
+            Ok(PathBuf::from("/b"))
+        );
+        let only_a = |path: &Path| path == Path::new("/a");
+        assert_eq!(
+            resume_in(&kept, Path::new("/home/me"), only_a),
+            Ok(PathBuf::from("/a"))
+        );
+        let refused = resume_in(&kept, Path::new("/home/me"), |_| false).unwrap_err();
+        assert!(
+            refused.contains("wormhole box --id 0123456789ab"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn the_listing_counts_the_other_workspaces_a_box_has_run_in() {
+        let mut shared = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
+        shared.earlier = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let text = list(
+            &[Listing {
+                record: shared,
+                running: None,
+            }],
+            160,
+        );
+        assert!(text.contains("/w/proj +2"), "{text}");
     }
 
     /// A box's home carries its role's toolchain and persona. Handing an
@@ -946,9 +1242,15 @@ mod tests {
             record("a", "/w", Some("alphaca"), 100),
             record("b", "/w", None, 100),
         ];
-        let found = resumable(&records, Path::new("/w"), typed("alphaca-java"));
+        let found = resumable(
+            &records,
+            Path::new("/w"),
+            typed("alphaca-java"),
+            Resume::Here,
+        );
         assert!(found.is_empty(), "{found:?}");
-        let workspace_manifest = resumable(&records, Path::new("/w"), Wanted::default());
+        let workspace_manifest =
+            resumable(&records, Path::new("/w"), Wanted::default(), Resume::Here);
         assert_eq!(workspace_manifest.len(), 1);
         assert_eq!(workspace_manifest[0].id, "b");
     }
@@ -984,6 +1286,7 @@ mod tests {
         crate::registry::Entry {
             pid,
             box_id: id.to_owned(),
+            key: None,
             workspace: PathBuf::from("/w/proj"),
             image: "/data/img".to_owned(),
             agent: Some("claude".to_owned()),

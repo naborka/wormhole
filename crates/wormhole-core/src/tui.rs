@@ -398,6 +398,12 @@ pub fn preview(manifest: &Manifest, source: &str, image_ready: bool) -> String {
             "  credentials: share — the host's login file, bound read-write\n"
         }
     });
+    text.push_str(match manifest.agent.resume {
+        crate::manifest::Resume::Here => "  home: kept per box; each workspace starts its own\n",
+        crate::manifest::Resume::Anywhere => {
+            "  home: one for every workspace; each sees what the others left\n"
+        }
+    });
     if manifest.env.is_empty() {
         text.push_str("\nenv: none\n");
     } else {
@@ -561,9 +567,22 @@ mod tests {
             "preflight: hooks/preflight.sh",
             "instructions: ROLE.md",
             "image: ready",
+            "home: kept per box; each workspace starts its own",
         ] {
             assert!(view.contains(expected), "missing {expected:?} in:\n{view}");
         }
+    }
+
+    /// A shared home is every project's history in reach of every other,
+    /// so the screen that asks says so.
+    #[test]
+    fn the_preview_says_when_one_home_serves_every_workspace() {
+        let m = manifest("[agent]\nrun = \"claude\"\nresume = \"anywhere\"\n");
+        let view = preview(&m, "role alphaca", true);
+        assert!(
+            view.contains("home: one for every workspace; each sees what the others left"),
+            "{view}"
+        );
     }
 
     #[test]
@@ -687,8 +706,10 @@ mod tests {
                 .enumerate()
                 .map(|(n, pid)| Listing {
                     record: crate::home::Record {
+                        key: format!("w-{n:012x}"),
                         id: format!("{n:012x}"),
                         workspace: std::path::PathBuf::from("/w"),
+                        earlier: Vec::new(),
                         role: None,
                         source: None,
                         alias: None,

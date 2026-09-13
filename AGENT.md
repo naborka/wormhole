@@ -7,9 +7,10 @@ own instructions are added on top and win where they disagree.
 
 You are inside an isolated box. The workspace is mounted read-write at the same
 path it has on the host, and it is the only place your edits persist. Your home
-is kept between boxes for this workspace, so history, settings and logins
-survive. Everything else — the root filesystem, `/tmp` — is a throwaway copy
-that disappears when the box exits.
+is kept for this box between starts, so history, settings and logins survive.
+A box can serve other workspaces too; what they left in the home is not this
+workspace's. Everything else — the root filesystem, `/tmp` — is a throwaway
+copy that disappears when the box exits.
 
 Nothing of the host is visible except the paths the box was explicitly granted.
 If something you expect is missing, it was not granted; say so rather than

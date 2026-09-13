@@ -140,6 +140,7 @@ is what `[access] host_ca` is for, and it now reaches the build box too.
 run = "claude"                    # or ["claude", "codex", "grok"]
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
+resume = "anywhere"               # a role's box follows you to every workspace
 ```
 
 | Key | Meaning |
@@ -148,6 +149,7 @@ preflight = "hooks/preflight.sh"
 | `model` | Passed the way the product reads a model: `ANTHROPIC_MODEL` in the box for `claude`, `GROK_DEFAULT_MODEL` for `grok`, the `model` key in `.codex/config.toml` for `codex`. Only with a single `run` name |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
 | `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts. `WORMHOLE_RUN` is set to this box's product, so one hook can install skills and MCP the way that CLI understands; see [the hook](roles.md#the-hook-skills-mcp-plugins) for the rules and a worked example. The agent then replaces the shell. A failing hook stops the box. Non-secret setup only. Secrets belong to `ask`; the login to `[access] credentials` |
+| `resume` | `"here"` (the default) or `"anywhere"`: where a bare start looks for this role's box to resume. `"here"` looks only at boxes that already ran in this workspace, so each workspace gets its own. `"anywhere"` takes the most recently used free box from any workspace, so one home, its login and everything its hook installed serve every project, and every project's history is in reach of every other. Only a role can say it: a workspace's own manifest with `"anywhere"` is refused. See [one box, many workspaces](boxes.md#one-box-many-workspaces) |
 
 ### What every box answers for its agent
 

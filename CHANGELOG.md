@@ -9,6 +9,43 @@ true.
 
 ## Unreleased
 
+### One box for every project
+
+A role can keep one box for all your projects instead of one per project.
+With `resume = "anywhere"` under the role's `[agent]`, a bare `wormhole
+box --role <it>` in any folder resumes that role's last free box, so the
+login, the CLI and everything the hook installed are made once. `alphaca`
+says it. The start line says where the box last ran. Any role's box can
+also be brought into a new folder by hand with `wormhole box --id <it>`.
+A box made from a folder's own `wormhole.toml` still runs only in that
+folder. The price is reach: one home holds every project's history, so
+share a box only between projects you would trust with each other.
+
+The alphaca hook now sets up skills, MCP and plugins once per box, and
+again only when that part of the hook changes. Before, every start fetched all three
+skill repositories again, about three seconds each.
+
+### Fixed: a box's record lived where the agent could rewrite it
+
+Which folder a box ran in and which role it was sat in its home, which the
+agent writes. Enter on that box in the panel started it in whatever folder
+the file named, and a rewritten role let another role's start pick its
+home up. The record now lives beside the box's lock, out of the agent's
+reach, and an older record is moved out at the box's next start.
+
+### Fixed: `--id` could start a role box as something else
+
+Typed in a folder holding its own `wormhole.toml`, `wormhole box --id`
+started a role box from that file and recorded it as the box's recipe, so
+the box forgot its role. It now starts from the role it records and
+refuses a different `--role`.
+
+### Fixed: `gc --delete` could remove the lock of a build in progress
+
+A build's lock sits beside the box locks, and `gc` judged it as the lock
+of a box that no longer exists. Two builds of one image could then write
+into each other. `gc` never takes a build's lock now.
+
 ### Fixed: the alphaca preflight installed no skills
 
 The hook passed wormhole's product name straight to the `skills`

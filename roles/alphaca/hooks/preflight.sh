@@ -101,6 +101,21 @@ elif [ "${tag#v}" != "$have" ]; then
     fi
 fi
 
+# Everything below only needs doing once per home: skills, rtk's hook,
+# context7 and plugins all live in the kept home, and a box resumed in
+# another project keeps the same home. So it runs again only when this
+# part of the hook changes, or when a warning left it unfinished.
+stamp="$HOME/.cache/alphaca/setup-$(sed -n '/^# Everything below only needs doing once/,$p' "$0" | sha256sum | cut -c1-16)"
+if [ -f "$stamp" ]; then
+    echo "[preflight] setup already done by this hook; delete $stamp to redo it"
+    exit 0
+fi
+setup_ok=1
+warn() {
+    echo "[preflight] WARN: $*" >&2
+    setup_ok=0
+}
+
 # Skills via the installer, into this product's directory in the kept
 # home; without -g they land in the workspace. Each repo on its own so
 # one bad source does not take the rest down.
@@ -112,7 +127,7 @@ do
     if npx -y skills add "$repo" --skill '*' -a "$skills_agent" -g --yes </dev/null; then
         echo "[preflight] installed skills from $repo ($run)"
     else
-        echo "[preflight] WARN: skills add $repo failed" >&2
+        warn "skills add $repo failed"
     fi
 done
 
@@ -136,10 +151,10 @@ if command -v rtk >/dev/null 2>&1; then
     if [ "$rtk_ok" -eq 1 ]; then
         echo "[preflight] rtk init done"
     else
-        echo "[preflight] WARN: rtk init failed" >&2
+        warn "rtk init failed"
     fi
 else
-    echo "[preflight] WARN: rtk binary not on PATH" >&2
+    warn "rtk binary not on PATH"
 fi
 
 # context7 as an MCP server in this product's own config. Added once:
@@ -153,7 +168,7 @@ case "$run" in
             -- npx -y @upstash/context7-mcp </dev/null; then
             echo "[preflight] context7 MCP added"
         else
-            echo "[preflight] WARN: context7 MCP add failed" >&2
+            warn "context7 MCP add failed"
         fi
         ;;
     codex)
@@ -164,7 +179,7 @@ case "$run" in
             -- npx -y @upstash/context7-mcp </dev/null; then
             echo "[preflight] context7 MCP added"
         else
-            echo "[preflight] WARN: context7 MCP add failed" >&2
+            warn "context7 MCP add failed"
         fi
         ;;
     grok)
@@ -175,7 +190,7 @@ case "$run" in
             -- npx -y @upstash/context7-mcp </dev/null; then
             echo "[preflight] context7 MCP added"
         else
-            echo "[preflight] WARN: context7 MCP add failed" >&2
+            warn "context7 MCP add failed"
         fi
         ;;
 esac
@@ -186,15 +201,21 @@ case "$run" in
     claude)
         for marketplace in anthropics/claude-plugins-official; do
             claude plugin marketplace add "$marketplace" </dev/null \
-                || echo "[preflight] WARN: marketplace $marketplace failed" >&2
+                || warn "marketplace $marketplace failed"
         done
         if claude plugin install rust-analyzer-lsp@claude-plugins-official </dev/null; then
             echo "[preflight] rust-analyzer-lsp plugin installed"
         else
-            echo "[preflight] WARN: rust-analyzer-lsp plugin failed" >&2
+            warn "rust-analyzer-lsp plugin failed"
         fi
         ;;
     *)
         echo "[preflight] skipping Claude plugins; $run has no analogue"
         ;;
 esac
+
+if [ "$setup_ok" -eq 1 ]; then
+    mkdir -p "$(dirname "$stamp")"
+    : >"$stamp"
+    echo "[preflight] setup done; later starts skip it until this hook changes"
+fi

@@ -114,7 +114,7 @@ wormhole gc --delete --unreferenced    # and what no box here starts from
 ```
 
 Wormhole deletes only what it can **prove**. A box directory whose process
-is gone, a kept home whose workspace no longer exists and a lock whose box
+is gone, a kept home nothing can start again and a lock whose box
 is gone are all proven *dead*, and `--delete` takes them.
 
 An image, a base or a fetched artifact that no box on this host starts

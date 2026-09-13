@@ -245,19 +245,44 @@ fn run_box(args: &[String]) -> ! {
         .id
         .as_deref()
         .map(|id| lock::claim_named(&data_home, &workspace, id));
+    let named_record = named
+        .as_ref()
+        .and_then(|claim| claim.target.record.as_ref());
+
+    // A named box starts from the role it was made from, never from
+    // whatever the directory it was named in holds.
+    if let Some(refusal) =
+        named_record.and_then(|record| home::refused_elsewhere(record, &workspace))
+    {
+        fail(&refusal);
+    }
+    let role = parsed
+        .role
+        .clone()
+        .or_else(|| named_record.and_then(home::Record::role_ref));
 
     // Which role this is has to be settled before the search for a box to
     // resume: `--role alphaca` and `--role ./roles/alphaca` name one role,
     // and only resolving them says so.
-    let resolved = roles::resolve_manifest(parsed.role.as_deref());
+    let resolved = roles::resolve_manifest(role.as_deref());
+    if let Some(refusal) =
+        named_record.and_then(|record| home::refused_as(record, resolved.source.as_deref()))
+    {
+        fail(&refusal);
+    }
+    // A box made from a workspace's own file runs only in that workspace,
+    // and a cloned repository must not decide how far its box reaches.
+    if resolved.source.is_none() && resolved.manifest.agent.resume == manifest::Resume::Anywhere {
+        fail(&format!(
+            "this workspace's {MANIFEST} says resume = \"anywhere\", but a box made \
+             from a workspace's own {MANIFEST} runs only there; that line belongs in a role"
+        ));
+    }
 
     // `--id` already names the box, so its recorded product is the one
     // this start runs unless `--run` says otherwise — and a disagreement
     // is a refusal, not a silent switch of the home's agent.
-    let recorded = named.as_ref().and_then(|(id, _)| {
-        let home = paths::home_dir(&data_home, &paths::box_key(&workspace, id));
-        read_record(&home).ok().and_then(|record| record.agent)
-    });
+    let recorded = named_record.and_then(|record| record.agent.clone());
     let mut requested = parsed.run.clone().or(recorded.clone());
     let roles::Resolved {
         manifest,
@@ -295,7 +320,15 @@ fn run_box(args: &[String]) -> ! {
     //
     // Held until this process exits — `exit` runs no destructor, so the
     // kernel is what ends it.
-    let (box_id, _claim) = named.unwrap_or_else(|| {
+    let lock::Claim {
+        target:
+            home::Target {
+                id: box_id,
+                key: box_key,
+                ..
+            },
+        lock: _claim,
+    } = named.unwrap_or_else(|| {
         lock::claim_free(
             &data_home,
             &workspace,
@@ -309,30 +342,22 @@ fn run_box(args: &[String]) -> ! {
                     manifest.agent.product()
                 },
             },
+            manifest.agent.resume,
         )
     });
     if unbound {
-        let home = paths::home_dir(&data_home, &paths::box_key(&workspace, &box_id));
-        requested = read_record(&home)
+        requested = read_record(&data_home, &box_key)
             .ok()
             .and_then(|record| record.agent)
             .or_else(|| tui::pick_run(&manifest).map(pick_product));
         manifest = manifest::bound(manifest, requested.as_deref())
             .unwrap_or_else(|e| fail(&e.to_string()));
     }
-    let box_key = paths::box_key(&workspace, &box_id);
 
     // What this box answers to besides its id. `--as` renames it; without
     // one the box keeps the name it already had. Settled before anything
     // is built, because one name on two boxes would make `attach` guess.
-    let box_home = paths::home_dir(&data_home, &box_key);
-    let box_alias = box_alias(
-        &data_home,
-        &box_home,
-        &workspace,
-        &box_id,
-        parsed.alias.as_deref(),
-    );
+    let box_alias = box_alias(&data_home, &box_key, &box_id, parsed.alias.as_deref());
 
     // Before the home and the image: a login this start cannot deliver is
     // not something to find out after a build.
@@ -381,23 +406,31 @@ fn run_box(args: &[String]) -> ! {
         .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", box_dir.display())));
     register_box(
         &box_dir,
-        &box_id,
-        &manifest,
-        &workspace,
-        &image,
-        box_alias.as_deref(),
+        registry::Entry {
+            pid: std::process::id(),
+            box_id: box_id.clone(),
+            key: Some(box_key.clone()),
+            workspace: workspace.clone(),
+            image: image.display().to_string(),
+            agent: manifest.agent.product().map(str::to_owned),
+            name: manifest.name.clone(),
+            alias: box_alias.clone(),
+            started_unix: now_unix(),
+        },
     );
 
-    // The box's own record, in the home that outlives every process that
-    // ran it. A home is named by a digest, and a digest cannot be
-    // inverted: without this nothing could say which workspace a home
-    // belongs to, list it for resuming, or tell whether it is still wanted.
+    // The box's own record, host-side, beside its claim. A home is named
+    // by a digest, and a digest cannot be inverted: without this nothing
+    // could say which workspace a home belongs to, list it for resuming,
+    // or tell whether it is still wanted.
     let now = now_unix();
     write_record(
-        &home,
+        &data_home,
         home::Record {
+            key: box_key.clone(),
             id: box_id.clone(),
             workspace: workspace.clone(),
+            earlier: Vec::new(),
             role: role_typed,
             source: role_source,
             alias: box_alias.clone(),
@@ -465,41 +498,62 @@ fn run_box(args: &[String]) -> ! {
 /// rest. The homes directory itself is the exception, for the same reason
 /// the registry is: nothing kept there could be listed, and "no boxes"
 /// would be a lie.
-fn kept_boxes(data_home: &Path) -> Result<(Vec<home::Record>, Vec<String>), String> {
+fn kept_boxes(data_home: &Path) -> Result<Kept, String> {
     let homes = paths::homes_dir(data_home);
-    let mut found = Vec::new();
-    let mut problems = Vec::new();
+    let mut kept = Kept::default();
     let dir = match std::fs::read_dir(&homes) {
         Ok(dir) => dir,
         // Nothing has been kept yet, which is not a problem with anything.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((found, problems)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(kept),
         Err(e) => return Err(format!("cannot read {}: {e}", homes.display())),
     };
     for entry in dir.flatten() {
-        match read_record(&entry.path()) {
-            Ok(record) => found.push(record),
-            Err(problem) => problems.push(problem),
+        let Ok(key) = entry.file_name().into_string() else {
+            continue;
+        };
+        match read_record(data_home, &key) {
+            Ok(record) => kept.records.push(record),
+            Err(problem) => kept.problems.push(problem),
         }
+        kept.keys.push(key);
     }
-    Ok((found, problems))
+    Ok(kept)
 }
 
-/// One box's record, or why it could not be read. Homes written before
-/// boxes had ids stamped only the workspace; those are read as that
-/// workspace's first box, so an upgrade keeps every agent's history and
-/// installed toolchain instead of starting everyone over. The next start
-/// writes the full record.
+/// One walk of the homes: the records that could be read, the key of
+/// every home — `home::target` names a box whose record cannot be read by
+/// it — and what could not be read.
+#[derive(Default)]
+pub(crate) struct Kept {
+    pub(crate) records: Vec<home::Record>,
+    pub(crate) keys: Vec<String>,
+    pub(crate) problems: Vec<String>,
+}
+
+/// One box's record, or why it could not be read.
+///
+/// The host's copy when there is one, and only then what an older
+/// wormhole left in the home: its record, or before boxes had ids, the
+/// bare workspace stamp, read as that workspace's first box. Both are
+/// moved out at the box's next start.
 ///
 /// The reason is returned, never printed: the panel calls this every
 /// second while it owns the terminal, and a reader that writes there
 /// draws over the screen.
-fn read_record(home: &Path) -> Result<home::Record, String> {
-    if let Ok(text) = std::fs::read_to_string(home.join(home::RECORD)) {
-        return home::parse(&text).map_err(|e| format!("{}: {e}", home.display()));
+fn read_record(data_home: &Path, key: &str) -> Result<home::Record, String> {
+    let file = paths::record_file(data_home, key);
+    match std::fs::read_to_string(&file) {
+        Ok(text) => return home::parse(&text, key).map_err(|e| format!("{}: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    }
+    let home = paths::home_dir(data_home, key);
+    if let Ok(text) = std::fs::read_to_string(home.join(home::LEGACY_RECORD)) {
+        return home::parse(&text, key).map_err(|e| format!("{}: {e}", home.display()));
     }
     std::fs::read_to_string(home.join(home::LEGACY_STAMP))
         .ok()
-        .and_then(|stamped| home::from_legacy(home, &stamped))
+        .and_then(|stamped| home::from_legacy(&home, &stamped))
         .ok_or_else(|| format!("{} holds no box record", home.display()))
 }
 
@@ -511,27 +565,26 @@ fn report_problems(problems: &[String]) {
     }
 }
 
-/// Writes the box's own record into its home, fresh on every start: what
-/// it is, where it works and when it last ran, so `ps --all` can list it
-/// and `--id` can bring it back. The first start's time is kept.
+/// Writes the box's own record, fresh on every start: what it is, where it
+/// works and when it last ran, so `ps --all` can list it and `--id` can
+/// bring it back. The first start's time and every workspace it ran in
+/// before are kept.
 ///
 /// Takes the record whole: three `Option<&str>` in a row once let a start
 /// file its name as its role's identity, and named fields cannot be passed
 /// in the wrong order.
-fn write_record(home: &Path, record: home::Record) {
-    let created_unix = read_record(home)
-        .ok()
-        .map(|kept| kept.created_unix)
-        .filter(|created| *created != 0)
-        .unwrap_or(record.created_unix);
-    write_box_record(
-        home,
-        &home::Record {
-            created_unix,
+fn write_record(data_home: &Path, record: home::Record) {
+    let record = match read_record(data_home, &record.key) {
+        Ok(kept) => home::Record {
+            created_unix: Some(kept.created_unix)
+                .filter(|created| *created != 0)
+                .unwrap_or(record.created_unix),
+            earlier: kept.ran_in(&record.workspace).earlier,
             ..record
         },
-    )
-    .unwrap_or_else(|e| fail(&e));
+        Err(_) => record,
+    };
+    write_box_record(data_home, &record).unwrap_or_else(|e| fail(&e));
 }
 
 /// Writes this box's registry entry beside its root copy. A failure here
@@ -541,24 +594,7 @@ fn write_record(home: &Path, record: home::Record) {
 /// In one step, because every other wormhole on the host scans this file
 /// while we write it: a reader that caught a half-written entry used to
 /// take `ps`, the panel and every starting box down with it.
-fn register_box(
-    box_dir: &Path,
-    box_id: &str,
-    manifest: &manifest::Manifest,
-    workspace: &Path,
-    image: &Path,
-    alias: Option<&str>,
-) {
-    let entry = registry::Entry {
-        pid: std::process::id(),
-        box_id: box_id.to_owned(),
-        workspace: workspace.to_owned(),
-        image: image.display().to_string(),
-        agent: manifest.agent.product().map(str::to_owned),
-        name: manifest.name.clone(),
-        alias: alias.map(str::to_owned),
-        started_unix: now_unix(),
-    };
+fn register_box(box_dir: &Path, entry: registry::Entry) {
     let text = registry::to_toml(&entry).unwrap_or_else(|e| fail(&e));
     replace_file(&box_dir.join("box.toml"), &text)
         .unwrap_or_else(|e| fail(&format!("cannot write the box registry entry: {e}")));
@@ -634,58 +670,82 @@ fn gc_cmd(args: &[String]) -> ! {
         });
     }
 
-    // A kept home outlives the workspace it was kept for. It can be
-    // reclaimed because a box records which workspace it belongs to — and
-    // the same read gives the recipes below, so the homes are walked once.
-    let mut records = Vec::new();
+    // A kept home outlives the workspaces it ran in. What proves it dead is
+    // that nothing can start it again, which its record and its recipe say
+    // together. Images, bases and artifacts are each named by a digest,
+    // and a recipe names every digest the store keeps on its behalf — so
+    // the same reads turn "nothing records this" into a proof below. The
+    // homes are walked once, each distinct recipe read once.
     let mut keys = BTreeSet::new();
-    let mut unreadable = 0usize;
+    let mut recipes = BTreeMap::new();
+    let mut complete = true;
     for entry in read_dir(&paths::homes_dir(&data_home)) {
         let path = entry.path();
-        keys.extend(
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned),
-        );
-        let record = read_record(&path).ok();
-        let workspace = record
-            .as_ref()
-            .map(|record| record.workspace.display().to_string());
+        let Some(key) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let record = read_record(&data_home, &key).ok();
+        keys.insert(key);
+        // A home that could not be read is a recipe that could not be
+        // asked, so it counts against completeness like an unreadable one.
+        let Some(record) = record else {
+            complete = false;
+            items.push(gc::Item {
+                bytes: tree_bytes(&path),
+                verdict: gc::home_verdict(None),
+                path,
+            });
+            continue;
+        };
+        let read = read_recipe(&record, &mut recipes);
+        let workspace = record.workspace.display().to_string();
+        let verdict = gc::home_verdict(Some(gc::Evidence {
+            workspace: &workspace,
+            any_workspace_exists: record.workspaces().any(Path::is_dir),
+            recipe: gc::recipe(&record, read, Path::is_dir),
+        }));
+        // A dead box keeps nothing alive. Any other whose recipe could not
+        // be read may be the very one that references an image, so the
+        // answer says so rather than proving something on a gap in the
+        // evidence.
+        match read {
+            _ if matches!(verdict, gc::Verdict::Dead(_)) => {}
+            Some(manifest) => referenced.extend(manifest::referenced_digests(manifest)),
+            None => complete = false,
+        }
         items.push(gc::Item {
             bytes: tree_bytes(&path),
-            verdict: gc::home_verdict(
-                workspace.as_deref(),
-                workspace.as_deref().is_some_and(|w| Path::new(w).is_dir()),
-            ),
+            verdict,
             path,
         });
-        match record {
-            Some(record) => records.push(record),
-            None => unreadable += 1,
+    }
+
+    // A lock and a record each belong to a home, and the file's stem is
+    // exactly the key that home is named by, so the keys just gathered
+    // answer this without a stat each.
+    type Judge = fn(&str, &BTreeSet<String>) -> gc::Verdict;
+    let beside_homes: [(PathBuf, Judge); 2] = [
+        (paths::locks_dir(&data_home), gc::lock_verdict),
+        (paths::records_dir(&data_home), gc::kept_verdict),
+    ];
+    for (dir, verdict) in beside_homes {
+        for entry in read_dir(&dir) {
+            let path = entry.path();
+            let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            items.push(gc::Item {
+                bytes: tree_bytes(&path),
+                verdict: verdict(key, &keys),
+                path,
+            });
         }
     }
 
-    // A lock file is an empty claim token beside a home; the file's stem
-    // is exactly the key that home is named by, so the keys just gathered
-    // answer this without a stat each.
-    for entry in read_dir(&paths::locks_dir(&data_home)) {
-        let path = entry.path();
-        let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        items.push(gc::Item {
-            bytes: tree_bytes(&path),
-            verdict: gc::lock_verdict(keys.contains(key)),
-            path,
-        });
-    }
-
-    // Images, bases and artifacts are each named by a digest, and a recipe
-    // names every digest the store keeps on its behalf — so reading the
-    // recipe of every kept box is what turns "nothing records this" into a
-    // proof. A home that could not be read is a recipe that could not be
-    // asked, so it counts against completeness like an unreadable one.
-    let complete = extend_referenced(&records, &mut referenced) && unreadable == 0;
     for (dir, what) in [
         (paths::images_dir(&data_home), "image"),
         (paths::bases_dir(&data_home), "base"),
@@ -741,45 +801,31 @@ fn running_image(box_dir: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Adds every digest these boxes' recipes reference, and says whether all
-/// of them could be read.
+/// A kept box's recipe: its workspace's own manifest, or the role it was
+/// made from. `None` when it cannot be read — a role removed, a manifest
+/// since made invalid.
 ///
-/// A box's recipe is its workspace's own manifest, or the role it was
-/// started from. Reading one can fail — a role removed, a manifest since
-/// made invalid — and the one that failed may be the very one that
-/// references an image, so the answer says so rather than quietly
-/// proving something on a gap in the evidence.
+/// Boxes commonly share a role, so each distinct recipe is read once: a
+/// role reads the same wherever its boxes ran, and a workspace's own file
+/// is that workspace's.
 ///
-/// Boxes commonly share a workspace and a role, so each distinct recipe is
-/// read once: `paths::box_id` derives an id from a workspace, which is to
-/// say a folder full of boxes is a folder with one recipe.
-///
-/// A box whose workspace is gone is skipped: it is already dead, and
-/// counting its recipe would keep a gigabyte alive for nobody.
-fn extend_referenced(records: &[home::Record], into: &mut BTreeSet<String>) -> bool {
-    let mut complete = true;
-    let mut seen = BTreeSet::new();
-    for record in records {
-        if !record.workspace.is_dir() {
-            continue;
-        }
-        if !seen.insert((record.workspace.clone(), record.role.clone())) {
-            continue;
-        }
-        // Never the launch resolver: that one may fetch a pinned commit
-        // and stop for a confirm, and a listing that reaches the network
-        // or seizes the terminal is not a listing. Reading is all this
-        // needs, so reading is all it is allowed.
-        match roles::try_resolve_manifest_in(
-            &record.workspace,
-            record.role.as_deref(),
-            roles::Fetch::Never,
-        ) {
-            Ok(resolved) => into.extend(manifest::referenced_digests(&resolved.manifest)),
-            Err(_) => complete = false,
-        }
-    }
-    complete
+/// Never the launch resolver: that one may fetch a pinned commit and stop
+/// for a confirm, and a listing that reaches the network or seizes the
+/// terminal is not a listing. Reading is all this needs, so reading is all
+/// it is allowed.
+fn read_recipe<'a>(
+    record: &home::Record,
+    read: &'a mut BTreeMap<(Option<String>, Option<PathBuf>), Option<manifest::Manifest>>,
+) -> Option<&'a manifest::Manifest> {
+    let role = record.role_ref();
+    let at = role.is_none().then(|| record.workspace.clone());
+    read.entry((role, at))
+        .or_insert_with_key(|(role, _)| {
+            roles::try_resolve_manifest_in(&record.workspace, role.as_deref(), roles::Fetch::Never)
+                .ok()
+                .map(|resolved| resolved.manifest)
+        })
+        .as_ref()
 }
 
 /// A directory's entries, or none when it is not there yet. Every gc scan
@@ -972,10 +1018,10 @@ fn tui() -> ! {
 /// `wormhole box` would pick — and everything the scan could not read.
 fn box_listings(data_home: &Path) -> Result<home::Scan, String> {
     let (live, mut problems) = live_boxes(data_home)?;
-    let (kept, unreadable) = kept_boxes(data_home)?;
-    problems.extend(unreadable);
+    let kept = kept_boxes(data_home)?;
+    problems.extend(kept.problems);
     Ok(home::Scan {
-        boxes: home::scan(kept, &live),
+        boxes: home::scan(kept.records, &live),
         problems,
     })
 }
@@ -1010,20 +1056,18 @@ fn panel_act(data_home: &Path, what: &tui::Act) -> Result<(), String> {
 /// opened — a box belongs to one tree, and starting it anywhere else
 /// would point its agent at a stranger's code.
 fn resume_from_panel(data_home: &Path, id: &str) -> ! {
-    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-    report_problems(&problems);
+    let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&kept.problems);
     let record = kept
+        .records
         .into_iter()
         .find(|record| record.id == id)
         .unwrap_or_else(|| fail(&format!("no box {id} any more")));
-    std::env::set_current_dir(&record.workspace)
-        .unwrap_or_else(|e| fail(&format!("cannot enter {}: {e}", record.workspace.display())));
-    let mut args = vec!["--id".to_owned(), id.to_owned()];
-    if let Some(role) = record.role {
-        args.push("--role".to_owned());
-        args.push(role);
-    }
-    run_box(&args)
+    let workspace = home::resume_in(&record, &here(), Path::is_dir).unwrap_or_else(|e| fail(&e));
+    std::env::set_current_dir(&workspace)
+        .unwrap_or_else(|e| fail(&format!("cannot enter {}: {e}", workspace.display())));
+    // No `--role`: a named box starts from the role it records.
+    run_box(&["--id".to_owned(), id.to_owned()])
 }
 
 /// `n` in the panel: pick what the new box starts from — the workspace's
@@ -1142,18 +1186,6 @@ fn here() -> PathBuf {
         .unwrap_or_else(|e| fail(&format!("cannot read the working directory: {e}")))
 }
 
-/// Every home directory the store holds, by the key each is named by.
-///
-/// `home::target` needs these to name a box whose record cannot be read,
-/// and the walk is done once for a whole command line rather than once per
-/// name that missed.
-fn home_keys(data_home: &Path) -> Vec<String> {
-    read_dir(&paths::homes_dir(data_home))
-        .into_iter()
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect()
-}
-
 /// The boxes named on a command line, and what the scan could not read.
 ///
 /// Every name becomes a box before any of them is touched: half a list
@@ -1168,15 +1200,12 @@ fn home_keys(data_home: &Path) -> Vec<String> {
 type Found = (Vec<home::Target>, Vec<home::Record>, Vec<String>);
 
 fn find_targets(data_home: &Path, workspace: &Path, wanted: &[String]) -> Result<Found, String> {
-    let (kept, problems) = kept_boxes(data_home)?;
-    let keys = home_keys(data_home);
+    let kept = kept_boxes(data_home)?;
     let found = wanted
         .iter()
-        .map(|name| {
-            home::target(&kept, &keys, workspace, name).ok_or_else(|| home::no_box_found(name))
-        })
+        .map(|name| home::target(&kept.records, &kept.keys, workspace, name))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((found, kept, problems))
+    Ok((found, kept.records, kept.problems))
 }
 
 /// The same, for a command: what the scan could not read is said on
@@ -1238,10 +1267,11 @@ impl<'a> Claimed<'a> {
     /// on the same box while this one is still deleting. It costs nothing,
     /// it is reused when the ordinal is, and `gc` reclaims the rest.
     fn remove(&self, data_home: &Path) -> Result<(), String> {
-        image::remove(&paths::home_dir(data_home, &self.target.key))
+        image::remove(&paths::home_dir(data_home, &self.target.key))?;
+        image::remove(&paths::record_file(data_home, &self.target.key))
     }
 
-    /// Empties the home and gives the box back its own record.
+    /// Empties the home and keeps the box's record.
     ///
     /// The box survives: same id, same name, same workspace, same role.
     /// Only what the agent put there is gone — which is the difference
@@ -1249,15 +1279,16 @@ impl<'a> Claimed<'a> {
     /// this is not `remove` followed by `box --new`.
     fn reset(&self, data_home: &Path) -> Result<(), String> {
         let home = paths::home_dir(data_home, &self.target.key);
-        self.remove(data_home)?;
+        image::remove(&home)?;
         std::fs::create_dir_all(&home)
             .map_err(|e| format!("cannot create box home {}: {e}", home.display()))?;
-        // A box with no record to put back is left empty, which is what it
-        // already was: the next start writes one.
+        // Written again because an older wormhole's record was in the
+        // home just emptied. A box with none is left empty, which is what
+        // it already was: the next start writes one.
         self.target
             .record
             .as_ref()
-            .map_or(Ok(()), |record| write_box_record(&home, record))
+            .map_or(Ok(()), |record| write_box_record(data_home, record))
     }
 
     /// Sets what the box answers to besides its id.
@@ -1277,24 +1308,33 @@ impl<'a> Claimed<'a> {
                 id = self.target.id
             )
         })?;
-        if let Some(taken) = home::alias_conflict(kept, &record.workspace, alias, &record.id) {
+        if let Some(taken) = home::alias_conflict(kept, alias, &record.id) {
             return Err(home::alias_taken(alias, &taken.id));
         }
         let renamed = home::Record {
             alias: Some(alias.to_owned()),
             ..record.clone()
         };
-        write_box_record(&paths::home_dir(data_home, &self.target.key), &renamed)
+        write_box_record(data_home, &renamed)
     }
 }
 
-/// Writes a box's record into its home. The one writer, so a start, a
-/// reset and a rename cannot disagree about what a record on disk is.
+/// Writes a box's record host-side. The one writer, so a start, a reset
+/// and a rename cannot disagree about what a record on disk is.
 ///
 /// Atomically, because the panel reads this file once a second while it
-/// draws: a reader must never see half of one.
-fn write_box_record(home: &Path, record: &home::Record) -> Result<(), String> {
-    replace_file(&home.join(home::RECORD), home::to_toml(record)?)
+/// draws: a reader must never see half of one. Then whatever an older
+/// wormhole left in the home goes, so no copy the agent can edit stays
+/// behind to be read by one.
+fn write_box_record(data_home: &Path, record: &home::Record) -> Result<(), String> {
+    replace_file(
+        &paths::record_file(data_home, &record.key),
+        home::to_toml(record)?,
+    )?;
+    let home = paths::home_dir(data_home, &record.key);
+    [home::LEGACY_RECORD, home::LEGACY_STAMP]
+        .iter()
+        .try_for_each(|legacy| image::remove(&home.join(legacy)))
 }
 
 /// `wormhole remove <id|name>...`: take boxes away.
@@ -1342,22 +1382,22 @@ fn rename_cmd(args: &[String]) -> ! {
 
 fn box_alias(
     data_home: &Path,
-    box_home: &Path,
-    workspace: &Path,
+    box_key: &str,
     box_id: &str,
     wanted: Option<&str>,
 ) -> Option<String> {
     let Some(wanted) = wanted else {
-        // A home is keyed by workspace and id, so this file is already
-        // this box in this workspace — one read rather than a scan of
-        // every home on the host to look at one field of one of them.
-        return read_record(box_home).ok().and_then(|record| record.alias);
+        // One read of this box's record rather than a scan of every box
+        // on the host to look at one field of one of them.
+        return read_record(data_home, box_key)
+            .ok()
+            .and_then(|record| record.alias);
     };
-    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-    report_problems(&problems);
+    let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&kept.problems);
     // The rule and the sentence both live beside `is_usable_alias`, so a
     // start, a rename and the panel give one answer to one question.
-    if let Some(taken) = home::alias_conflict(&kept, workspace, wanted, box_id) {
+    if let Some(taken) = home::alias_conflict(&kept.records, wanted, box_id) {
         fail(&home::alias_taken(wanted, &taken.id));
     }
     Some(wanted.to_owned())
@@ -1437,8 +1477,7 @@ fn attach_box(id: &str, command: Option<Vec<String>>, env_args: &[run::EnvArg]) 
     // this terminal would be named to the box without being resolvable in
     // it. A terminal the host itself cannot describe is left as it is:
     // there is nothing truer to say about it from here.
-    let home = paths::home_dir(&data_home, &paths::box_key(&entry.workspace, &entry.box_id));
-    terminfo::carry(&host, &home);
+    terminfo::carry(&host, &paths::home_dir(&data_home, &entry.key()));
     let init = init_pid(&data_home, entry.pid).unwrap_or_else(|e| fail(&e));
     boundary::attach(init, &entry.workspace, &command, env.as_ref())
 }

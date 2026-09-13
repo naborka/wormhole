@@ -30,6 +30,138 @@ fn workspace(dir: &Path) {
 /// What a box says when it has got past the claim and reached the image.
 const REACHED_THE_IMAGE: &str = "no image for this manifest yet";
 
+mod common;
+
+/// The whole want: one home, its login and its setup, for every project a
+/// role is started in.
+#[test]
+fn a_role_that_resumes_anywhere_resumes_its_box_in_a_new_workspace() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path().join("data");
+    let role = common::a_role(&temp.path().join("role"), "resume = \"anywhere\"\n");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &role);
+    let second = common::a_dir(temp.path(), "b");
+
+    let output = run_box(&second, &data, &["--role", role.to_str().expect("utf-8")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "box: {id} (resumed; last used in {})",
+            first.display()
+        )),
+        "{output:?}"
+    );
+}
+
+/// Not saying keeps every existing role's answer: a box per workspace.
+#[test]
+fn a_role_that_resumes_here_makes_a_new_box_in_a_new_workspace() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path().join("data");
+    let role = common::a_role(&temp.path().join("role"), "");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &role);
+    let second = common::a_dir(temp.path(), "b");
+
+    let output = run_box(&second, &data, &["--role", role.to_str().expect("utf-8")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("(new)"), "{output:?}");
+    assert!(!stdout.contains(&id), "{output:?}");
+}
+
+/// The bug this pins: `--id` read the recipe of the directory it was typed
+/// in and wrote that over the record, so a role box forgot its role.
+#[test]
+fn naming_a_role_box_from_another_workspace_starts_it_with_its_own_role() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path().join("data");
+    let role = common::a_role(&temp.path().join("role"), "");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &role);
+    let elsewhere = common::a_dir(temp.path(), "b");
+    workspace(&elsewhere);
+
+    let output = run_box(&elsewhere, &data, &["--id", &id]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(said.contains("role-recipe"), "{said}");
+    assert!(!said.contains("nothing/here"), "{said}");
+    assert!(!said.contains("belongs to"), "{said}");
+}
+
+/// Its recipe is that workspace's own file, which no other start reads.
+#[test]
+fn a_box_made_from_a_workspace_manifest_is_refused_by_name_elsewhere() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path().join("data");
+    let first = common::a_dir(temp.path(), "a");
+    workspace(&first);
+    let id = paths::box_id(&first, 0);
+    common::keep_box(&data, &common::a_record(&first, &id, None));
+    let elsewhere = common::a_dir(temp.path(), "b");
+    workspace(&elsewhere);
+
+    let output = run_box(&elsewhere, &data, &["--id", &id]);
+    assert!(!output.status.success(), "{output:?}");
+    let refusal = String::from_utf8_lossy(&output.stderr);
+    assert!(refusal.contains("runs only there"), "{refusal}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(REACHED_THE_IMAGE),
+        "{output:?}"
+    );
+}
+
+/// A box is made from one role for its whole life; naming it with another
+/// is a refusal, never a quiet change of what its home holds.
+#[test]
+fn naming_a_box_with_another_role_is_refused() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path().join("data");
+    let alphaca = common::a_role(&temp.path().join("alphaca"), "");
+    let java = common::a_role(&temp.path().join("java"), "");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &alphaca);
+
+    let output = run_box(
+        &first,
+        &data,
+        &["--id", &id, "--role", java.to_str().expect("utf-8")],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let refusal = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        refusal.contains(&wormhole_core::source::dir_source(&alphaca)),
+        "{refusal}"
+    );
+}
+
+/// A workspace's own manifest has no other workspace for its box to
+/// follow you to, and a cloned repository must not widen its own box.
+#[test]
+fn a_workspace_manifest_cannot_resume_anywhere() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path().join("data");
+    let here = common::a_dir(temp.path(), "a");
+    std::fs::write(
+        here.join("wormhole.toml"),
+        format!(
+            "version = 1\n[agent]\nrun = \"claude\"\nresume = \"anywhere\"\n\
+             [image]\nbase = \"file:///nothing/here.tar.gz\"\nbase_sha256 = \"{}\"\n",
+            "0".repeat(64)
+        ),
+    )
+    .expect("manifest");
+
+    let output = run_box(&here, &data, &[]);
+    assert!(!output.status.success(), "{output:?}");
+    let refusal = String::from_utf8_lossy(&output.stderr);
+    assert!(refusal.contains("resume"), "{refusal}");
+}
+
 fn run_box(workspace: &Path, data_home: &Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_wormhole"))
         .arg("box")

@@ -221,8 +221,10 @@ pub fn said(output: &std::process::Output) -> String {
 /// covering it.
 pub fn a_record(workspace: &Path, id: &str, alias: Option<&str>) -> wormhole_core::home::Record {
     wormhole_core::home::Record {
+        key: wormhole_core::paths::box_key(workspace, id),
         id: id.to_owned(),
         workspace: workspace.to_owned(),
+        earlier: Vec::new(),
         role: None,
         source: None,
         alias: alias.map(str::to_owned),
@@ -236,14 +238,59 @@ pub fn a_record(workspace: &Path, id: &str, alias: Option<&str>) -> wormhole_cor
 /// A kept box on disk: its home, its record, and one file standing in for
 /// everything an agent leaves behind. Returns the home.
 pub fn keep_box(data_home: &Path, record: &wormhole_core::home::Record) -> std::path::PathBuf {
-    let key = wormhole_core::paths::box_key(&record.workspace, &record.id);
-    let home = wormhole_core::paths::home_dir(data_home, &key);
-    std::fs::create_dir_all(home.join(".wormhole")).expect("home");
-    std::fs::write(
-        home.join(wormhole_core::home::RECORD),
-        wormhole_core::home::to_toml(record).expect("toml"),
-    )
-    .expect("record");
+    let home = wormhole_core::paths::home_dir(data_home, &record.key);
+    std::fs::create_dir_all(&home).expect("home");
+    let file = wormhole_core::paths::record_file(data_home, &record.key);
+    std::fs::create_dir_all(file.parent().expect("records dir")).expect("records dir");
+    std::fs::write(file, wormhole_core::home::to_toml(record).expect("toml")).expect("record");
     std::fs::write(home.join("history.jsonl"), "what the agent knew\n").expect("history");
     home
+}
+
+/// A directory under `under`, made and canonical, so it compares equal to
+/// the workspace path a box records.
+pub fn a_dir(under: &Path, name: &str) -> std::path::PathBuf {
+    let dir = under.join(name);
+    std::fs::create_dir_all(&dir).expect("dir");
+    dir.canonicalize().expect("canonical dir")
+}
+
+/// A role whose recipe names a base that does not exist, so a start that
+/// reads it says so by the URL it then fails to fetch. `resume` is a whole
+/// `[agent]` line, or nothing.
+pub fn a_role(dir: &Path, resume: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).expect("role dir");
+    std::fs::write(
+        dir.join("wormhole.toml"),
+        format!(
+            "version = 1\n[agent]\nrun = \"claude\"\n{resume}\
+             [image]\nbase = \"file:///nothing/role-recipe.tar.gz\"\n\
+             base_sha256 = \"{}\"\n",
+            "0".repeat(64)
+        ),
+    )
+    .expect("role manifest");
+    dir.canonicalize().expect("canonical role")
+}
+
+/// A box of `role`, kept as having last run in `ran_in`: its id and home.
+pub fn a_role_box(data_home: &Path, ran_in: &Path, role: &Path) -> (String, std::path::PathBuf) {
+    let id = wormhole_core::paths::box_id(ran_in, 0);
+    let mut record = a_record(ran_in, &id, None);
+    record.role = Some(role.display().to_string());
+    record.source = Some(wormhole_core::source::dir_source(role));
+    let home = keep_box(data_home, &record);
+    (id, home)
+}
+
+/// The record the host keeps for the box living in `home`.
+pub fn kept_record(data_home: &Path, home: &Path) -> wormhole_core::home::Record {
+    let key = home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a home is named by its key");
+    let file = wormhole_core::paths::record_file(data_home, key);
+    let text = std::fs::read_to_string(&file)
+        .unwrap_or_else(|e| panic!("no host-side record at {}: {e}", file.display()));
+    wormhole_core::home::parse(&text, key).expect("a valid record")
 }

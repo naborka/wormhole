@@ -130,6 +130,18 @@ pub fn lock_file(data_home: &Path, key: &str) -> PathBuf {
     locks_dir(data_home).join(format!("{key}.lock"))
 }
 
+/// A box's record, beside its lock and never in its home; see
+/// [`crate::home`].
+pub fn record_file(data_home: &Path, key: &str) -> PathBuf {
+    records_dir(data_home).join(format!("{key}.toml"))
+}
+
+/// Where every box's record lives. `gc` reads it: a record whose home is
+/// gone belongs to a box that no longer exists.
+pub fn records_dir(data_home: &Path) -> PathBuf {
+    data_home.join("wormhole/records")
+}
+
 /// Where every box's claim token lives. `gc` reads the directory: a lock
 /// whose home is gone is a claim on a box that no longer exists, and the
 /// file stem is exactly the key its home is named by.
@@ -209,9 +221,17 @@ pub fn baked_env(box_dir: &Path) -> PathBuf {
 /// a box that builds its own image does, because two boxes started at once
 /// want the same image at once.
 pub fn build_lock(data_home: &Path, digest: &str) -> PathBuf {
-    data_home
-        .join("wormhole/locks")
-        .join(format!("build-{digest}.lock"))
+    locks_dir(data_home).join(format!("{BUILD_LOCK_PREFIX}{digest}.lock"))
+}
+
+const BUILD_LOCK_PREFIX: &str = "build-";
+
+/// Whether a lock file's stem is a build's claim rather than a box's. A
+/// build is named by a full digest, a box key ends in a twelve-character
+/// id, so a workspace called `build` cannot be mistaken for one.
+pub fn is_build_lock(stem: &str) -> bool {
+    stem.strip_prefix(BUILD_LOCK_PREFIX)
+        .is_some_and(|digest| crate::is_lowercase_hex(digest, 64))
 }
 
 /// Where a directory is assembled before it is renamed into place. A

@@ -120,7 +120,7 @@ Cost, real and accepted: a team cannot commit a shared box definition. Repo-loca
 
 A session is `(agent, PTY, namespace set)`. The session layer is a list. **MVP ships one session.** Multiple agents cooperating in one tree is the goal (§4), and the shape does not foreclose it.
 
-A box is a kept thing with an id, not a process: its own `$HOME`, history, logins and installed tools, resumable whenever. A workspace holds as many as you make.
+A box is a kept thing with an id, not a process: its own `$HOME`, history, logins and installed tools, resumable whenever. A workspace holds as many as you make. A box made from a role may also serve many workspaces over its life, when the role says `resume = "anywhere"` or when you name the box in a new one: the login and the setup are then made once, and every project it serves can read what the others left in its home.
 
 This reverses an earlier position. Two boxes on one directory *was* forbidden, on the reasoning that a live read-write workspace means interleaved writes, duelling `cargo build` on one `target/`, and competing `git checkout`. Two of those three did not survive contact: cargo and gradle take file locks, so builds queue rather than corrupt. The third did — uncommitted edits are lost silently, and one agent's `git commit -a` sweeps up another's half-written files.
 
@@ -156,7 +156,7 @@ Uid-per-agent was considered and is probably impossible: `mappings_overlap()` in
 | Path | Mode | Source |
 |---|---|---|
 | the invocation directory, at its **host-identical path** | rw | bind from host |
-| `$HOME` | rw | per-workspace persistent directory under `~/.local/share/wormhole` |
+| `$HOME` | rw | per-box persistent directory under `~/.local/share/wormhole` |
 | `/usr`, `/bin`, `/lib*`, `/sbin` | ro | base rootfs layer + role overlay |
 | `/tmp`, `/dev/shm`, `/run` | rw | tmpfs, ephemeral |
 | `/etc/passwd`, `/etc/group` | ro | synthetic — your user only |
@@ -186,7 +186,7 @@ base.img    debian:13-slim, pulled by digest, read-only   ──┐
 agent layer claude@<version>, shared by every workspace   ──┼─ overlayfs
 role layer  role `setup` output, read-only                ──┤
 tmpfs upper ephemeral                                     ──┘
-$HOME       per-workspace persistent directory  ──── rw
+$HOME       per-box persistent directory        ──── rw
 workspace   bind from host                      ──── rw, host-identical path
 ```
 

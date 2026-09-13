@@ -6,10 +6,10 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use wormhole_core::{home, paths, registry};
+use wormhole_core::{paths, registry};
 
 mod common;
-use common::on_a_terminal;
+use common::{keep_box, on_a_terminal};
 
 const BOX_ID: &str = "0123456789ab";
 const ALIAS: &str = "api";
@@ -42,6 +42,7 @@ fn a_running_box(data_home: &Path, pid: u32) {
     let entry = registry::Entry {
         pid,
         box_id: BOX_ID.to_owned(),
+        key: None,
         workspace: data_home.to_owned(),
         image: "deadbeef".to_owned(),
         agent: None,
@@ -58,20 +59,10 @@ fn a_running_box(data_home: &Path, pid: u32) {
 
 /// The kept home behind that box, without which nothing lists it.
 fn a_kept_home(data_home: &Path) {
-    let record = home::Record {
-        id: BOX_ID.to_owned(),
-        workspace: data_home.to_owned(),
-        role: None,
-        source: None,
-        alias: None,
-        name: None,
-        agent: None,
-        created_unix: 1,
-        started_unix: 2,
-    };
-    let file = paths::home_dir(data_home, &paths::box_key(data_home, BOX_ID)).join(home::RECORD);
-    std::fs::create_dir_all(file.parent().expect("a home")).expect("home");
-    std::fs::write(&file, home::to_toml(&record).expect("a record")).expect("record");
+    let mut record = common::a_record(data_home, BOX_ID, None);
+    record.name = None;
+    record.agent = None;
+    keep_box(data_home, &record);
 }
 
 /// Whether the process ended, waited for rather than sampled: a signal is
@@ -221,21 +212,11 @@ fn a_name_is_kept_across_starts_and_never_taken_twice() {
     .expect("a workspace manifest");
 
     // A second box here, under the same name, is refused by name.
-    let other = home::Record {
-        id: "aabbccddeeff".to_owned(),
-        workspace: temp.path().to_owned(),
-        role: None,
-        source: None,
-        alias: Some(ALIAS.to_owned()),
-        name: None,
-        agent: None,
-        created_unix: 1,
-        started_unix: 3,
-    };
-    let file =
-        paths::home_dir(temp.path(), &paths::box_key(temp.path(), &other.id)).join(home::RECORD);
-    std::fs::create_dir_all(file.parent().expect("a home")).expect("home");
-    std::fs::write(&file, home::to_toml(&other).expect("a record")).expect("record");
+    let mut other = common::a_record(temp.path(), "aabbccddeeff", Some(ALIAS));
+    other.name = None;
+    other.agent = None;
+    other.started_unix = 3;
+    keep_box(temp.path(), &other);
 
     let refused = Command::new(env!("CARGO_BIN_EXE_wormhole"))
         .args(["box", "--id", BOX_ID, "--as", ALIAS])

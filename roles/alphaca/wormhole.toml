@@ -4,8 +4,9 @@
 #   wormhole box --role alphaca            # pick which CLI
 #   wormhole box --role alphaca --run grok # skip the pick
 #
-# One role, one image. Each CLI is its own box. Claude plugins have no
-# grok/codex analogue; the preflight skips them there.
+# One role, one image. Each CLI is its own box, and that box follows you
+# from project to project. Claude plugins have no grok/codex analogue;
+# the preflight skips them there.
 
 version = 1
 name = "Alphaca"
@@ -58,6 +59,9 @@ into = "/tmp/rustup-init"
 run = ["claude", "codex", "grok"]
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
+# One box per CLI for every project: the login and the setup are made
+# once. Every project's history is then in reach of every other.
+resume = "anywhere"
 
 [access]
 dns = "1.1.1.1"

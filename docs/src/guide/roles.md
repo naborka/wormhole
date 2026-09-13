@@ -29,6 +29,28 @@ wormhole box --role alphaca --run grok # skip the pick
 A kept box resumes the CLI it already runs. Off a terminal, a new box
 needs `--run`.
 
+## One box for every project
+
+By default a role gets a box per workspace: every new project logs in
+again and runs the whole hook from scratch. A role that serves many
+projects the same way can keep one box instead:
+
+```toml
+[agent]
+resume = "anywhere"
+```
+
+A bare start in any workspace then resumes the role's most recently used
+free box, one that already ran here first. The login, the CLI and
+everything the hook installed are made once. `alphaca` says this.
+
+The trade is reach. One home holds every project's transcripts and
+whatever each session wrote into its settings, and an injection in one
+project reaches the next through them. Say `anywhere` for a role you use
+on projects you would trust with each other. Any role's box can still be
+shared once, on purpose, with `wormhole box --id <box>` in the new
+workspace. See [one box, many workspaces](boxes.md#one-box-many-workspaces).
+
 ## The hook: skills, MCP, plugins
 
 Before the agent starts, `hooks/preflight.sh` runs *inside the box*, in
@@ -52,8 +74,28 @@ Four rules:
 4. **Warn and go on when an extra fails.** `exit 1` only when the CLI
    itself is missing: a failing hook stops the box, and a box with no
    skills is still a box.
+5. **Do once what only needs doing once.** The hook runs on every start,
+   but skills, MCP servers and plugins land in the kept home and stay
+   there. Guard them with a stamp named by the digest of the part it
+   guards, written only when every step worked: an edit to that part runs
+   them again, a warning retries them next start, and nothing else does.
 
-The shipped `alphaca` hook does exactly this. The shape, cut down:
+   ```sh
+   # once
+   stamp="$HOME/.cache/my-role/setup-$(sed -n '/^# once$/,$p' "$0" | sha256sum | cut -c1-16)"
+   [ -f "$stamp" ] && exit 0
+   # ... skills, MCP, plugins; any failure leaves ok=0 ...
+   [ "$ok" -eq 1 ] && mkdir -p "$(dirname "$stamp")" && : >"$stamp"
+   ```
+
+   Keep what should stay current, like updating the CLI itself, above
+   the guard.
+
+The shipped `alphaca` hook does exactly this. Measured on 2026-09-13,
+one `skills add` of `mattpocock/skills` took 3.6 s into an empty home and
+2.6 s again into one that already had them: the installer fetches every
+time, so without rule 5 a start pays that for each repository. The shape,
+cut down:
 
 ```sh
 #!/bin/sh

@@ -16,7 +16,7 @@ from `wormhole.toml`, with permissions bypassed, and it holds the terminal.
 |---|---|
 | `wormhole help` (also `--help`, `-h`) — the whole tool on one page under 140 lines and 80 columns: every command, the manifest that drives them, how to make a role, and how to move the agent's version. Prose is raw strings so what is written is what prints; the command lists render from the one table in `wormhole-core::help`, and a test reads the binary's own dispatch and fails if a command is missing from the page or on the page and dispatched by nothing. A refusal prints the parser's own usage line plus one pointer here, never the whole list | `cargo run -p wormhole -- help` |
 | `wormhole init` — a working manifest in this workspace, from the one starter recipe in `templates/wormhole.toml`. Never over one already there | `cargo run -p wormhole -- init` |
-| `wormhole box [--new \| --id <id\|name>] [--as <name>]` — the manifest's agent, in a fresh copy of the built image. A folder holds as many boxes as you make: a bare `box` resumes this workspace's most recently used free one for this role and makes another only when every one is busy; `--new` asks for another outright, `--id` names one by its id or by the name `--as` gave it. `--as` names the box this start makes or resumes, so `attach api` and `stop api` work instead of twelve hex characters; a name already on another box here is refused, and one spellable as an id is refused where it is set. Each box keeps its own `$HOME` and claim. Prints as its last line what the box got beyond the baseline — a named resolver, a read-only root, host paths bound in — and nothing when it got nothing | `cargo run -p wormhole -- box --new` |
+| `wormhole box [--new \| --id <id\|name>] [--as <name>]` — the manifest's agent, in a fresh copy of the built image. A folder holds as many boxes as you make: a bare `box` resumes the most recently used free one for this role that ran in this workspace — or, for a role whose `[agent] resume = "anywhere"`, one from any workspace, one that ran here first — and makes another only when every one is busy; `--new` asks for another outright, `--id` names one by its id or by the name `--as` gave it, from any workspace, and starts it as the role it records (a box made from another workspace's own manifest, or a different `--role`, is refused). `--as` names the box this start makes or resumes, so `attach api` and `stop api` work instead of twelve hex characters; a name already on another box on the host is refused, and one spellable as an id is refused where it is set. Each box keeps its own `$HOME` and claim. Prints as its last line what the box got beyond the baseline — a named resolver, a read-only root, host paths bound in — and nothing when it got nothing | `cargo run -p wormhole -- box --new` |
 | `wormhole box -- <cmd>` — same box, your command instead of the agent | `cargo run -p wormhole -- box -- sh` |
 | `wormhole build` — fetch the rootfs by URL, verify its sha256, `apk add`, run `[image] build`; two caches | `cargo run -p wormhole -- build` |
 | `wormhole ps [--all \| <id\|name>]` — one table for every listing: id, name, alias, state, role, agent, last used, workspace; reaps dead entries. Bare `ps` shows the running boxes, `--all` every box the host keeps, most recently used first, and an id or name that one box with its environment: value, source (`fixed`/`cli`/`host`/`store`/`default`/`unset`) and refresh rule, secrets masked | `cargo run -p wormhole -- ps --all` |
@@ -32,11 +32,11 @@ from `wormhole.toml`, with permissions bypassed, and it holds the terminal.
 | `wormhole role add <url>@<sha> [--as <name>]` — a role that lives in a git repository, pinned to a commit and never a branch. `git` verifies every object against its own hash, so the commit id is the proof and no digest of ours is kept. Fetches it, shows the whole recipe — grants, env, hooks, **and** the base, the packages and every `[image] build` line — and asks. One approval per commit, host-wide; a changed pin shows old sha → new sha and asks again. The pointer goes to config, the checkout to `~/.local/share/wormhole/checkouts/<sha>`. A bare path counts as a repository only when it carries a pin, which is what tells `/srv/mirror@<sha>` from a folder of files | `cargo run -p wormhole -- role add github:you/role@<sha>` |
 | `wormhole role list \| show <name\|dir> \| remove <name>` — what is installed and whether it can start; the whole recipe without installing it; and taking a name back. `remove` unlinks the name and never follows it, so removing an installed local role leaves the directory you work in alone | `cargo run -p wormhole -- role list` |
 | bare `wormhole` — the panel: every box, running and idle, most recently used first. Enter does the one thing that row allows — join a running box's agent, or start an idle one again in its own workspace. `n` makes another box here: pick a role, then the product if that role lists more than one, then the permission preview; `d` stops the selected box and says so, and on a box that is not running says *that* instead of redrawing an unchanged screen; `x` removes a box and `r` resets one, both asking first with `y` as the only key that answers and every other key — `q` included — cancelling; `q` quits | `cargo run -p wormhole` |
-| `wormhole rename <id\|name> <new name>` — what a box answers to besides its id, set without starting it. Scoped to the box's workspace and refused where another box there already answers to it; refused while the box runs, because its registry entry carries the name it started under and nothing rewrites that in flight | `cargo run -p wormhole -- rename a3f9c1e40b2d api` |
+| `wormhole rename <id\|name> <new name>` — what a box answers to besides its id, set without starting it. Refused where another box on the host already answers to it; refused while the box runs, because its registry entry carries the name it started under and nothing rewrites that in flight | `cargo run -p wormhole -- rename a3f9c1e40b2d api` |
 | `wormhole reset <id\|name>` — empties a box's home and keeps the box: same id, name, workspace and role, nothing the agent put there. The difference between starting over and starting somewhere else | `cargo run -p wormhole -- reset api` |
 | `wormhole remove <id\|name>...` — takes boxes away: the home each kept. Several at once, every name resolved before any box goes, so a typo at the end refuses the line rather than leaving half of it done. A home whose record cannot be read is still a box — its directory name carries the id, which is what `--id` already starts one by | `cargo run -p wormhole -- remove api web` |
 | All three take the box's own claim first, so the kernel answers "is this running" rather than a list that can go stale, and no removal can reach a home an agent is writing to. The panel's `x` and `r` call the same bodies | |
-| `wormhole gc [--delete [--unreferenced]]` — what the data home holds and what of it can be given back. `--delete` takes what is proven dead: box directories whose process is gone, homes whose workspace no longer exists, locks whose box is gone. `--unreferenced` widens it to images, bases and artifacts no box on this host starts from — proven by reading every kept box's recipe, since a recipe names every digest the store keeps for it. Two claims, kept apart: a recipe built but never run from references nothing countable, so a bare `--delete` leaves it. One unreadable recipe makes the whole answer `unproven` and nothing is taken | `cargo run -p wormhole -- gc --delete --unreferenced` |
+| `wormhole gc [--delete [--unreferenced]]` — what the data home holds and what of it can be given back. `--delete` takes what is proven dead: box directories whose process is gone, homes nothing can start again (every workspace they ran in is gone and their recipe resumes only where it ran, or their role's directory is gone), locks and records whose box is gone. Never a build's claim. `--unreferenced` widens it to images, bases and artifacts no box on this host starts from — proven by reading every kept box's recipe, since a recipe names every digest the store keeps for it. Two claims, kept apart: a recipe built but never run from references nothing countable, so a bare `--delete` leaves it. One unreadable recipe makes the whole answer `unproven` and nothing is taken | `cargo run -p wormhole -- gc --delete --unreferenced` |
 | `wormhole doctor` — 8 host probes, pure verdict, exit code | `cargo run -p wormhole -- doctor` |
 | Purity guard: `wormhole-core` has no OS or I/O dependencies | `cargo test -p wormhole-core purity` |
 | The handbook — install, quickstart, the manifest reference (every key, grouped by what it decides), boxes, roles, the access model, plus these working docs rendered | `mdbook serve docs` (deployed to GitHub Pages by `.github/workflows/docs.yml`) |
@@ -56,7 +56,10 @@ reaches the agent and not wormhole. The box's PID 1 dies with the
 workspace belong to you. Its `$HOME` is kept per box under
 `~/.local/share/wormhole/homes/<workspace>-<box id>`, so history, settings, logins
 and installed toolchains survive every restart of that box while the root stays
-throwaway. Several boxes may share a workspace; none of them shares a home.
+throwaway. Several boxes may share a workspace; none of them shares a home. A
+role box may serve several workspaces over its life. What a box is — every
+workspace it ran in, its role, product and alias — is recorded host-side under
+`records/`, beside its claim, where the agent cannot rewrite it.
 
 ## The manifest
 
@@ -123,6 +126,8 @@ does survives into the next box or back into the image.
 | N12 | The rest of a box's life: `wormhole rename`, `reset` and `remove`, and `x`/`r`/`y` in the panel. One rule for all three — the box must be idle, proven by taking its own claim rather than by reading a list. `gc` learns to prove a built thing unreferenced by reading every kept box's recipe, and reclaims orphaned locks. Every decision stays pure: `run::parse_*`, `tui::Act` and `tui::Key::from_char`, `gc::Sweep`/`plan`/`built_verdict`/`lock_verdict`, `manifest::referenced_digests`, `paths::key_id`, `home::target`/`find`/`alias_conflict`. The claim is the *type* the verbs act on (`Claimed`), so a fourth verb cannot forget to take it | **done**, 14 lifecycle tests plus the panel driven on a real pty |
 | N11 | Usage limits in the conversation, polled host-side and fed into a seeded status line. Built, then **removed** with the broker on 2026-09-08: with a login inside the box, Claude Code's own `/usage` and status bar work and wormhole has nothing to render for it | **removed** |
 | N13 | The broker gone. Every box is on the host's network and speaks to the API for itself; what it logs in with is `[access] credentials = "none" \| "copy" \| "share"` or `--credentials` on the start. Pure pieces: `manifest::Credentials`, `manifest::credential_files`, `seed::config_file` (host login merged in), `run::RunArgs.shared_credentials`, `run::BoxArgs.credentials`; `mount_plan::Resolver` (the named nameserver or the host's `resolv.conf`, bound read-only) and `mount_plan::Grant::shared`; the binary's `seed_credentials` copies or prepares the target and refuses a host with no login, `boundary.rs` refuses a host with no `resolv.conf`. Manifests naming `network`, `broker` or `egress` are refused by name (`ManifestError::Removed`). `TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` are built-in `[env]` defaults in `manifest::declarations`, so no manifest declares them. The `RouteExists` launch assertion went with the network namespace | **done** |
+
+| N15 | A box owns its identity (ADR 0005). Made from one recipe and one product for its life, it records every workspace it ran in, host-side in `records/<key>.toml`; the key is found by id, never rebuilt from the cwd. `[agent] resume = "anywhere"` lets a role's box be resumed from any workspace, so one home keeps the login and the preflight's setup for every project; `alphaca` says it, and its hook now does skills, MCP and plugins once per home per hook version. Pure pieces: `manifest::Resume`, `home::resumable`, `home::target` (aliases host-wide), `home::refused_by_name`, `Record::role_ref`, `home::resume_in`, `gc::recipe`, `gc::home_verdict(Evidence)`. Research: `docs/research/shared-box*.md` | **done**; one process per box still |
 
 What the first real runs taught, each fixed at the root rather than patched:
 
@@ -273,6 +278,25 @@ What a review on 2026-09-12 found by running real boxes, each fixed at the root:
   now ties `__boxed` to the launcher and PID 1 to `__boxed`, so a killed or
   hung-up launcher takes the whole box down. Kernel test kills the launcher
   and asserts the box's process is gone.
+
+What building shared boxes on 2026-09-13 found, each fixed at the root:
+
+- **A box's record lived where the agent writes.** `~/.wormhole/box.toml`
+  sat in the home, readable and writable from inside the box (checked from
+  a running alphaca box). A session could rewrite `workspace`, and the
+  panel's Enter then mounted that path; or `source`, so another role's
+  start resumed its home. Every rule that read the record trusted the
+  hostile side. The record is host-side now, beside the lock, for the
+  lock's own reason, and an older one is moved out at the next start.
+- **`--id` rebuilt a box's identity from where it was typed.** The key was
+  the cwd's basename plus the id, and the recipe was the cwd's manifest,
+  written over the record: a role box named from a folder with its own
+  `wormhole.toml` became a workspace box. The key is now found by id and
+  the recipe is the one the record names.
+- **`gc --delete` unlinked a held build lock.** One directory holds box
+  claims and build claims, and the verdict knew only the first, so a
+  build's lock read as a box that was gone. `gc::lock_verdict` now knows
+  both kinds.
 
 ## Next — what to build now
 

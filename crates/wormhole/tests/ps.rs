@@ -4,7 +4,9 @@
 use std::path::Path;
 use std::process::Output;
 
-use wormhole_core::{home, registry};
+use wormhole_core::registry;
+
+mod common;
 
 fn ps(data_home: &Path) -> Output {
     run_ps(data_home, &["ps"])
@@ -23,23 +25,11 @@ fn run_ps(data_home: &Path, args: &[&str]) -> Output {
 }
 
 fn write_home(data_home: &Path, key: &str, id: &str) {
-    let record = home::Record {
-        id: id.to_owned(),
-        workspace: std::path::PathBuf::from("/home/me/proj"),
-        role: Some("alphaca".to_owned()),
-        source: Some("/home/me/roles/alphaca".to_owned()),
-        alias: Some("api".to_owned()),
-        name: Some("architect".to_owned()),
-        agent: Some("claude".to_owned()),
-        created_unix: 1,
-        started_unix: 2,
-    };
-    let file = data_home
-        .join("wormhole/homes")
-        .join(key)
-        .join(home::RECORD);
-    std::fs::create_dir_all(file.parent().expect("record dir")).expect("home");
-    std::fs::write(&file, home::to_toml(&record).expect("toml")).expect("record written");
+    let mut record = common::a_record(Path::new("/home/me/proj"), id, Some("api"));
+    record.key = key.to_owned();
+    record.role = Some("alphaca".to_owned());
+    record.source = Some("/home/me/roles/alphaca".to_owned());
+    common::keep_box(data_home, &record);
 }
 
 fn write_entry(data_home: &Path, pid: u32) {
@@ -47,6 +37,7 @@ fn write_entry(data_home: &Path, pid: u32) {
     std::fs::create_dir_all(&dir).expect("box dir");
     let entry = registry::Entry {
         box_id: "0123456789ab".to_owned(),
+        key: None,
         pid,
         workspace: std::path::PathBuf::from("/home/me/proj"),
         image: "/data/img".to_owned(),

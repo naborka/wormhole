@@ -192,7 +192,8 @@ A BOX
   Its own $HOME, kept between runs: history, logins, installed tools. The
   root is a fresh copy of the image, deleted on exit — nothing outside
   $HOME survives. One folder holds as many boxes as you make; `--as`
-  names one, and id or name work everywhere a box is taken.
+  names one, and id or name work everywhere a box is taken. --id starts a
+  role's box in any folder; resume = "anywhere" lets a bare `box` do it.
 
 "#;
 
@@ -232,6 +233,7 @@ MANIFEST
   model = "claude-opus-5"           # the way this agent reads a model
   instructions = "ROLE.md"          # added to the built-in instructions
   preflight = "hooks/setup.sh"      # runs in the box before the agent
+  resume = "anywhere"               # one box for every folder; default "here"
 
   [access]                          # baseline: this folder, no login
   credentials = "none"              # or "copy" / "share" — see above
@@ -281,6 +283,7 @@ THE HOOK
 
   Warn and go on when an extra fails. exit 1 only when the CLI itself is
   missing: a failing hook stops the box. No secrets here; use [env] ask.
+  Skills, MCP and plugins stay in $HOME: install them once, behind a stamp.
 "#;
 
 const UPDATE: &str = r#"
@@ -312,6 +315,7 @@ WHERE THINGS ARE
   ~/.config/wormhole/roles/         installed roles
   ~/.config/wormhole/secrets.toml   what `ask` kept; yours, 0600
   ~/.local/share/wormhole/homes/    one kept $HOME per box
+  ~/.local/share/wormhole/records/  where each box ran, its role and name
   ~/.local/share/wormhole/images/   built images, by recipe digest
 
 EXIT  0 did it  ·  1 refused, and said why  ·  2 the command was wrong
