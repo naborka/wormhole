@@ -104,10 +104,15 @@ impl Record {
         self
     }
 
+    /// Every workspace this box has run in, the latest first.
+    pub fn workspaces(&self) -> impl Iterator<Item = &Path> {
+        std::iter::once(self.workspace.as_path()).chain(self.earlier.iter().map(PathBuf::as_path))
+    }
+
     /// Whether this box has ever run in `here`.
     #[must_use]
     pub fn serves(&self, here: &Path) -> bool {
-        self.workspace == here || self.earlier.iter().any(|workspace| workspace == here)
+        self.workspaces().any(|workspace| workspace == here)
     }
 
     /// A wormhole once wrote a start's name into `source` and its role's
@@ -243,7 +248,7 @@ pub fn target(
     }
     let answering: Vec<&Record> = records
         .iter()
-        .filter(|record| answers_to(&record.id, record.alias.as_deref(), wanted))
+        .filter(|record| record.alias.as_deref() == Some(wanted))
         .collect();
     let ran_here: Vec<&Record> = answering
         .iter()
@@ -345,49 +350,56 @@ pub fn resumable<'a>(
     wanted: Wanted<'_>,
     resume: Resume,
 ) -> Vec<&'a Record> {
-    let recent = |a: &&Record, b: &&Record| {
-        b.started_unix
-            .cmp(&a.started_unix)
-            .then_with(|| a.id.cmp(&b.id))
-    };
     let (mut found, mut elsewhere): (Vec<&Record>, Vec<&Record>) = records
         .iter()
         .filter(|record| record.is_role(wanted))
         .partition(|record| record.serves(here));
-    found.sort_by(recent);
+    found.sort_by(|a, b| recent(a, b));
     if resume == Resume::Anywhere && wanted.source.is_some() {
         elsewhere.retain(|record| record.source.is_some());
-        elsewhere.sort_by(recent);
+        elsewhere.sort_by(|a, b| recent(a, b));
         found.extend(elsewhere);
     }
     found
 }
 
-/// Why a start that named this box cannot run it in `here` from the
-/// recipe it resolved, or `None` when it can.
-///
-/// A box made from a workspace's own manifest runs only there: its recipe
-/// is that file. A role box runs wherever it is named, and only as the
-/// role it was made from. A record from before roles had an identity is
-/// the one exception: the start fills it in.
-pub fn refused_by_name(record: &Record, here: &Path, wanted: Wanted<'_>) -> Option<String> {
-    let id = &record.id;
-    match (record.source.as_deref(), record.role.is_some()) {
-        (None, false) if record.workspace != here => Some(format!(
-            "box {id} is made from {}'s own wormhole.toml, so it runs only there",
+/// Most recently started first, then by id, so boxes that never ran still
+/// have one order. Resume order and listing order are this one order.
+fn recent(a: &Record, b: &Record) -> std::cmp::Ordering {
+    b.started_unix
+        .cmp(&a.started_unix)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// Why a start that named this box cannot run it in `here` at all, asked
+/// before any recipe is read: a box made from a workspace's own manifest
+/// runs only there, because its recipe is that file.
+pub fn refused_elsewhere(record: &Record, here: &Path) -> Option<String> {
+    (record.role.is_none() && record.source.is_none() && record.workspace != here).then(|| {
+        format!(
+            "box {} is made from {}'s own wormhole.toml, so it runs only there",
+            record.id,
             record.workspace.display()
+        )
+    })
+}
+
+/// Why a start that named this box cannot run it from the recipe it
+/// resolved, whose role identity is `source`: a box runs only as the
+/// recipe it was made from. A record from before roles had an identity is
+/// the one exception; the start fills it in.
+pub fn refused_as(record: &Record, source: Option<&str>) -> Option<String> {
+    let id = &record.id;
+    match (record.source.as_deref(), record.role.is_some(), source) {
+        (Some(have), _, Some(asked)) if have == asked => None,
+        (Some(have), _, Some(asked)) => Some(format!("box {id} runs {have}, not {asked}")),
+        (Some(have), _, None) => Some(format!(
+            "box {id} runs {have}, not this workspace's own wormhole.toml"
         )),
-        (None, false) => wanted.source.map(|asked| {
-            format!("box {id} is made from this workspace's own wormhole.toml, not {asked}")
-        }),
-        (Some(have), _) => match wanted.source {
-            Some(asked) if asked == have => None,
-            Some(asked) => Some(format!("box {id} runs {have}, not {asked}")),
-            None => Some(format!(
-                "box {id} runs {have}, not this workspace's own wormhole.toml"
-            )),
-        },
-        (None, true) => None,
+        (None, false, Some(asked)) => Some(format!(
+            "box {id} is made from its workspace's own wormhole.toml, not {asked}"
+        )),
+        (None, false, None) | (None, true, _) => None,
     }
 }
 
@@ -426,10 +438,10 @@ pub fn resume_in(
     if record.serves(here) && exists(here) {
         return Ok(here.to_owned());
     }
-    std::iter::once(&record.workspace)
-        .chain(&record.earlier)
+    record
+        .workspaces()
         .find(|workspace| exists(workspace))
-        .cloned()
+        .map(Path::to_path_buf)
         .ok_or_else(|| {
             format!(
                 "no workspace box {id} ran in exists any more; \
@@ -485,11 +497,7 @@ pub fn scan(mut kept: Vec<Record>, live: &[crate::registry::Entry]) -> Vec<Listi
         .map(Record::from_entry)
         .collect();
     kept.extend(unrecorded);
-    kept.sort_by(|a, b| {
-        b.started_unix
-            .cmp(&a.started_unix)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    kept.sort_by(recent);
     kept.into_iter()
         .map(|record| Listing {
             running: running.get(record.id.as_str()).copied(),
@@ -1143,27 +1151,22 @@ mod tests {
     #[test]
     fn a_role_box_named_from_another_workspace_runs_there_as_its_own_role_only() {
         let kept = role_box("0123456789ab", "/a", 1);
-        assert_eq!(refused_by_name(&kept, Path::new("/w"), ALPHACA), None);
-        let java = Wanted {
-            source: Some("dir:/roles/java"),
-            typed: Some("java"),
-            run: None,
-        };
-        let refused = refused_by_name(&kept, Path::new("/w"), java).expect("refused");
+        assert_eq!(refused_elsewhere(&kept, Path::new("/w")), None);
+        assert_eq!(refused_as(&kept, ALPHACA.source), None);
+        let refused = refused_as(&kept, Some("dir:/roles/java")).expect("refused");
         assert!(refused.contains("dir:/roles/alphaca"), "{refused}");
         assert!(refused.contains("dir:/roles/java"), "{refused}");
+        assert!(refused_as(&kept, None).is_some());
     }
 
     #[test]
     fn a_box_made_from_a_workspace_manifest_runs_only_there() {
         let kept = record("0123456789ab", "/a", None, 1);
-        let refused = refused_by_name(&kept, Path::new("/w"), Wanted::default()).expect("refused");
+        let refused = refused_elsewhere(&kept, Path::new("/w")).expect("refused");
         assert!(refused.contains("/a"), "{refused}");
-        assert_eq!(
-            refused_by_name(&kept, Path::new("/a"), Wanted::default()),
-            None
-        );
-        assert!(refused_by_name(&kept, Path::new("/a"), ALPHACA).is_some());
+        assert_eq!(refused_elsewhere(&kept, Path::new("/a")), None);
+        assert_eq!(refused_as(&kept, None), None);
+        assert!(refused_as(&kept, ALPHACA.source).is_some());
     }
 
     /// What `--id` and the panel start from when no `--role` is typed: the

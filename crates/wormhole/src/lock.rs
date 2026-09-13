@@ -7,15 +7,12 @@ use nix::fcntl::{Flock, FlockArg};
 use wormhole_core::manifest::Resume;
 use wormhole_core::{home, paths};
 
-use crate::{fail, home_keys, kept_boxes, report_problems};
+use crate::{fail, kept_boxes, report_problems};
 
-/// A box this process holds the claim on, the key its store entries are
-/// named by, and its record when it has a readable one. Found, never
-/// rebuilt from where the start stands.
+/// A box this process holds the claim on. Its key is found, never rebuilt
+/// from where the start stands.
 pub(crate) struct Claim {
-    pub(crate) id: String,
-    pub(crate) key: String,
-    pub(crate) record: Option<home::Record>,
+    pub(crate) target: home::Target,
     pub(crate) lock: Flock<std::fs::File>,
 }
 
@@ -37,17 +34,11 @@ pub(crate) struct Claim {
 /// lock's file holds the pid of whoever took it, so a refusal can name
 /// them. That text is a courtesy; the lock is the claim.
 pub(crate) fn claim_named(data_home: &Path, here: &Path, wanted: &str) -> Claim {
-    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-    report_problems(&problems);
-    let target =
-        home::target(&kept, &home_keys(data_home), here, wanted).unwrap_or_else(|e| fail(&e));
+    let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&kept.problems);
+    let target = home::target(&kept.records, &kept.keys, here, wanted).unwrap_or_else(|e| fail(&e));
     match claim_key(data_home, &target.key) {
-        Some(lock) => Claim {
-            id: target.id,
-            key: target.key,
-            record: target.record,
-            lock,
-        },
+        Some(lock) => Claim { target, lock },
         None => fail(&format!(
             "box {} is already running{}",
             target.id,
@@ -68,10 +59,10 @@ pub(crate) fn claim_free(
 ) -> Claim {
     // A home that cannot be read is a box that cannot be resumed, and the
     // silent answer to that is a *new* box. Say so before starting one.
-    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-    report_problems(&problems);
+    let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&kept.problems);
     if !new {
-        for record in home::resumable(&kept, here, wanted, resume) {
+        for record in home::resumable(&kept.records, here, wanted, resume) {
             if let Some(lock) = claim_key(data_home, &record.key) {
                 if record.serves(here) {
                     println!("box: {} (resumed)", record.id);
@@ -83,9 +74,11 @@ pub(crate) fn claim_free(
                     );
                 }
                 return Claim {
-                    id: record.id.clone(),
-                    key: record.key.clone(),
-                    record: Some(record.clone()),
+                    target: home::Target {
+                        id: record.id.clone(),
+                        key: record.key.clone(),
+                        record: Some(record.clone()),
+                    },
                     lock,
                 };
             }
@@ -96,7 +89,8 @@ pub(crate) fn claim_free(
     // the loser of a race simply takes the next one, so two `--new` at the
     // same instant get two boxes rather than one refusal. A home whose
     // record cannot be read still holds its id.
-    let mut taken: Vec<String> = home_keys(data_home)
+    let mut taken: Vec<String> = kept
+        .keys
         .iter()
         .filter_map(|key| paths::key_id(key))
         .map(str::to_owned)
@@ -107,9 +101,11 @@ pub(crate) fn claim_free(
         if let Some(lock) = claim_key(data_home, &key) {
             println!("box: {id} (new)");
             return Claim {
-                id,
-                key,
-                record: None,
+                target: home::Target {
+                    id,
+                    key,
+                    record: None,
+                },
                 lock,
             };
         }

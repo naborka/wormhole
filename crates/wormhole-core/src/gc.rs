@@ -121,21 +121,17 @@ pub fn lock_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> Ve
     if crate::paths::is_build_lock(stem) {
         return Verdict::Live("a build's claim, never a box's".to_owned());
     }
-    if kept.contains(stem) {
-        Verdict::Live("the box that claims it is still kept".to_owned())
-    } else {
-        Verdict::Dead("the box that claimed it is gone".to_owned())
-    }
+    kept_verdict(stem, kept)
 }
 
-/// Whether a box record still describes a box, from its file stem and
-/// the key of every kept home. The home is the box; a record without one
-/// describes nothing.
-pub fn record_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> Verdict {
+/// Whether a lock or a record still belongs to a box, from its file stem
+/// and the key of every kept home. The home is the box; without one there
+/// is nothing left to claim or describe.
+pub fn kept_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> Verdict {
     if kept.contains(stem) {
-        Verdict::Live("the box it describes is still kept".to_owned())
+        Verdict::Live("the box it belongs to is still kept".to_owned())
     } else {
-        Verdict::Dead("the box it described is gone".to_owned())
+        Verdict::Dead("the box it belonged to is gone".to_owned())
     }
 }
 
@@ -143,9 +139,8 @@ pub fn record_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> 
 /// it could be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recipe {
-    /// Made from its workspace's own manifest, so it runs only there.
-    Workspace,
-    /// A role that resumes its box only where it has run.
+    /// Resumed only where it has run: a role that says so, or a box made
+    /// from its workspace's own manifest.
     Here,
     /// A role that lets any workspace resume its box.
     Anywhere,
@@ -164,7 +159,7 @@ pub fn recipe(
     exists: impl Fn(&Path) -> bool,
 ) -> Recipe {
     if record.role.is_none() && record.source.is_none() {
-        return Recipe::Workspace;
+        return Recipe::Here;
     }
     if let Some(dir) = record.source.as_deref().and_then(crate::source::dir_of)
         && !exists(Path::new(dir))
@@ -218,7 +213,7 @@ pub fn home_verdict(evidence: Option<Evidence<'_>>) -> Verdict {
             "{workspace} and every other workspace it ran in are gone, and its role \
              could not be read to say whether another may resume it"
         )),
-        Recipe::Workspace | Recipe::Here => Verdict::Dead(format!(
+        Recipe::Here => Verdict::Dead(format!(
             "{workspace} no longer exists, nor any other workspace it ran in"
         )),
     }
@@ -363,16 +358,14 @@ mod tests {
     /// for, and nothing ever reclaims it.
     #[test]
     fn a_home_whose_workspace_is_gone_is_dead() {
-        for recipe in [Recipe::Workspace, Recipe::Here] {
-            let verdict = home_verdict(kept(false, recipe));
-            assert!(taken(&verdict, LOOK), "{verdict:?}");
-            assert!(verdict.reason().contains("/home/me/proj"));
-        }
+        let verdict = home_verdict(kept(false, Recipe::Here));
+        assert!(taken(&verdict, LOOK), "{verdict:?}");
+        assert!(verdict.reason().contains("/home/me/proj"));
     }
 
     #[test]
     fn a_home_whose_workspace_is_still_there_is_live() {
-        for recipe in [Recipe::Workspace, Recipe::Here, Recipe::Unread] {
+        for recipe in [Recipe::Here, Recipe::Unread] {
             assert!(!taken(&home_verdict(kept(true, recipe)), WIDE));
         }
     }
@@ -416,7 +409,7 @@ mod tests {
         ))
         .expect("valid");
         let all = |_: &Path| true;
-        assert_eq!(recipe(&made_here, None, all), Recipe::Workspace);
+        assert_eq!(recipe(&made_here, None, all), Recipe::Here);
         let role = crate::home::Record {
             role: Some("alphaca".to_owned()),
             source: Some("dir:/roles/alphaca".to_owned()),
@@ -454,8 +447,8 @@ mod tests {
     #[test]
     fn a_record_whose_home_is_gone_is_dead() {
         let kept = keys(&["proj-0123456789ab"]);
-        assert!(taken(&record_verdict("gone-0123456789ab", &kept), LOOK));
-        assert!(!taken(&record_verdict("proj-0123456789ab", &kept), WIDE));
+        assert!(taken(&kept_verdict("gone-0123456789ab", &kept), LOOK));
+        assert!(!taken(&kept_verdict("proj-0123456789ab", &kept), WIDE));
     }
 
     fn keys(names: &[&str]) -> std::collections::BTreeSet<String> {

@@ -9,14 +9,6 @@ use wormhole_core::{manifest, paths, registry};
 mod common;
 use common::{a_record as record, keep_box as keep, said, wormhole};
 
-/// A workspace that exists, because `gc` asks whether a box's tree is
-/// still there before it reads the recipe in it.
-fn workspace(under: &Path, name: &str) -> PathBuf {
-    let dir = under.join(name);
-    std::fs::create_dir_all(&dir).expect("workspace");
-    dir.canonicalize().expect("canonical workspace")
-}
-
 /// The id a workspace's first box gets, so a test names boxes the way
 /// wormhole does rather than inventing hex.
 fn first_id(workspace: &Path) -> String {
@@ -27,7 +19,7 @@ fn first_id(workspace: &Path) -> String {
 fn remove_takes_the_home_and_everything_in_it() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, None));
 
@@ -46,7 +38,7 @@ fn remove_takes_the_home_and_everything_in_it() {
 fn gc_reclaims_a_record_whose_home_is_gone() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, None));
     std::fs::remove_dir_all(&home).expect("home gone");
@@ -62,7 +54,7 @@ fn gc_reclaims_a_record_whose_home_is_gone() {
 fn remove_takes_the_name_you_gave_a_box() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, Some("api")));
 
@@ -75,7 +67,7 @@ fn remove_takes_the_name_you_gave_a_box() {
 fn remove_takes_several_boxes_at_once() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let homes: Vec<PathBuf> = (0..2)
         .map(|n| keep(data, &record(&ws, &paths::box_id(&ws, n), None)))
         .collect();
@@ -94,7 +86,7 @@ fn remove_takes_several_boxes_at_once() {
 fn remove_names_every_box_before_it_removes_any() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, None));
 
@@ -112,7 +104,7 @@ fn remove_refuses_a_running_box_and_says_what_to_do_first() {
 
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, None));
 
@@ -140,7 +132,7 @@ fn remove_refuses_a_running_box_and_says_what_to_do_first() {
 fn remove_takes_a_box_whose_record_cannot_be_read() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = paths::home_dir(data, &paths::box_key(&ws, &id));
     std::fs::create_dir_all(&home).expect("home");
@@ -157,7 +149,7 @@ fn remove_takes_a_box_whose_record_cannot_be_read() {
 fn rename_refuses_a_box_that_has_no_record_and_says_what_does() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     std::fs::create_dir_all(paths::home_dir(data, &paths::box_key(&ws, &id))).expect("home");
 
@@ -179,7 +171,7 @@ fn rename_refuses_a_box_that_has_no_record_and_says_what_does() {
 fn reset_empties_the_home_and_keeps_the_box() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, Some("api")));
 
@@ -196,7 +188,7 @@ fn reset_empties_the_home_and_keeps_the_box() {
 fn rename_sets_the_name_without_starting_the_box() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let home = keep(data, &record(&ws, &id, None));
 
@@ -213,7 +205,7 @@ fn rename_sets_the_name_without_starting_the_box() {
 fn rename_refuses_a_name_another_box_here_already_answers_to() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     keep(data, &record(&ws, &paths::box_id(&ws, 0), Some("api")));
     let second = paths::box_id(&ws, 1);
     keep(data, &record(&ws, &second, None));
@@ -248,7 +240,7 @@ fn put_image(data_home: &Path, digest: &str) -> PathBuf {
 fn gc_proves_an_image_no_box_starts_from_is_unreferenced() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let used = recipe(&ws);
     keep(data, &record(&ws, &first_id(&ws), None));
     let live = put_image(data, &used);
@@ -280,7 +272,7 @@ fn gc_proves_an_image_no_box_starts_from_is_unreferenced() {
 fn gc_proves_nothing_while_a_box_recipe_cannot_be_read() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     // A workspace that is still there and holds no manifest at all.
     keep(data, &record(&ws, &first_id(&ws), None));
     let image = put_image(data, &"b".repeat(64));
@@ -297,7 +289,7 @@ fn gc_proves_nothing_while_a_box_recipe_cannot_be_read() {
 fn gc_keeps_the_image_a_running_box_is_using() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     recipe(&ws);
     let digest = "b".repeat(64);
     let image = put_image(data, &digest);
@@ -333,7 +325,7 @@ fn gc_keeps_the_image_a_running_box_is_using() {
 fn gc_reclaims_a_lock_whose_box_is_gone() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let id = first_id(&ws);
     let orphan = paths::lock_file(data, &paths::box_key(&ws, &id));
     std::fs::create_dir_all(orphan.parent().expect("locks dir")).expect("locks dir");
@@ -347,24 +339,9 @@ fn gc_reclaims_a_lock_whose_box_is_gone() {
 /// A role box whose projects are all gone, of a role any workspace may
 /// resume from.
 fn a_role_box_nowhere(data: &Path, resume: &str) -> (PathBuf, PathBuf) {
-    let role = data.join("role");
-    std::fs::create_dir_all(&role).expect("role");
-    std::fs::write(
-        role.join("wormhole.toml"),
-        format!(
-            "version = 1\n[agent]\nrun = \"claude\"\n{resume}[image]\n\
-             base = \"https://x.test/r.tar.gz\"\nbase_sha256 = \"{}\"\n",
-            "a".repeat(64)
-        ),
-    )
-    .expect("role manifest");
-    let role = role.canonicalize().expect("canonical role");
-    let gone = data.join("gone");
-    let id = paths::box_id(&gone, 0);
-    let mut kept = record(&gone, &id, None);
-    kept.role = Some(role.display().to_string());
-    kept.source = Some(wormhole_core::source::dir_source(&role));
-    (keep(data, &kept), role)
+    let role = common::a_role(&data.join("role"), resume);
+    let (_, home) = common::a_role_box(data, &data.join("gone"), &role);
+    (home, role)
 }
 
 /// Every project it ran in may be gone; the next one started with its
@@ -373,7 +350,7 @@ fn a_role_box_nowhere(data: &Path, resume: &str) -> (PathBuf, PathBuf) {
 fn gc_keeps_a_shared_box_whose_workspaces_are_gone() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let (home, _role) = a_role_box_nowhere(data, "resume = \"anywhere\"\n");
 
     let output = wormhole(data, &ws, &["gc", "--delete"]);
@@ -387,7 +364,7 @@ fn gc_keeps_a_shared_box_whose_workspaces_are_gone() {
 fn gc_takes_a_box_whose_role_is_gone() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let (home, role) = a_role_box_nowhere(data, "resume = \"anywhere\"\n");
     std::fs::remove_dir_all(&role).expect("role gone");
 
@@ -405,7 +382,7 @@ fn gc_never_takes_a_build_claim() {
 
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path();
-    let ws = workspace(data, "proj");
+    let ws = common::a_dir(data, "proj");
     let lock = paths::build_lock(data, &"c".repeat(64));
     std::fs::create_dir_all(lock.parent().expect("locks dir")).expect("locks dir");
     let file = std::fs::File::create(&lock).expect("lock file");

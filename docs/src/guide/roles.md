@@ -76,12 +76,13 @@ Four rules:
    skills is still a box.
 5. **Do once what only needs doing once.** The hook runs on every start,
    but skills, MCP servers and plugins land in the kept home and stay
-   there. Guard them with a stamp named by the hook's own digest, written
-   only when every step worked: an edit to the hook runs them again, a
-   warning retries them next start, and nothing else does.
+   there. Guard them with a stamp named by the digest of the part it
+   guards, written only when every step worked: an edit to that part runs
+   them again, a warning retries them next start, and nothing else does.
 
    ```sh
-   stamp="$HOME/.cache/my-role/setup-$(sha256sum "$0" | cut -c1-16)"
+   # once
+   stamp="$HOME/.cache/my-role/setup-$(sed -n '/^# once$/,$p' "$0" | sha256sum | cut -c1-16)"
    [ -f "$stamp" ] && exit 0
    # ... skills, MCP, plugins; any failure leaves ok=0 ...
    [ "$ok" -eq 1 ] && mkdir -p "$(dirname "$stamp")" && : >"$stamp"

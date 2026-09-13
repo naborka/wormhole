@@ -130,10 +130,8 @@ pub fn lock_file(data_home: &Path, key: &str) -> PathBuf {
     locks_dir(data_home).join(format!("{key}.lock"))
 }
 
-/// What wormhole knows about a box: which workspaces it ran in, its role,
-/// its product and its alias. Beside the lock and never in the home, for
-/// the lock's reason: the home is the agent's, and an identity the agent
-/// can rewrite is not an identity.
+/// A box's record, beside its lock and never in its home; see
+/// [`crate::home`].
 pub fn record_file(data_home: &Path, key: &str) -> PathBuf {
     records_dir(data_home).join(format!("{key}.toml"))
 }

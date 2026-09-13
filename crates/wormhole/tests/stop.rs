@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use wormhole_core::{home, paths, registry};
+use wormhole_core::{paths, registry};
 
 mod common;
 use common::{keep_box, on_a_terminal};
@@ -59,19 +59,9 @@ fn a_running_box(data_home: &Path, pid: u32) {
 
 /// The kept home behind that box, without which nothing lists it.
 fn a_kept_home(data_home: &Path) {
-    let record = home::Record {
-        key: paths::box_key(data_home, BOX_ID),
-        id: BOX_ID.to_owned(),
-        workspace: data_home.to_owned(),
-        earlier: Vec::new(),
-        role: None,
-        source: None,
-        alias: None,
-        name: None,
-        agent: None,
-        created_unix: 1,
-        started_unix: 2,
-    };
+    let mut record = common::a_record(data_home, BOX_ID, None);
+    record.name = None;
+    record.agent = None;
     keep_box(data_home, &record);
 }
 
@@ -222,19 +212,10 @@ fn a_name_is_kept_across_starts_and_never_taken_twice() {
     .expect("a workspace manifest");
 
     // A second box here, under the same name, is refused by name.
-    let other = home::Record {
-        key: paths::box_key(temp.path(), "aabbccddeeff"),
-        id: "aabbccddeeff".to_owned(),
-        workspace: temp.path().to_owned(),
-        earlier: Vec::new(),
-        role: None,
-        source: None,
-        alias: Some(ALIAS.to_owned()),
-        name: None,
-        agent: None,
-        created_unix: 1,
-        started_unix: 3,
-    };
+    let mut other = common::a_record(temp.path(), "aabbccddeeff", Some(ALIAS));
+    other.name = None;
+    other.agent = None;
+    other.started_unix = 3;
     keep_box(temp.path(), &other);
 
     let refused = Command::new(env!("CARGO_BIN_EXE_wormhole"))

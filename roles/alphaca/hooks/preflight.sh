@@ -104,8 +104,8 @@ fi
 # Everything below only needs doing once per home: skills, rtk's hook,
 # context7 and plugins all live in the kept home, and a box resumed in
 # another project keeps the same home. So it runs again only when this
-# hook changes, or when a warning left it unfinished.
-stamp="$HOME/.cache/alphaca/setup-$(sha256sum "$0" | cut -c1-16)"
+# part of the hook changes, or when a warning left it unfinished.
+stamp="$HOME/.cache/alphaca/setup-$(sed -n '/^# Everything below only needs doing once/,$p' "$0" | sha256sum | cut -c1-16)"
 if [ -f "$stamp" ]; then
     echo "[preflight] setup already done by this hook; delete $stamp to redo it"
     exit 0

@@ -22,7 +22,7 @@ folder. The price is reach: one home holds every project's history, so
 share a box only between projects you would trust with each other.
 
 The alphaca hook now sets up skills, MCP and plugins once per box, and
-again only when the hook changes. Before, every start fetched all three
+again only when that part of the hook changes. Before, every start fetched all three
 skill repositories again, about three seconds each.
 
 ### Fixed: a box's record lived where the agent could rewrite it

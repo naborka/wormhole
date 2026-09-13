@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Output;
 
-use wormhole_core::{home, registry};
+use wormhole_core::registry;
 
 mod common;
 
@@ -25,19 +25,10 @@ fn run_ps(data_home: &Path, args: &[&str]) -> Output {
 }
 
 fn write_home(data_home: &Path, key: &str, id: &str) {
-    let record = home::Record {
-        key: key.to_owned(),
-        id: id.to_owned(),
-        workspace: std::path::PathBuf::from("/home/me/proj"),
-        earlier: Vec::new(),
-        role: Some("alphaca".to_owned()),
-        source: Some("/home/me/roles/alphaca".to_owned()),
-        alias: Some("api".to_owned()),
-        name: Some("architect".to_owned()),
-        agent: Some("claude".to_owned()),
-        created_unix: 1,
-        started_unix: 2,
-    };
+    let mut record = common::a_record(Path::new("/home/me/proj"), id, Some("api"));
+    record.key = key.to_owned();
+    record.role = Some("alphaca".to_owned());
+    record.source = Some("/home/me/roles/alphaca".to_owned());
     common::keep_box(data_home, &record);
 }
 

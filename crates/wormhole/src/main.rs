@@ -228,24 +228,6 @@ fn pick_product(names: &[String]) -> String {
     }
 }
 
-/// Refuses a start that named a box it cannot run in `here` from the
-/// recipe with this `source`.
-fn refuse_named(record: Option<&home::Record>, here: &Path, source: Option<&str>) {
-    if let Some(record) = record
-        && let Some(refusal) = home::refused_by_name(
-            record,
-            here,
-            home::Wanted {
-                source,
-                typed: None,
-                run: None,
-            },
-        )
-    {
-        fail(&refusal);
-    }
-}
-
 /// Runs this workspace's agent in a fresh copy of its image. The copy is
 /// thrown away afterwards, so nothing the agent does can reach the image
 /// the next box starts from. Any command after `--` replaces the agent.
@@ -263,34 +245,44 @@ fn run_box(args: &[String]) -> ! {
         .id
         .as_deref()
         .map(|id| lock::claim_named(&data_home, &workspace, id));
-    let named_record = named.as_ref().and_then(|claim| claim.record.clone());
+    let named_record = named
+        .as_ref()
+        .and_then(|claim| claim.target.record.as_ref());
 
     // A named box starts from the role it was made from, never from
     // whatever the directory it was named in holds.
+    if let Some(refusal) =
+        named_record.and_then(|record| home::refused_elsewhere(record, &workspace))
+    {
+        fail(&refusal);
+    }
     let role = parsed
         .role
         .clone()
-        .or_else(|| named_record.as_ref().and_then(home::Record::role_ref));
-    if role.is_none() {
-        refuse_named(named_record.as_ref(), &workspace, None);
-    }
+        .or_else(|| named_record.and_then(home::Record::role_ref));
 
     // Which role this is has to be settled before the search for a box to
     // resume: `--role alphaca` and `--role ./roles/alphaca` name one role,
     // and only resolving them says so.
     let resolved = roles::resolve_manifest(role.as_deref());
-    refuse_named(
-        named_record.as_ref(),
-        &workspace,
-        resolved.source.as_deref(),
-    );
+    if let Some(refusal) =
+        named_record.and_then(|record| home::refused_as(record, resolved.source.as_deref()))
+    {
+        fail(&refusal);
+    }
+    // A box made from a workspace's own file runs only in that workspace,
+    // and a cloned repository must not decide how far its box reaches.
+    if resolved.source.is_none() && resolved.manifest.agent.resume == manifest::Resume::Anywhere {
+        fail(&format!(
+            "this workspace's {MANIFEST} says resume = \"anywhere\", but a box made \
+             from a workspace's own {MANIFEST} runs only there; that line belongs in a role"
+        ));
+    }
 
     // `--id` already names the box, so its recorded product is the one
     // this start runs unless `--run` says otherwise — and a disagreement
     // is a refusal, not a silent switch of the home's agent.
-    let recorded = named_record
-        .as_ref()
-        .and_then(|record| record.agent.clone());
+    let recorded = named_record.and_then(|record| record.agent.clone());
     let mut requested = parsed.run.clone().or(recorded.clone());
     let roles::Resolved {
         manifest,
@@ -329,10 +321,13 @@ fn run_box(args: &[String]) -> ! {
     // Held until this process exits — `exit` runs no destructor, so the
     // kernel is what ends it.
     let lock::Claim {
-        id: box_id,
-        key: box_key,
+        target:
+            home::Target {
+                id: box_id,
+                key: box_key,
+                ..
+            },
         lock: _claim,
-        ..
     } = named.unwrap_or_else(|| {
         lock::claim_free(
             &data_home,
@@ -503,14 +498,13 @@ fn run_box(args: &[String]) -> ! {
 /// rest. The homes directory itself is the exception, for the same reason
 /// the registry is: nothing kept there could be listed, and "no boxes"
 /// would be a lie.
-fn kept_boxes(data_home: &Path) -> Result<(Vec<home::Record>, Vec<String>), String> {
+fn kept_boxes(data_home: &Path) -> Result<Kept, String> {
     let homes = paths::homes_dir(data_home);
-    let mut found = Vec::new();
-    let mut problems = Vec::new();
+    let mut kept = Kept::default();
     let dir = match std::fs::read_dir(&homes) {
         Ok(dir) => dir,
         // Nothing has been kept yet, which is not a problem with anything.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((found, problems)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(kept),
         Err(e) => return Err(format!("cannot read {}: {e}", homes.display())),
     };
     for entry in dir.flatten() {
@@ -518,11 +512,22 @@ fn kept_boxes(data_home: &Path) -> Result<(Vec<home::Record>, Vec<String>), Stri
             continue;
         };
         match read_record(data_home, &key) {
-            Ok(record) => found.push(record),
-            Err(problem) => problems.push(problem),
+            Ok(record) => kept.records.push(record),
+            Err(problem) => kept.problems.push(problem),
         }
+        kept.keys.push(key);
     }
-    Ok((found, problems))
+    Ok(kept)
+}
+
+/// One walk of the homes: the records that could be read, the key of
+/// every home — `home::target` names a box whose record cannot be read by
+/// it — and what could not be read.
+#[derive(Default)]
+pub(crate) struct Kept {
+    pub(crate) records: Vec<home::Record>,
+    pub(crate) keys: Vec<String>,
+    pub(crate) problems: Vec<String>,
 }
 
 /// One box's record, or why it could not be read.
@@ -685,39 +690,33 @@ fn gc_cmd(args: &[String]) -> ! {
         };
         let record = read_record(&data_home, &key).ok();
         keys.insert(key);
-        let verdict = match &record {
-            // A home that could not be read is a recipe that could not be
-            // asked, so it counts against completeness like an unreadable
-            // one.
-            None => {
-                complete = false;
-                gc::home_verdict(None)
-            }
-            Some(record) => {
-                let read = read_recipe(record, &mut recipes);
-                let workspace = record.workspace.display().to_string();
-                let verdict = gc::home_verdict(Some(gc::Evidence {
-                    workspace: &workspace,
-                    any_workspace_exists: std::iter::once(&record.workspace)
-                        .chain(&record.earlier)
-                        .any(|ran_in| ran_in.is_dir()),
-                    recipe: gc::recipe(record, read.as_ref(), Path::is_dir),
-                }));
-                // A dead box keeps nothing alive. Any other whose recipe
-                // could not be read may be the very one that references an
-                // image, so the answer says so rather than proving
-                // something on a gap in the evidence.
-                if !matches!(verdict, gc::Verdict::Dead(_)) {
-                    match &read {
-                        Some(manifest) => {
-                            referenced.extend(manifest::referenced_digests(manifest));
-                        }
-                        None => complete = false,
-                    }
-                }
-                verdict
-            }
+        // A home that could not be read is a recipe that could not be
+        // asked, so it counts against completeness like an unreadable one.
+        let Some(record) = record else {
+            complete = false;
+            items.push(gc::Item {
+                bytes: tree_bytes(&path),
+                verdict: gc::home_verdict(None),
+                path,
+            });
+            continue;
         };
+        let read = read_recipe(&record, &mut recipes);
+        let workspace = record.workspace.display().to_string();
+        let verdict = gc::home_verdict(Some(gc::Evidence {
+            workspace: &workspace,
+            any_workspace_exists: record.workspaces().any(Path::is_dir),
+            recipe: gc::recipe(&record, read, Path::is_dir),
+        }));
+        // A dead box keeps nothing alive. Any other whose recipe could not
+        // be read may be the very one that references an image, so the
+        // answer says so rather than proving something on a gap in the
+        // evidence.
+        match read {
+            _ if matches!(verdict, gc::Verdict::Dead(_)) => {}
+            Some(manifest) => referenced.extend(manifest::referenced_digests(manifest)),
+            None => complete = false,
+        }
         items.push(gc::Item {
             bytes: tree_bytes(&path),
             verdict,
@@ -725,30 +724,26 @@ fn gc_cmd(args: &[String]) -> ! {
         });
     }
 
-    // A lock file is an empty claim token beside a home; the file's stem
-    // is exactly the key that home is named by, so the keys just gathered
+    // A lock and a record each belong to a home, and the file's stem is
+    // exactly the key that home is named by, so the keys just gathered
     // answer this without a stat each.
-    for entry in read_dir(&paths::locks_dir(&data_home)) {
-        let path = entry.path();
-        let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        items.push(gc::Item {
-            bytes: tree_bytes(&path),
-            verdict: gc::lock_verdict(key, &keys),
-            path,
-        });
-    }
-    for entry in read_dir(&paths::records_dir(&data_home)) {
-        let path = entry.path();
-        let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        items.push(gc::Item {
-            bytes: tree_bytes(&path),
-            verdict: gc::record_verdict(key, &keys),
-            path,
-        });
+    type Judge = fn(&str, &BTreeSet<String>) -> gc::Verdict;
+    let beside_homes: [(PathBuf, Judge); 2] = [
+        (paths::locks_dir(&data_home), gc::lock_verdict),
+        (paths::records_dir(&data_home), gc::kept_verdict),
+    ];
+    for (dir, verdict) in beside_homes {
+        for entry in read_dir(&dir) {
+            let path = entry.path();
+            let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            items.push(gc::Item {
+                bytes: tree_bytes(&path),
+                verdict: verdict(key, &keys),
+                path,
+            });
+        }
     }
 
     for (dir, what) in [
@@ -818,22 +813,19 @@ fn running_image(box_dir: &Path) -> Option<String> {
 /// for a confirm, and a listing that reaches the network or seizes the
 /// terminal is not a listing. Reading is all this needs, so reading is all
 /// it is allowed.
-fn read_recipe(
+fn read_recipe<'a>(
     record: &home::Record,
-    read: &mut BTreeMap<(Option<String>, PathBuf), Option<manifest::Manifest>>,
-) -> Option<manifest::Manifest> {
+    read: &'a mut BTreeMap<(Option<String>, Option<PathBuf>), Option<manifest::Manifest>>,
+) -> Option<&'a manifest::Manifest> {
     let role = record.role_ref();
-    let at = match role {
-        Some(_) => PathBuf::new(),
-        None => record.workspace.clone(),
-    };
+    let at = role.is_none().then(|| record.workspace.clone());
     read.entry((role, at))
         .or_insert_with_key(|(role, _)| {
             roles::try_resolve_manifest_in(&record.workspace, role.as_deref(), roles::Fetch::Never)
                 .ok()
                 .map(|resolved| resolved.manifest)
         })
-        .clone()
+        .as_ref()
 }
 
 /// A directory's entries, or none when it is not there yet. Every gc scan
@@ -1026,10 +1018,10 @@ fn tui() -> ! {
 /// `wormhole box` would pick — and everything the scan could not read.
 fn box_listings(data_home: &Path) -> Result<home::Scan, String> {
     let (live, mut problems) = live_boxes(data_home)?;
-    let (kept, unreadable) = kept_boxes(data_home)?;
-    problems.extend(unreadable);
+    let kept = kept_boxes(data_home)?;
+    problems.extend(kept.problems);
     Ok(home::Scan {
-        boxes: home::scan(kept, &live),
+        boxes: home::scan(kept.records, &live),
         problems,
     })
 }
@@ -1064,9 +1056,10 @@ fn panel_act(data_home: &Path, what: &tui::Act) -> Result<(), String> {
 /// opened — a box belongs to one tree, and starting it anywhere else
 /// would point its agent at a stranger's code.
 fn resume_from_panel(data_home: &Path, id: &str) -> ! {
-    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-    report_problems(&problems);
+    let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&kept.problems);
     let record = kept
+        .records
         .into_iter()
         .find(|record| record.id == id)
         .unwrap_or_else(|| fail(&format!("no box {id} any more")));
@@ -1193,18 +1186,6 @@ fn here() -> PathBuf {
         .unwrap_or_else(|e| fail(&format!("cannot read the working directory: {e}")))
 }
 
-/// Every home directory the store holds, by the key each is named by.
-///
-/// `home::target` needs these to name a box whose record cannot be read,
-/// and the walk is done once for a whole command line rather than once per
-/// name that missed.
-fn home_keys(data_home: &Path) -> Vec<String> {
-    read_dir(&paths::homes_dir(data_home))
-        .into_iter()
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect()
-}
-
 /// The boxes named on a command line, and what the scan could not read.
 ///
 /// Every name becomes a box before any of them is touched: half a list
@@ -1219,13 +1200,12 @@ fn home_keys(data_home: &Path) -> Vec<String> {
 type Found = (Vec<home::Target>, Vec<home::Record>, Vec<String>);
 
 fn find_targets(data_home: &Path, workspace: &Path, wanted: &[String]) -> Result<Found, String> {
-    let (kept, problems) = kept_boxes(data_home)?;
-    let keys = home_keys(data_home);
+    let kept = kept_boxes(data_home)?;
     let found = wanted
         .iter()
-        .map(|name| home::target(&kept, &keys, workspace, name))
+        .map(|name| home::target(&kept.records, &kept.keys, workspace, name))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((found, kept, problems))
+    Ok((found, kept.records, kept.problems))
 }
 
 /// The same, for a command: what the scan could not read is said on
@@ -1288,13 +1268,7 @@ impl<'a> Claimed<'a> {
     /// it is reused when the ordinal is, and `gc` reclaims the rest.
     fn remove(&self, data_home: &Path) -> Result<(), String> {
         image::remove(&paths::home_dir(data_home, &self.target.key))?;
-        match std::fs::remove_file(paths::record_file(data_home, &self.target.key)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!(
-                "cannot remove box {}'s record: {e}",
-                self.target.id
-            )),
-            _ => Ok(()),
-        }
+        image::remove(&paths::record_file(data_home, &self.target.key))
     }
 
     /// Empties the home and keeps the box's record.
@@ -1358,18 +1332,9 @@ fn write_box_record(data_home: &Path, record: &home::Record) -> Result<(), Strin
         home::to_toml(record)?,
     )?;
     let home = paths::home_dir(data_home, &record.key);
-    for legacy in [home::LEGACY_RECORD, home::LEGACY_STAMP] {
-        match std::fs::remove_file(home.join(legacy)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "cannot remove {}: {e}",
-                    home.join(legacy).display()
-                ));
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    [home::LEGACY_RECORD, home::LEGACY_STAMP]
+        .iter()
+        .try_for_each(|legacy| image::remove(&home.join(legacy)))
 }
 
 /// `wormhole remove <id|name>...`: take boxes away.
@@ -1428,11 +1393,11 @@ fn box_alias(
             .ok()
             .and_then(|record| record.alias);
     };
-    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-    report_problems(&problems);
+    let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&kept.problems);
     // The rule and the sentence both live beside `is_usable_alias`, so a
     // start, a rename and the panel give one answer to one question.
-    if let Some(taken) = home::alias_conflict(&kept, wanted, box_id) {
+    if let Some(taken) = home::alias_conflict(&kept.records, wanted, box_id) {
         fail(&home::alias_taken(wanted, &taken.id));
     }
     Some(wanted.to_owned())

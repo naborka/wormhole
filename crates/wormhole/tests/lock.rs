@@ -32,49 +32,16 @@ const REACHED_THE_IMAGE: &str = "no image for this manifest yet";
 
 mod common;
 
-/// A role whose recipe, like the workspace's above, names nothing, so a
-/// start says which recipe it read by the URL it then fails to fetch.
-fn role(dir: &Path, resume: &str) -> std::path::PathBuf {
-    std::fs::create_dir_all(dir).expect("role dir");
-    std::fs::write(
-        dir.join("wormhole.toml"),
-        format!(
-            "version = 1\n[agent]\nrun = \"claude\"\n{resume}\
-             [image]\nbase = \"file:///nothing/role-recipe.tar.gz\"\n\
-             base_sha256 = \"{}\"\n",
-            "0".repeat(64)
-        ),
-    )
-    .expect("role manifest");
-    dir.canonicalize().expect("canonical role")
-}
-
-/// A box of that role, kept as having last run in `ran_in`.
-fn a_role_box(data_home: &Path, ran_in: &Path, role: &Path) -> String {
-    let id = paths::box_id(ran_in, 0);
-    let mut record = common::a_record(ran_in, &id, None);
-    record.role = Some(role.display().to_string());
-    record.source = Some(wormhole_core::source::dir_source(role));
-    common::keep_box(data_home, &record);
-    id
-}
-
-fn a_dir(under: &Path, name: &str) -> std::path::PathBuf {
-    let dir = under.join(name);
-    std::fs::create_dir_all(&dir).expect("dir");
-    dir.canonicalize().expect("canonical dir")
-}
-
 /// The whole want: one home, its login and its setup, for every project a
 /// role is started in.
 #[test]
 fn a_role_that_resumes_anywhere_resumes_its_box_in_a_new_workspace() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path().join("data");
-    let role = role(&temp.path().join("role"), "resume = \"anywhere\"\n");
-    let first = a_dir(temp.path(), "a");
-    let id = a_role_box(&data, &first, &role);
-    let second = a_dir(temp.path(), "b");
+    let role = common::a_role(&temp.path().join("role"), "resume = \"anywhere\"\n");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &role);
+    let second = common::a_dir(temp.path(), "b");
 
     let output = run_box(&second, &data, &["--role", role.to_str().expect("utf-8")]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -92,10 +59,10 @@ fn a_role_that_resumes_anywhere_resumes_its_box_in_a_new_workspace() {
 fn a_role_that_resumes_here_makes_a_new_box_in_a_new_workspace() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path().join("data");
-    let role = role(&temp.path().join("role"), "");
-    let first = a_dir(temp.path(), "a");
-    let id = a_role_box(&data, &first, &role);
-    let second = a_dir(temp.path(), "b");
+    let role = common::a_role(&temp.path().join("role"), "");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &role);
+    let second = common::a_dir(temp.path(), "b");
 
     let output = run_box(&second, &data, &["--role", role.to_str().expect("utf-8")]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -109,10 +76,10 @@ fn a_role_that_resumes_here_makes_a_new_box_in_a_new_workspace() {
 fn naming_a_role_box_from_another_workspace_starts_it_with_its_own_role() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path().join("data");
-    let role = role(&temp.path().join("role"), "");
-    let first = a_dir(temp.path(), "a");
-    let id = a_role_box(&data, &first, &role);
-    let elsewhere = a_dir(temp.path(), "b");
+    let role = common::a_role(&temp.path().join("role"), "");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &role);
+    let elsewhere = common::a_dir(temp.path(), "b");
     workspace(&elsewhere);
 
     let output = run_box(&elsewhere, &data, &["--id", &id]);
@@ -131,11 +98,11 @@ fn naming_a_role_box_from_another_workspace_starts_it_with_its_own_role() {
 fn a_box_made_from_a_workspace_manifest_is_refused_by_name_elsewhere() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path().join("data");
-    let first = a_dir(temp.path(), "a");
+    let first = common::a_dir(temp.path(), "a");
     workspace(&first);
     let id = paths::box_id(&first, 0);
     common::keep_box(&data, &common::a_record(&first, &id, None));
-    let elsewhere = a_dir(temp.path(), "b");
+    let elsewhere = common::a_dir(temp.path(), "b");
     workspace(&elsewhere);
 
     let output = run_box(&elsewhere, &data, &["--id", &id]);
@@ -154,10 +121,10 @@ fn a_box_made_from_a_workspace_manifest_is_refused_by_name_elsewhere() {
 fn naming_a_box_with_another_role_is_refused() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path().join("data");
-    let alphaca = role(&temp.path().join("alphaca"), "");
-    let java = role(&temp.path().join("java"), "");
-    let first = a_dir(temp.path(), "a");
-    let id = a_role_box(&data, &first, &alphaca);
+    let alphaca = common::a_role(&temp.path().join("alphaca"), "");
+    let java = common::a_role(&temp.path().join("java"), "");
+    let first = common::a_dir(temp.path(), "a");
+    let (id, _) = common::a_role_box(&data, &first, &alphaca);
 
     let output = run_box(
         &first,
@@ -178,7 +145,7 @@ fn naming_a_box_with_another_role_is_refused() {
 fn a_workspace_manifest_cannot_resume_anywhere() {
     let temp = tempfile::tempdir().expect("temp dir");
     let data = temp.path().join("data");
-    let here = a_dir(temp.path(), "a");
+    let here = common::a_dir(temp.path(), "a");
     std::fs::write(
         here.join("wormhole.toml"),
         format!(
