@@ -9,7 +9,7 @@
 //! references are not recorded is reported and never removed.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One thing in the data home, and what is known about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,21 +139,88 @@ pub fn record_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> 
     }
 }
 
-/// Whether a kept home is still wanted. `workspace` is what the home's own
-/// stamp says it belongs to, and `exists` is whether that path is still
-/// there.
+/// What a kept box's recipe says about who can still start it, as far as
+/// it could be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recipe {
+    /// Made from its workspace's own manifest, so it runs only there.
+    Workspace,
+    /// A role that resumes its box only where it has run.
+    Here,
+    /// A role that lets any workspace resume its box.
+    Anywhere,
+    /// A role whose directory, named here, no longer exists.
+    Gone(String),
+    /// A role that could not be read.
+    Unread,
+}
+
+/// What a kept box's recipe says about who can still start it. `read` is
+/// its manifest when that could be read; `exists` says whether a path is
+/// still there.
+pub fn recipe(
+    record: &crate::home::Record,
+    read: Option<&crate::manifest::Manifest>,
+    exists: impl Fn(&Path) -> bool,
+) -> Recipe {
+    if record.role.is_none() && record.source.is_none() {
+        return Recipe::Workspace;
+    }
+    if let Some(dir) = record.source.as_deref().and_then(crate::source::dir_of)
+        && !exists(Path::new(dir))
+    {
+        return Recipe::Gone(dir.to_owned());
+    }
+    match read.map(|manifest| manifest.agent.resume) {
+        Some(crate::manifest::Resume::Anywhere) => Recipe::Anywhere,
+        Some(crate::manifest::Resume::Here) => Recipe::Here,
+        // Older than role identities, so judged the way such boxes always
+        // were: by their workspace.
+        None if record.source.is_none() => Recipe::Here,
+        None => Recipe::Unread,
+    }
+}
+
+/// What `gc` knows about one kept box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evidence<'a> {
+    /// Where it last ran.
+    pub workspace: &'a str,
+    /// Whether any workspace it ran in is still there.
+    pub any_workspace_exists: bool,
+    pub recipe: Recipe,
+}
+
+/// Whether a kept home is still wanted, from its record.
 ///
-/// A home with no stamp is left alone: it was kept by a build that did not
-/// record its workspace, and a digest cannot be inverted to find out which
-/// one. Removing it on a guess would take an agent's whole history with it.
-pub fn home_verdict(workspace: Option<&str>, exists: bool) -> Verdict {
-    match workspace {
-        None => Verdict::Unproven(
+/// A box with no record is left alone: a digest cannot be inverted to find
+/// out which workspace it served, and removing it on a guess would take an
+/// agent's whole history with it. A box nothing can start is dead: its
+/// workspaces are gone and its role resumes only where it ran, or its role
+/// is gone.
+pub fn home_verdict(evidence: Option<Evidence<'_>>) -> Verdict {
+    let Some(evidence) = evidence else {
+        return Verdict::Unproven(
             "this home records no workspace, so nothing can tell whether it is still wanted"
                 .to_owned(),
-        ),
-        Some(path) if exists => Verdict::Live(format!("{path} is still there")),
-        Some(path) => Verdict::Dead(format!("{path} no longer exists")),
+        );
+    };
+    let workspace = evidence.workspace;
+    match evidence.recipe {
+        Recipe::Gone(role) => Verdict::Dead(format!(
+            "the role at {role} no longer exists, so nothing can start this box"
+        )),
+        Recipe::Anywhere => Verdict::Live("its role lets any workspace resume it".to_owned()),
+        _ if evidence.any_workspace_exists => Verdict::Live(format!(
+            "a workspace it ran in is still there; last {workspace}"
+        )),
+        Recipe::Unread => Verdict::Unproven(format!(
+            "{workspace} and every other workspace it ran in are gone, and its role \
+             could not be read to say whether another may resume it"
+        )),
+        Recipe::Workspace | Recipe::Here => Verdict::Dead(format!(
+            "{workspace} no longer exists, nor any other workspace it ran in"
+        )),
     }
 }
 
@@ -284,18 +351,95 @@ mod tests {
         report(items, sweep, &plan(items, sweep))
     }
 
+    fn kept(any_workspace_exists: bool, recipe: Recipe) -> Option<Evidence<'static>> {
+        Some(Evidence {
+            workspace: "/home/me/proj",
+            any_workspace_exists,
+            recipe,
+        })
+    }
+
     /// The gap this closes: a kept home outlives the workspace it was kept
     /// for, and nothing ever reclaims it.
     #[test]
     fn a_home_whose_workspace_is_gone_is_dead() {
-        let verdict = home_verdict(Some("/home/me/proj"), false);
-        assert!(taken(&verdict, LOOK), "{verdict:?}");
-        assert!(verdict.reason().contains("/home/me/proj"));
+        for recipe in [Recipe::Workspace, Recipe::Here] {
+            let verdict = home_verdict(kept(false, recipe));
+            assert!(taken(&verdict, LOOK), "{verdict:?}");
+            assert!(verdict.reason().contains("/home/me/proj"));
+        }
     }
 
     #[test]
     fn a_home_whose_workspace_is_still_there_is_live() {
-        assert!(!taken(&home_verdict(Some("/home/me/proj"), true), WIDE));
+        for recipe in [Recipe::Workspace, Recipe::Here, Recipe::Unread] {
+            assert!(!taken(&home_verdict(kept(true, recipe)), WIDE));
+        }
+    }
+
+    /// Every project it ran in may be gone; the next one started with its
+    /// role still resumes it.
+    #[test]
+    fn a_box_any_workspace_may_resume_is_live_without_its_workspaces() {
+        let verdict = home_verdict(kept(false, Recipe::Anywhere));
+        assert!(!taken(&verdict, WIDE), "{verdict:?}");
+    }
+
+    /// Nothing can start a box whose role is gone: every start resolves
+    /// the role it records, and a start from another role is refused.
+    #[test]
+    fn a_box_whose_role_is_gone_is_dead_wherever_it_ran() {
+        let verdict = home_verdict(kept(true, Recipe::Gone("/roles/alphaca".to_owned())));
+        assert!(taken(&verdict, LOOK), "{verdict:?}");
+        assert!(verdict.reason().contains("/roles/alphaca"), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_box_recipe_is_read_for_who_may_still_start_it() {
+        let made_here = crate::home::Record {
+            key: "w-0123456789ab".to_owned(),
+            id: "0123456789ab".to_owned(),
+            workspace: PathBuf::from("/w"),
+            earlier: Vec::new(),
+            role: None,
+            source: None,
+            alias: None,
+            name: None,
+            agent: None,
+            created_unix: 1,
+            started_unix: 1,
+        };
+        let anywhere = crate::manifest::parse(&format!(
+            "version = 1\n[agent]\nresume = \"anywhere\"\n\
+             [image]\nbase = \"x\"\nbase_sha256 = \"{}\"\n",
+            "a".repeat(64)
+        ))
+        .expect("valid");
+        let all = |_: &Path| true;
+        assert_eq!(recipe(&made_here, None, all), Recipe::Workspace);
+        let role = crate::home::Record {
+            role: Some("alphaca".to_owned()),
+            source: Some("dir:/roles/alphaca".to_owned()),
+            ..made_here
+        };
+        assert_eq!(recipe(&role, Some(&anywhere), all), Recipe::Anywhere);
+        assert_eq!(recipe(&role, None, all), Recipe::Unread);
+        assert_eq!(
+            recipe(&role, Some(&anywhere), |_| false),
+            Recipe::Gone("/roles/alphaca".to_owned())
+        );
+        let older = crate::home::Record {
+            source: None,
+            ..role
+        };
+        assert_eq!(recipe(&older, None, all), Recipe::Here);
+    }
+
+    /// Its role might let any workspace resume it; unread, nothing says.
+    #[test]
+    fn a_box_whose_role_cannot_be_read_and_whose_workspaces_are_gone_is_unproven() {
+        let verdict = home_verdict(kept(false, Recipe::Unread));
+        assert!(matches!(verdict, Verdict::Unproven(_)), "{verdict:?}");
     }
 
     /// `rm` leaves the lock it was holding behind on purpose, so this is
@@ -395,7 +539,7 @@ mod tests {
     /// be inverted — so it is reported, never guessed at.
     #[test]
     fn a_home_that_records_no_workspace_is_never_removed_on_a_guess() {
-        let verdict = home_verdict(None, false);
+        let verdict = home_verdict(None);
         assert!(!taken(&verdict, WIDE), "{verdict:?}");
         assert!(matches!(verdict, Verdict::Unproven(_)));
     }

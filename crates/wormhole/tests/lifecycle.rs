@@ -344,6 +344,58 @@ fn gc_reclaims_a_lock_whose_box_is_gone() {
     assert!(!orphan.exists(), "the orphaned lock survived");
 }
 
+/// A role box whose projects are all gone, of a role any workspace may
+/// resume from.
+fn a_role_box_nowhere(data: &Path, resume: &str) -> (PathBuf, PathBuf) {
+    let role = data.join("role");
+    std::fs::create_dir_all(&role).expect("role");
+    std::fs::write(
+        role.join("wormhole.toml"),
+        format!(
+            "version = 1\n[agent]\nrun = \"claude\"\n{resume}[image]\n\
+             base = \"https://x.test/r.tar.gz\"\nbase_sha256 = \"{}\"\n",
+            "a".repeat(64)
+        ),
+    )
+    .expect("role manifest");
+    let role = role.canonicalize().expect("canonical role");
+    let gone = data.join("gone");
+    let id = paths::box_id(&gone, 0);
+    let mut kept = record(&gone, &id, None);
+    kept.role = Some(role.display().to_string());
+    kept.source = Some(wormhole_core::source::dir_source(&role));
+    (keep(data, &kept), role)
+}
+
+/// Every project it ran in may be gone; the next one started with its
+/// role still resumes it, so nothing proves it unwanted.
+#[test]
+fn gc_keeps_a_shared_box_whose_workspaces_are_gone() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let ws = workspace(data, "proj");
+    let (home, _role) = a_role_box_nowhere(data, "resume = \"anywhere\"\n");
+
+    let output = wormhole(data, &ws, &["gc", "--delete"]);
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(home.exists(), "a box any workspace may resume was taken");
+}
+
+/// No start can resolve a role that is gone, and a start from any other
+/// role is refused, so the box can never run again.
+#[test]
+fn gc_takes_a_box_whose_role_is_gone() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let ws = workspace(data, "proj");
+    let (home, role) = a_role_box_nowhere(data, "resume = \"anywhere\"\n");
+    std::fs::remove_dir_all(&role).expect("role gone");
+
+    let output = wormhole(data, &ws, &["gc", "--delete"]);
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(!home.exists(), "a box nothing can start was kept");
+}
+
 /// A build's claim sits beside the box claims and has no home. Unlinked
 /// while held, the next builder locks a new file and two processes write
 /// one `.partial`.

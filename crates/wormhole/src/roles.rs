@@ -486,6 +486,15 @@ pub(crate) fn try_resolve_manifest_in(
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let manifest = manifest::parse(&text).map_err(|e| e.to_string())?;
+    // A box made from a workspace's own file runs only in that workspace,
+    // and a cloned repository must not decide how far its box reaches.
+    if source.is_none() && manifest.agent.resume == manifest::Resume::Anywhere {
+        return Err(format!(
+            "{} says resume = \"anywhere\", but a box made from a workspace's own \
+             {MANIFEST} runs only there; that line belongs in a role",
+            path.display()
+        ));
+    }
     Ok(Resolved {
         manifest,
         dir,

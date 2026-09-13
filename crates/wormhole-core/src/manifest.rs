@@ -120,6 +120,23 @@ pub struct Agent {
     /// role's especially — is not in the box.
     #[serde(default)]
     pub preflight: Option<String>,
+    /// Whether a bare start in a workspace this role's boxes never ran in
+    /// resumes one of them. One home then keeps its login and its setup
+    /// for every workspace, and puts every project's history in reach of
+    /// every other.
+    #[serde(default)]
+    pub resume: Resume,
+}
+
+/// How far a bare start looks for a box of this role to resume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Resume {
+    /// Only boxes that already ran in this workspace.
+    #[default]
+    Here,
+    /// Any box of this role, wherever it last ran.
+    Anywhere,
 }
 
 impl Agent {
@@ -2230,6 +2247,26 @@ mod tests {
             Some("architect")
         );
         assert_eq!(full("").name, None);
+    }
+
+    /// A role says whether its box follows you to another workspace. Not
+    /// saying keeps today's answer: a box per workspace.
+    #[test]
+    fn a_role_says_whether_any_workspace_may_resume_its_box() {
+        assert_eq!(
+            full("[agent]\nrun = \"claude\"\n").agent.resume,
+            Resume::Here
+        );
+        assert_eq!(
+            full("[agent]\nrun = \"claude\"\nresume = \"anywhere\"\n")
+                .agent
+                .resume,
+            Resume::Anywhere
+        );
+        assert!(matches!(
+            parse(&text("[agent]\nresume = \"everywhere\"\n")),
+            Err(ManifestError::Syntax(_))
+        ));
     }
 
     #[test]

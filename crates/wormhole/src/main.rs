@@ -228,6 +228,24 @@ fn pick_product(names: &[String]) -> String {
     }
 }
 
+/// Refuses a start that named a box it cannot run in `here` from the
+/// recipe with this `source`.
+fn refuse_named(record: Option<&home::Record>, here: &Path, source: Option<&str>) {
+    if let Some(record) = record
+        && let Some(refusal) = home::refused_by_name(
+            record,
+            here,
+            home::Wanted {
+                source,
+                typed: None,
+                run: None,
+            },
+        )
+    {
+        fail(&refusal);
+    }
+}
+
 /// Runs this workspace's agent in a fresh copy of its image. The copy is
 /// thrown away afterwards, so nothing the agent does can reach the image
 /// the next box starts from. Any command after `--` replaces the agent.
@@ -245,20 +263,34 @@ fn run_box(args: &[String]) -> ! {
         .id
         .as_deref()
         .map(|id| lock::claim_named(&data_home, &workspace, id));
+    let named_record = named.as_ref().and_then(|claim| claim.record.clone());
+
+    // A named box starts from the role it was made from, never from
+    // whatever the directory it was named in holds.
+    let role = parsed
+        .role
+        .clone()
+        .or_else(|| named_record.as_ref().and_then(home::Record::role_ref));
+    if role.is_none() {
+        refuse_named(named_record.as_ref(), &workspace, None);
+    }
 
     // Which role this is has to be settled before the search for a box to
     // resume: `--role alphaca` and `--role ./roles/alphaca` name one role,
     // and only resolving them says so.
-    let resolved = roles::resolve_manifest(parsed.role.as_deref());
+    let resolved = roles::resolve_manifest(role.as_deref());
+    refuse_named(
+        named_record.as_ref(),
+        &workspace,
+        resolved.source.as_deref(),
+    );
 
     // `--id` already names the box, so its recorded product is the one
     // this start runs unless `--run` says otherwise — and a disagreement
     // is a refusal, not a silent switch of the home's agent.
-    let recorded = named.as_ref().and_then(|claim| {
-        read_record(&data_home, &claim.key)
-            .ok()
-            .and_then(|record| record.agent)
-    });
+    let recorded = named_record
+        .as_ref()
+        .and_then(|record| record.agent.clone());
     let mut requested = parsed.run.clone().or(recorded.clone());
     let roles::Resolved {
         manifest,
@@ -300,6 +332,7 @@ fn run_box(args: &[String]) -> ! {
         id: box_id,
         key: box_key,
         lock: _claim,
+        ..
     } = named.unwrap_or_else(|| {
         lock::claim_free(
             &data_home,
@@ -314,6 +347,7 @@ fn run_box(args: &[String]) -> ! {
                     manifest.agent.product()
                 },
             },
+            manifest.agent.resume,
         )
     });
     if unbound {
@@ -328,13 +362,7 @@ fn run_box(args: &[String]) -> ! {
     // What this box answers to besides its id. `--as` renames it; without
     // one the box keeps the name it already had. Settled before anything
     // is built, because one name on two boxes would make `attach` guess.
-    let box_alias = box_alias(
-        &data_home,
-        &box_key,
-        &workspace,
-        &box_id,
-        parsed.alias.as_deref(),
-    );
+    let box_alias = box_alias(&data_home, &box_key, &box_id, parsed.alias.as_deref());
 
     // Before the home and the image: a login this start cannot deliver is
     // not something to find out after a build.
@@ -637,38 +665,64 @@ fn gc_cmd(args: &[String]) -> ! {
         });
     }
 
-    // A kept home outlives the workspace it was kept for. It can be
-    // reclaimed because a box records which workspace it belongs to — and
-    // the same read gives the recipes below, so the homes are walked once.
-    let mut records = Vec::new();
+    // A kept home outlives the workspaces it ran in. What proves it dead is
+    // that nothing can start it again, which its record and its recipe say
+    // together. Images, bases and artifacts are each named by a digest,
+    // and a recipe names every digest the store keeps on its behalf — so
+    // the same reads turn "nothing records this" into a proof below. The
+    // homes are walked once, each distinct recipe read once.
     let mut keys = BTreeSet::new();
-    let mut unreadable = 0usize;
+    let mut recipes = BTreeMap::new();
+    let mut complete = true;
     for entry in read_dir(&paths::homes_dir(&data_home)) {
         let path = entry.path();
-        keys.extend(
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned),
-        );
-        let record = path
+        let Some(key) = path
             .file_name()
             .and_then(|name| name.to_str())
-            .and_then(|key| read_record(&data_home, key).ok());
-        let workspace = record
-            .as_ref()
-            .map(|record| record.workspace.display().to_string());
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let record = read_record(&data_home, &key).ok();
+        keys.insert(key);
+        let verdict = match &record {
+            // A home that could not be read is a recipe that could not be
+            // asked, so it counts against completeness like an unreadable
+            // one.
+            None => {
+                complete = false;
+                gc::home_verdict(None)
+            }
+            Some(record) => {
+                let read = read_recipe(record, &mut recipes);
+                let workspace = record.workspace.display().to_string();
+                let verdict = gc::home_verdict(Some(gc::Evidence {
+                    workspace: &workspace,
+                    any_workspace_exists: std::iter::once(&record.workspace)
+                        .chain(&record.earlier)
+                        .any(|ran_in| ran_in.is_dir()),
+                    recipe: gc::recipe(record, read.as_ref(), Path::is_dir),
+                }));
+                // A dead box keeps nothing alive. Any other whose recipe
+                // could not be read may be the very one that references an
+                // image, so the answer says so rather than proving
+                // something on a gap in the evidence.
+                if !matches!(verdict, gc::Verdict::Dead(_)) {
+                    match &read {
+                        Some(manifest) => {
+                            referenced.extend(manifest::referenced_digests(manifest));
+                        }
+                        None => complete = false,
+                    }
+                }
+                verdict
+            }
+        };
         items.push(gc::Item {
             bytes: tree_bytes(&path),
-            verdict: gc::home_verdict(
-                workspace.as_deref(),
-                workspace.as_deref().is_some_and(|w| Path::new(w).is_dir()),
-            ),
+            verdict,
             path,
         });
-        match record {
-            Some(record) => records.push(record),
-            None => unreadable += 1,
-        }
     }
 
     // A lock file is an empty claim token beside a home; the file's stem
@@ -697,12 +751,6 @@ fn gc_cmd(args: &[String]) -> ! {
         });
     }
 
-    // Images, bases and artifacts are each named by a digest, and a recipe
-    // names every digest the store keeps on its behalf — so reading the
-    // recipe of every kept box is what turns "nothing records this" into a
-    // proof. A home that could not be read is a recipe that could not be
-    // asked, so it counts against completeness like an unreadable one.
-    let complete = extend_referenced(&records, &mut referenced) && unreadable == 0;
     for (dir, what) in [
         (paths::images_dir(&data_home), "image"),
         (paths::bases_dir(&data_home), "base"),
@@ -758,45 +806,34 @@ fn running_image(box_dir: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Adds every digest these boxes' recipes reference, and says whether all
-/// of them could be read.
+/// A kept box's recipe: its workspace's own manifest, or the role it was
+/// made from. `None` when it cannot be read — a role removed, a manifest
+/// since made invalid.
 ///
-/// A box's recipe is its workspace's own manifest, or the role it was
-/// started from. Reading one can fail — a role removed, a manifest since
-/// made invalid — and the one that failed may be the very one that
-/// references an image, so the answer says so rather than quietly
-/// proving something on a gap in the evidence.
+/// Boxes commonly share a role, so each distinct recipe is read once: a
+/// role reads the same wherever its boxes ran, and a workspace's own file
+/// is that workspace's.
 ///
-/// Boxes commonly share a workspace and a role, so each distinct recipe is
-/// read once: `paths::box_id` derives an id from a workspace, which is to
-/// say a folder full of boxes is a folder with one recipe.
-///
-/// A box whose workspace is gone is skipped: it is already dead, and
-/// counting its recipe would keep a gigabyte alive for nobody.
-fn extend_referenced(records: &[home::Record], into: &mut BTreeSet<String>) -> bool {
-    let mut complete = true;
-    let mut seen = BTreeSet::new();
-    for record in records {
-        if !record.workspace.is_dir() {
-            continue;
-        }
-        if !seen.insert((record.workspace.clone(), record.role.clone())) {
-            continue;
-        }
-        // Never the launch resolver: that one may fetch a pinned commit
-        // and stop for a confirm, and a listing that reaches the network
-        // or seizes the terminal is not a listing. Reading is all this
-        // needs, so reading is all it is allowed.
-        match roles::try_resolve_manifest_in(
-            &record.workspace,
-            record.role.as_deref(),
-            roles::Fetch::Never,
-        ) {
-            Ok(resolved) => into.extend(manifest::referenced_digests(&resolved.manifest)),
-            Err(_) => complete = false,
-        }
-    }
-    complete
+/// Never the launch resolver: that one may fetch a pinned commit and stop
+/// for a confirm, and a listing that reaches the network or seizes the
+/// terminal is not a listing. Reading is all this needs, so reading is all
+/// it is allowed.
+fn read_recipe(
+    record: &home::Record,
+    read: &mut BTreeMap<(Option<String>, PathBuf), Option<manifest::Manifest>>,
+) -> Option<manifest::Manifest> {
+    let role = record.role_ref();
+    let at = match role {
+        Some(_) => PathBuf::new(),
+        None => record.workspace.clone(),
+    };
+    read.entry((role, at))
+        .or_insert_with_key(|(role, _)| {
+            roles::try_resolve_manifest_in(&record.workspace, role.as_deref(), roles::Fetch::Never)
+                .ok()
+                .map(|resolved| resolved.manifest)
+        })
+        .clone()
 }
 
 /// A directory's entries, or none when it is not there yet. Every gc scan
@@ -1033,14 +1070,11 @@ fn resume_from_panel(data_home: &Path, id: &str) -> ! {
         .into_iter()
         .find(|record| record.id == id)
         .unwrap_or_else(|| fail(&format!("no box {id} any more")));
-    std::env::set_current_dir(&record.workspace)
-        .unwrap_or_else(|e| fail(&format!("cannot enter {}: {e}", record.workspace.display())));
-    let mut args = vec!["--id".to_owned(), id.to_owned()];
-    if let Some(role) = record.role {
-        args.push("--role".to_owned());
-        args.push(role);
-    }
-    run_box(&args)
+    let workspace = home::resume_in(&record, &here(), Path::is_dir).unwrap_or_else(|e| fail(&e));
+    std::env::set_current_dir(&workspace)
+        .unwrap_or_else(|e| fail(&format!("cannot enter {}: {e}", workspace.display())));
+    // No `--role`: a named box starts from the role it records.
+    run_box(&["--id".to_owned(), id.to_owned()])
 }
 
 /// `n` in the panel: pick what the new box starts from — the workspace's
@@ -1189,9 +1223,7 @@ fn find_targets(data_home: &Path, workspace: &Path, wanted: &[String]) -> Result
     let keys = home_keys(data_home);
     let found = wanted
         .iter()
-        .map(|name| {
-            home::target(&kept, &keys, workspace, name).ok_or_else(|| home::no_box_found(name))
-        })
+        .map(|name| home::target(&kept, &keys, workspace, name))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((found, kept, problems))
 }
@@ -1302,7 +1334,7 @@ impl<'a> Claimed<'a> {
                 id = self.target.id
             )
         })?;
-        if let Some(taken) = home::alias_conflict(kept, &record.workspace, alias, &record.id) {
+        if let Some(taken) = home::alias_conflict(kept, alias, &record.id) {
             return Err(home::alias_taken(alias, &taken.id));
         }
         let renamed = home::Record {
@@ -1386,7 +1418,6 @@ fn rename_cmd(args: &[String]) -> ! {
 fn box_alias(
     data_home: &Path,
     box_key: &str,
-    workspace: &Path,
     box_id: &str,
     wanted: Option<&str>,
 ) -> Option<String> {
@@ -1401,7 +1432,7 @@ fn box_alias(
     report_problems(&problems);
     // The rule and the sentence both live beside `is_usable_alias`, so a
     // start, a rename and the panel give one answer to one question.
-    if let Some(taken) = home::alias_conflict(&kept, workspace, wanted, box_id) {
+    if let Some(taken) = home::alias_conflict(&kept, wanted, box_id) {
         fail(&home::alias_taken(wanted, &taken.id));
     }
     Some(wanted.to_owned())

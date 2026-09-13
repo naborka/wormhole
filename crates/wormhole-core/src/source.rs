@@ -126,6 +126,11 @@ pub fn repo_source(url: &str) -> String {
     format!("{REPO}{url}")
 }
 
+/// The directory a local role's identity names; `None` for a repository.
+pub fn dir_of(source: &str) -> Option<&str> {
+    source.strip_prefix(DIR)
+}
+
 const DIR: &str = "dir:";
 const REPO: &str = "repo:";
 

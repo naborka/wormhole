@@ -4,23 +4,26 @@
 use std::path::Path;
 
 use nix::fcntl::{Flock, FlockArg};
+use wormhole_core::manifest::Resume;
 use wormhole_core::{home, paths};
 
 use crate::{fail, home_keys, kept_boxes, report_problems};
 
-/// A box this process holds the claim on, and the key its store entries
-/// are named by. Found, never rebuilt from where the start stands.
+/// A box this process holds the claim on, the key its store entries are
+/// named by, and its record when it has a readable one. Found, never
+/// rebuilt from where the start stands.
 pub(crate) struct Claim {
     pub(crate) id: String,
     pub(crate) key: String,
+    pub(crate) record: Option<home::Record>,
     pub(crate) lock: Flock<std::fs::File>,
 }
 
 /// Which box this run is, claimed for as long as this process lives.
 ///
-/// `--id` names one outright. `--new` starts another. A bare `wormhole
-/// box` resumes this workspace's most recently used box for this role and
-/// falls through to a new one when every existing box is busy — so a
+/// `--id` names one outright, from any workspace. `--new` starts another.
+/// A bare `wormhole box` resumes the most recently used free box for this
+/// role and falls through to a new one when every one is busy — so a
 /// folder holds as many boxes as you make, and typing the same command
 /// twice gets you back the same box rather than a stranger.
 ///
@@ -30,29 +33,19 @@ pub(crate) struct Claim {
 /// holding it ends, however it ends — a box killed at any point leaves
 /// nothing stale to reap.
 ///
-/// The lock's file holds the pid of whoever took it, so a refusal can name
+/// Claimed before anything is resolved, so a refusal costs nothing. The
+/// lock's file holds the pid of whoever took it, so a refusal can name
 /// them. That text is a courtesy; the lock is the claim.
-pub(crate) fn claim_named(data_home: &Path, workspace: &Path, wanted: &str) -> Claim {
-    // An id names a box by its directory, and nothing else has to be
-    // readable for that: a home whose record is corrupt is still a box
-    // this can start. An alias lives *in* the record, so it can only be
-    // looked up among the records that parse.
+pub(crate) fn claim_named(data_home: &Path, here: &Path, wanted: &str) -> Claim {
     let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
     report_problems(&problems);
-    let target = home::target(&kept, &home_keys(data_home), workspace, wanted)
-        .unwrap_or_else(|| fail(&home::no_box_found(wanted)));
-    if let Some(record) = &target.record
-        && record.workspace != workspace
-    {
-        fail(&format!(
-            "box {wanted} belongs to {}, not to this workspace",
-            record.workspace.display()
-        ));
-    }
+    let target =
+        home::target(&kept, &home_keys(data_home), here, wanted).unwrap_or_else(|e| fail(&e));
     match claim_key(data_home, &target.key) {
         Some(lock) => Claim {
             id: target.id,
             key: target.key,
+            record: target.record,
             lock,
         },
         None => fail(&format!(
@@ -63,25 +56,36 @@ pub(crate) fn claim_named(data_home: &Path, workspace: &Path, wanted: &str) -> C
     }
 }
 
-/// The box a bare `wormhole box` should be: this workspace's most recently
-/// used free one for this role, or another when every one is busy.
+/// The box a bare `wormhole box` should be: the most recently used free
+/// one for this role, as far as the role lets a start look, or another
+/// when none is free.
 pub(crate) fn claim_free(
     data_home: &Path,
-    workspace: &Path,
+    here: &Path,
     new: bool,
     wanted: home::Wanted<'_>,
+    resume: Resume,
 ) -> Claim {
     // A home that cannot be read is a box that cannot be resumed, and the
     // silent answer to that is a *new* box. Say so before starting one.
     let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
     report_problems(&problems);
     if !new {
-        for record in home::resumable(&kept, workspace, wanted) {
+        for record in home::resumable(&kept, here, wanted, resume) {
             if let Some(lock) = claim_key(data_home, &record.key) {
-                println!("box: {} (resumed)", record.id);
+                if record.serves(here) {
+                    println!("box: {} (resumed)", record.id);
+                } else {
+                    println!(
+                        "box: {} (resumed; last used in {})",
+                        record.id,
+                        record.workspace.display()
+                    );
+                }
                 return Claim {
                     id: record.id.clone(),
                     key: record.key.clone(),
+                    record: Some(record.clone()),
                     lock,
                 };
             }
@@ -98,11 +102,16 @@ pub(crate) fn claim_free(
         .map(str::to_owned)
         .collect();
     loop {
-        let id = paths::box_id(workspace, home::free_ordinal(&taken, workspace));
-        let key = paths::box_key(workspace, &id);
+        let id = paths::box_id(here, home::free_ordinal(&taken, here));
+        let key = paths::box_key(here, &id);
         if let Some(lock) = claim_key(data_home, &key) {
             println!("box: {id} (new)");
-            return Claim { id, key, lock };
+            return Claim {
+                id,
+                key,
+                record: None,
+                lock,
+            };
         }
         taken.push(id);
     }
