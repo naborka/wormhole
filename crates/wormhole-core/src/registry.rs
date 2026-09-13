@@ -21,6 +21,10 @@ pub struct Entry {
     /// workspace, so the workspace no longer names one.
     #[serde(default)]
     pub box_id: String,
+    /// The key its home and lock are named by. Absent in an entry from an
+    /// older wormhole, which named them after the workspace; see [`Entry::key`].
+    #[serde(default)]
+    pub key: Option<String>,
     pub workspace: PathBuf,
     pub image: String,
     #[serde(default)]
@@ -35,6 +39,16 @@ pub struct Entry {
     pub alias: Option<String>,
     /// Unix seconds when the box started.
     pub started_unix: u64,
+}
+
+impl Entry {
+    /// The key this box's home and lock are named by.
+    #[must_use]
+    pub fn key(&self) -> String {
+        self.key
+            .clone()
+            .unwrap_or_else(|| crate::paths::box_key(&self.workspace, &self.box_id))
+    }
 }
 
 pub fn to_toml(entry: &Entry) -> Result<String, String> {
@@ -62,6 +76,7 @@ mod tests {
         Entry {
             pid: 4242,
             box_id: "0123456789ab".to_owned(),
+            key: None,
             workspace: PathBuf::from("/home/me/proj"),
             image: "/data/wormhole/images/abc".to_owned(),
             agent: Some("claude".to_owned()),

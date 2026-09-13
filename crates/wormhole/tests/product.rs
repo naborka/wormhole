@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use wormhole_core::{home, paths, source};
+use wormhole_core::{paths, source};
 
 mod common;
 use common::{a_record, drive_terminal, keep_box, on_a_refused_terminal, said, wormhole};
@@ -144,13 +144,10 @@ fn a_bare_start_resumes_the_product_the_box_already_runs() {
     assert!(said.contains(&format!("box: {id} (resumed)")), "{said}");
     assert!(!said.contains("pass --run"), "{said}");
     assert!(!said.contains("run as:"), "{said}");
-    let kept = home::parse(
-        &std::fs::read_to_string(
-            paths::home_dir(&data, &paths::box_key(&workspace, &id)).join(home::RECORD),
-        )
-        .expect("record"),
-    )
-    .expect("parsed");
+    let kept = common::kept_record(
+        &data,
+        &paths::home_dir(&data, &paths::box_key(&workspace, &id)),
+    );
     assert_eq!(kept.agent.as_deref(), Some("grok"));
 }
 

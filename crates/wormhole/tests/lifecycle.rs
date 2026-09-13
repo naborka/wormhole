@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wormhole_core::{home, manifest, paths, registry};
+use wormhole_core::{manifest, paths, registry};
 
 mod common;
 use common::{a_record as record, keep_box as keep, said, wormhole};
@@ -35,6 +35,26 @@ fn remove_takes_the_home_and_everything_in_it() {
     assert!(output.status.success(), "{}", said(&output));
     assert!(said(&output).contains(&format!("box {id} removed")));
     assert!(!home.exists(), "the home survived");
+    assert!(
+        !paths::record_file(data, &paths::box_key(&ws, &id)).exists(),
+        "the record survived its box"
+    );
+}
+
+/// A record says what a box is; with its home gone there is no box.
+#[test]
+fn gc_reclaims_a_record_whose_home_is_gone() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let ws = workspace(data, "proj");
+    let id = first_id(&ws);
+    let home = keep(data, &record(&ws, &id, None));
+    std::fs::remove_dir_all(&home).expect("home gone");
+    let orphan = paths::record_file(data, &paths::box_key(&ws, &id));
+
+    let output = wormhole(data, &ws, &["gc", "--delete"]);
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(!orphan.exists(), "the orphaned record survived");
 }
 
 /// The name is what a person types, so it is what `remove` has to take.
@@ -166,10 +186,7 @@ fn reset_empties_the_home_and_keeps_the_box() {
     let output = wormhole(data, &ws, &["reset", "api"]);
     assert!(output.status.success(), "{}", said(&output));
     assert!(!home.join("history.jsonl").exists(), "history survived");
-    let kept = home::parse(
-        &std::fs::read_to_string(home.join(home::RECORD)).expect("the record came back"),
-    )
-    .expect("valid record");
+    let kept = common::kept_record(data, &home);
     assert_eq!(kept.id, id);
     assert_eq!(kept.alias.as_deref(), Some("api"));
     assert_eq!(kept.workspace, ws);
@@ -185,8 +202,7 @@ fn rename_sets_the_name_without_starting_the_box() {
 
     let output = wormhole(data, &ws, &["rename", &id, "api"]);
     assert!(output.status.success(), "{}", said(&output));
-    let kept = home::parse(&std::fs::read_to_string(home.join(home::RECORD)).expect("record"))
-        .expect("valid record");
+    let kept = common::kept_record(data, &home);
     assert_eq!(kept.alias.as_deref(), Some("api"));
     // And the name now names it everywhere else.
     let listed = wormhole(data, &ws, &["ps", "--all"]);
@@ -292,6 +308,7 @@ fn gc_keeps_the_image_a_running_box_is_using() {
     let entry = registry::Entry {
         pid,
         box_id: first_id(&ws),
+        key: None,
         workspace: ws.clone(),
         image: image.display().to_string(),
         agent: Some("claude".to_owned()),

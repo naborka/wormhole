@@ -128,6 +128,17 @@ pub fn lock_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> Ve
     }
 }
 
+/// Whether a box record still describes a box, from its file stem and
+/// the key of every kept home. The home is the box; a record without one
+/// describes nothing.
+pub fn record_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> Verdict {
+    if kept.contains(stem) {
+        Verdict::Live("the box it describes is still kept".to_owned())
+    } else {
+        Verdict::Dead("the box it described is gone".to_owned())
+    }
+}
+
 /// Whether a kept home is still wanted. `workspace` is what the home's own
 /// stamp says it belongs to, and `exists` is whether that path is still
 /// there.
@@ -294,6 +305,13 @@ mod tests {
         let kept = keys(&["proj-0123456789ab"]);
         assert!(taken(&lock_verdict("gone-0123456789ab", &kept), LOOK));
         assert!(!taken(&lock_verdict("proj-0123456789ab", &kept), WIDE));
+    }
+
+    #[test]
+    fn a_record_whose_home_is_gone_is_dead() {
+        let kept = keys(&["proj-0123456789ab"]);
+        assert!(taken(&record_verdict("gone-0123456789ab", &kept), LOOK));
+        assert!(!taken(&record_verdict("proj-0123456789ab", &kept), WIDE));
     }
 
     fn keys(names: &[&str]) -> std::collections::BTreeSet<String> {

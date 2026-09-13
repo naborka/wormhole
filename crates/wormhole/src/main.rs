@@ -254,9 +254,10 @@ fn run_box(args: &[String]) -> ! {
     // `--id` already names the box, so its recorded product is the one
     // this start runs unless `--run` says otherwise — and a disagreement
     // is a refusal, not a silent switch of the home's agent.
-    let recorded = named.as_ref().and_then(|(id, _)| {
-        let home = paths::home_dir(&data_home, &paths::box_key(&workspace, id));
-        read_record(&home).ok().and_then(|record| record.agent)
+    let recorded = named.as_ref().and_then(|claim| {
+        read_record(&data_home, &claim.key)
+            .ok()
+            .and_then(|record| record.agent)
     });
     let mut requested = parsed.run.clone().or(recorded.clone());
     let roles::Resolved {
@@ -295,7 +296,11 @@ fn run_box(args: &[String]) -> ! {
     //
     // Held until this process exits — `exit` runs no destructor, so the
     // kernel is what ends it.
-    let (box_id, _claim) = named.unwrap_or_else(|| {
+    let lock::Claim {
+        id: box_id,
+        key: box_key,
+        lock: _claim,
+    } = named.unwrap_or_else(|| {
         lock::claim_free(
             &data_home,
             &workspace,
@@ -312,23 +317,20 @@ fn run_box(args: &[String]) -> ! {
         )
     });
     if unbound {
-        let home = paths::home_dir(&data_home, &paths::box_key(&workspace, &box_id));
-        requested = read_record(&home)
+        requested = read_record(&data_home, &box_key)
             .ok()
             .and_then(|record| record.agent)
             .or_else(|| tui::pick_run(&manifest).map(pick_product));
         manifest = manifest::bound(manifest, requested.as_deref())
             .unwrap_or_else(|e| fail(&e.to_string()));
     }
-    let box_key = paths::box_key(&workspace, &box_id);
 
     // What this box answers to besides its id. `--as` renames it; without
     // one the box keeps the name it already had. Settled before anything
     // is built, because one name on two boxes would make `attach` guess.
-    let box_home = paths::home_dir(&data_home, &box_key);
     let box_alias = box_alias(
         &data_home,
-        &box_home,
+        &box_key,
         &workspace,
         &box_id,
         parsed.alias.as_deref(),
@@ -381,23 +383,31 @@ fn run_box(args: &[String]) -> ! {
         .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", box_dir.display())));
     register_box(
         &box_dir,
-        &box_id,
-        &manifest,
-        &workspace,
-        &image,
-        box_alias.as_deref(),
+        registry::Entry {
+            pid: std::process::id(),
+            box_id: box_id.clone(),
+            key: Some(box_key.clone()),
+            workspace: workspace.clone(),
+            image: image.display().to_string(),
+            agent: manifest.agent.product().map(str::to_owned),
+            name: manifest.name.clone(),
+            alias: box_alias.clone(),
+            started_unix: now_unix(),
+        },
     );
 
-    // The box's own record, in the home that outlives every process that
-    // ran it. A home is named by a digest, and a digest cannot be
-    // inverted: without this nothing could say which workspace a home
-    // belongs to, list it for resuming, or tell whether it is still wanted.
+    // The box's own record, host-side, beside its claim. A home is named
+    // by a digest, and a digest cannot be inverted: without this nothing
+    // could say which workspace a home belongs to, list it for resuming,
+    // or tell whether it is still wanted.
     let now = now_unix();
     write_record(
-        &home,
+        &data_home,
         home::Record {
+            key: box_key.clone(),
             id: box_id.clone(),
             workspace: workspace.clone(),
+            earlier: Vec::new(),
             role: role_typed,
             source: role_source,
             alias: box_alias.clone(),
@@ -476,7 +486,10 @@ fn kept_boxes(data_home: &Path) -> Result<(Vec<home::Record>, Vec<String>), Stri
         Err(e) => return Err(format!("cannot read {}: {e}", homes.display())),
     };
     for entry in dir.flatten() {
-        match read_record(&entry.path()) {
+        let Ok(key) = entry.file_name().into_string() else {
+            continue;
+        };
+        match read_record(data_home, &key) {
             Ok(record) => found.push(record),
             Err(problem) => problems.push(problem),
         }
@@ -484,22 +497,30 @@ fn kept_boxes(data_home: &Path) -> Result<(Vec<home::Record>, Vec<String>), Stri
     Ok((found, problems))
 }
 
-/// One box's record, or why it could not be read. Homes written before
-/// boxes had ids stamped only the workspace; those are read as that
-/// workspace's first box, so an upgrade keeps every agent's history and
-/// installed toolchain instead of starting everyone over. The next start
-/// writes the full record.
+/// One box's record, or why it could not be read.
+///
+/// The host's copy when there is one, and only then what an older
+/// wormhole left in the home: its record, or before boxes had ids, the
+/// bare workspace stamp, read as that workspace's first box. Both are
+/// moved out at the box's next start.
 ///
 /// The reason is returned, never printed: the panel calls this every
 /// second while it owns the terminal, and a reader that writes there
 /// draws over the screen.
-fn read_record(home: &Path) -> Result<home::Record, String> {
-    if let Ok(text) = std::fs::read_to_string(home.join(home::RECORD)) {
-        return home::parse(&text).map_err(|e| format!("{}: {e}", home.display()));
+fn read_record(data_home: &Path, key: &str) -> Result<home::Record, String> {
+    let file = paths::record_file(data_home, key);
+    match std::fs::read_to_string(&file) {
+        Ok(text) => return home::parse(&text, key).map_err(|e| format!("{}: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    }
+    let home = paths::home_dir(data_home, key);
+    if let Ok(text) = std::fs::read_to_string(home.join(home::LEGACY_RECORD)) {
+        return home::parse(&text, key).map_err(|e| format!("{}: {e}", home.display()));
     }
     std::fs::read_to_string(home.join(home::LEGACY_STAMP))
         .ok()
-        .and_then(|stamped| home::from_legacy(home, &stamped))
+        .and_then(|stamped| home::from_legacy(&home, &stamped))
         .ok_or_else(|| format!("{} holds no box record", home.display()))
 }
 
@@ -511,27 +532,26 @@ fn report_problems(problems: &[String]) {
     }
 }
 
-/// Writes the box's own record into its home, fresh on every start: what
-/// it is, where it works and when it last ran, so `ps --all` can list it
-/// and `--id` can bring it back. The first start's time is kept.
+/// Writes the box's own record, fresh on every start: what it is, where it
+/// works and when it last ran, so `ps --all` can list it and `--id` can
+/// bring it back. The first start's time and every workspace it ran in
+/// before are kept.
 ///
 /// Takes the record whole: three `Option<&str>` in a row once let a start
 /// file its name as its role's identity, and named fields cannot be passed
 /// in the wrong order.
-fn write_record(home: &Path, record: home::Record) {
-    let created_unix = read_record(home)
-        .ok()
-        .map(|kept| kept.created_unix)
-        .filter(|created| *created != 0)
-        .unwrap_or(record.created_unix);
-    write_box_record(
-        home,
-        &home::Record {
-            created_unix,
+fn write_record(data_home: &Path, record: home::Record) {
+    let record = match read_record(data_home, &record.key) {
+        Ok(kept) => home::Record {
+            created_unix: Some(kept.created_unix)
+                .filter(|created| *created != 0)
+                .unwrap_or(record.created_unix),
+            earlier: kept.ran_in(&record.workspace).earlier,
             ..record
         },
-    )
-    .unwrap_or_else(|e| fail(&e));
+        Err(_) => record,
+    };
+    write_box_record(data_home, &record).unwrap_or_else(|e| fail(&e));
 }
 
 /// Writes this box's registry entry beside its root copy. A failure here
@@ -541,24 +561,7 @@ fn write_record(home: &Path, record: home::Record) {
 /// In one step, because every other wormhole on the host scans this file
 /// while we write it: a reader that caught a half-written entry used to
 /// take `ps`, the panel and every starting box down with it.
-fn register_box(
-    box_dir: &Path,
-    box_id: &str,
-    manifest: &manifest::Manifest,
-    workspace: &Path,
-    image: &Path,
-    alias: Option<&str>,
-) {
-    let entry = registry::Entry {
-        pid: std::process::id(),
-        box_id: box_id.to_owned(),
-        workspace: workspace.to_owned(),
-        image: image.display().to_string(),
-        agent: manifest.agent.product().map(str::to_owned),
-        name: manifest.name.clone(),
-        alias: alias.map(str::to_owned),
-        started_unix: now_unix(),
-    };
+fn register_box(box_dir: &Path, entry: registry::Entry) {
     let text = registry::to_toml(&entry).unwrap_or_else(|e| fail(&e));
     replace_file(&box_dir.join("box.toml"), &text)
         .unwrap_or_else(|e| fail(&format!("cannot write the box registry entry: {e}")));
@@ -647,7 +650,10 @@ fn gc_cmd(args: &[String]) -> ! {
                 .and_then(|name| name.to_str())
                 .map(str::to_owned),
         );
-        let record = read_record(&path).ok();
+        let record = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|key| read_record(&data_home, key).ok());
         let workspace = record
             .as_ref()
             .map(|record| record.workspace.display().to_string());
@@ -676,6 +682,17 @@ fn gc_cmd(args: &[String]) -> ! {
         items.push(gc::Item {
             bytes: tree_bytes(&path),
             verdict: gc::lock_verdict(key, &keys),
+            path,
+        });
+    }
+    for entry in read_dir(&paths::records_dir(&data_home)) {
+        let path = entry.path();
+        let Some(key) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        items.push(gc::Item {
+            bytes: tree_bytes(&path),
+            verdict: gc::record_verdict(key, &keys),
             path,
         });
     }
@@ -1238,10 +1255,17 @@ impl<'a> Claimed<'a> {
     /// on the same box while this one is still deleting. It costs nothing,
     /// it is reused when the ordinal is, and `gc` reclaims the rest.
     fn remove(&self, data_home: &Path) -> Result<(), String> {
-        image::remove(&paths::home_dir(data_home, &self.target.key))
+        image::remove(&paths::home_dir(data_home, &self.target.key))?;
+        match std::fs::remove_file(paths::record_file(data_home, &self.target.key)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!(
+                "cannot remove box {}'s record: {e}",
+                self.target.id
+            )),
+            _ => Ok(()),
+        }
     }
 
-    /// Empties the home and gives the box back its own record.
+    /// Empties the home and keeps the box's record.
     ///
     /// The box survives: same id, same name, same workspace, same role.
     /// Only what the agent put there is gone — which is the difference
@@ -1249,15 +1273,16 @@ impl<'a> Claimed<'a> {
     /// this is not `remove` followed by `box --new`.
     fn reset(&self, data_home: &Path) -> Result<(), String> {
         let home = paths::home_dir(data_home, &self.target.key);
-        self.remove(data_home)?;
+        image::remove(&home)?;
         std::fs::create_dir_all(&home)
             .map_err(|e| format!("cannot create box home {}: {e}", home.display()))?;
-        // A box with no record to put back is left empty, which is what it
-        // already was: the next start writes one.
+        // Written again because an older wormhole's record was in the
+        // home just emptied. A box with none is left empty, which is what
+        // it already was: the next start writes one.
         self.target
             .record
             .as_ref()
-            .map_or(Ok(()), |record| write_box_record(&home, record))
+            .map_or(Ok(()), |record| write_box_record(data_home, record))
     }
 
     /// Sets what the box answers to besides its id.
@@ -1284,17 +1309,35 @@ impl<'a> Claimed<'a> {
             alias: Some(alias.to_owned()),
             ..record.clone()
         };
-        write_box_record(&paths::home_dir(data_home, &self.target.key), &renamed)
+        write_box_record(data_home, &renamed)
     }
 }
 
-/// Writes a box's record into its home. The one writer, so a start, a
-/// reset and a rename cannot disagree about what a record on disk is.
+/// Writes a box's record host-side. The one writer, so a start, a reset
+/// and a rename cannot disagree about what a record on disk is.
 ///
 /// Atomically, because the panel reads this file once a second while it
-/// draws: a reader must never see half of one.
-fn write_box_record(home: &Path, record: &home::Record) -> Result<(), String> {
-    replace_file(&home.join(home::RECORD), home::to_toml(record)?)
+/// draws: a reader must never see half of one. Then whatever an older
+/// wormhole left in the home goes, so no copy the agent can edit stays
+/// behind to be read by one.
+fn write_box_record(data_home: &Path, record: &home::Record) -> Result<(), String> {
+    replace_file(
+        &paths::record_file(data_home, &record.key),
+        home::to_toml(record)?,
+    )?;
+    let home = paths::home_dir(data_home, &record.key);
+    for legacy in [home::LEGACY_RECORD, home::LEGACY_STAMP] {
+        match std::fs::remove_file(home.join(legacy)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "cannot remove {}: {e}",
+                    home.join(legacy).display()
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// `wormhole remove <id|name>...`: take boxes away.
@@ -1342,16 +1385,17 @@ fn rename_cmd(args: &[String]) -> ! {
 
 fn box_alias(
     data_home: &Path,
-    box_home: &Path,
+    box_key: &str,
     workspace: &Path,
     box_id: &str,
     wanted: Option<&str>,
 ) -> Option<String> {
     let Some(wanted) = wanted else {
-        // A home is keyed by workspace and id, so this file is already
-        // this box in this workspace — one read rather than a scan of
-        // every home on the host to look at one field of one of them.
-        return read_record(box_home).ok().and_then(|record| record.alias);
+        // One read of this box's record rather than a scan of every box
+        // on the host to look at one field of one of them.
+        return read_record(data_home, box_key)
+            .ok()
+            .and_then(|record| record.alias);
     };
     let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
     report_problems(&problems);
@@ -1437,8 +1481,7 @@ fn attach_box(id: &str, command: Option<Vec<String>>, env_args: &[run::EnvArg]) 
     // this terminal would be named to the box without being resolvable in
     // it. A terminal the host itself cannot describe is left as it is:
     // there is nothing truer to say about it from here.
-    let home = paths::home_dir(&data_home, &paths::box_key(&entry.workspace, &entry.box_id));
-    terminfo::carry(&host, &home);
+    terminfo::carry(&host, &paths::home_dir(&data_home, &entry.key()));
     let init = init_pid(&data_home, entry.pid).unwrap_or_else(|e| fail(&e));
     boundary::attach(init, &entry.workspace, &command, env.as_ref())
 }

@@ -6,7 +6,15 @@ use std::path::Path;
 use nix::fcntl::{Flock, FlockArg};
 use wormhole_core::{home, paths};
 
-use crate::{fail, kept_boxes, read_record, report_problems};
+use crate::{fail, home_keys, kept_boxes, report_problems};
+
+/// A box this process holds the claim on, and the key its store entries
+/// are named by. Found, never rebuilt from where the start stands.
+pub(crate) struct Claim {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) lock: Flock<std::fs::File>,
+}
 
 /// Which box this run is, claimed for as long as this process lives.
 ///
@@ -24,42 +32,33 @@ use crate::{fail, kept_boxes, read_record, report_problems};
 ///
 /// The lock's file holds the pid of whoever took it, so a refusal can name
 /// them. That text is a courtesy; the lock is the claim.
-pub(crate) fn claim_named(
-    data_home: &Path,
-    workspace: &Path,
-    wanted: &str,
-) -> (String, Flock<std::fs::File>) {
+pub(crate) fn claim_named(data_home: &Path, workspace: &Path, wanted: &str) -> Claim {
     // An id names a box by its directory, and nothing else has to be
     // readable for that: a home whose record is corrupt is still a box
     // this can start. An alias lives *in* the record, so it can only be
     // looked up among the records that parse.
-    let id = if paths::is_box_id(wanted) {
-        let home = paths::home_dir(data_home, &paths::box_key(workspace, wanted));
-        if !home.is_dir() {
-            fail(&home::no_box(wanted));
-        }
-        if let Ok(record) = read_record(&home)
-            && record.workspace != workspace
-        {
-            fail(&format!(
-                "box {wanted} belongs to {}, not to this workspace",
-                record.workspace.display()
-            ));
-        }
-        wanted.to_owned()
-    } else {
-        let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
-        report_problems(&problems);
-        home::by_name(&kept, workspace, wanted)
-            .unwrap_or_else(|| fail(&home::no_box(wanted)))
-            .id
-            .clone()
-    };
-    match claim_id(data_home, workspace, &id) {
-        Some(lock) => (id, lock),
+    let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
+    report_problems(&problems);
+    let target = home::target(&kept, &home_keys(data_home), workspace, wanted)
+        .unwrap_or_else(|| fail(&home::no_box_found(wanted)));
+    if let Some(record) = &target.record
+        && record.workspace != workspace
+    {
+        fail(&format!(
+            "box {wanted} belongs to {}, not to this workspace",
+            record.workspace.display()
+        ));
+    }
+    match claim_key(data_home, &target.key) {
+        Some(lock) => Claim {
+            id: target.id,
+            key: target.key,
+            lock,
+        },
         None => fail(&format!(
-            "box {id} is already running{}",
-            holder(data_home, &paths::box_key(workspace, &id))
+            "box {} is already running{}",
+            target.id,
+            holder(data_home, &target.key)
         )),
     }
 }
@@ -71,43 +70,47 @@ pub(crate) fn claim_free(
     workspace: &Path,
     new: bool,
     wanted: home::Wanted<'_>,
-) -> (String, Flock<std::fs::File>) {
-    let claim = |id: &str| claim_id(data_home, workspace, id);
+) -> Claim {
     // A home that cannot be read is a box that cannot be resumed, and the
     // silent answer to that is a *new* box. Say so before starting one.
     let (kept, problems) = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
     report_problems(&problems);
     if !new {
         for record in home::resumable(&kept, workspace, wanted) {
-            if let Some(lock) = claim(&record.id) {
+            if let Some(lock) = claim_key(data_home, &record.key) {
                 println!("box: {} (resumed)", record.id);
-                return (record.id.clone(), lock);
+                return Claim {
+                    id: record.id.clone(),
+                    key: record.key.clone(),
+                    lock,
+                };
             }
         }
     }
 
     // Every box is busy, or another was asked for. Ordinals are dense and
     // the loser of a race simply takes the next one, so two `--new` at the
-    // same instant get two boxes rather than one refusal.
-    let mut taken: Vec<String> = kept.iter().map(|record| record.id.clone()).collect();
+    // same instant get two boxes rather than one refusal. A home whose
+    // record cannot be read still holds its id.
+    let mut taken: Vec<String> = home_keys(data_home)
+        .iter()
+        .filter_map(|key| paths::key_id(key))
+        .map(str::to_owned)
+        .collect();
     loop {
         let id = paths::box_id(workspace, home::free_ordinal(&taken, workspace));
-        if let Some(lock) = claim(&id) {
+        let key = paths::box_key(workspace, &id);
+        if let Some(lock) = claim_key(data_home, &key) {
             println!("box: {id} (new)");
-            return (id, lock);
+            return Claim { id, key, lock };
         }
         taken.push(id);
     }
 }
 
 /// Takes one box's claim, or `None` when another process holds it.
-pub(crate) fn claim_id(
-    data_home: &Path,
-    workspace: &Path,
-    id: &str,
-) -> Option<Flock<std::fs::File>> {
-    let file = paths::lock_file(data_home, &paths::box_key(workspace, id));
-    try_lock(&file).unwrap_or_else(|e| fail(&e))
+fn claim_key(data_home: &Path, key: &str) -> Option<Flock<std::fs::File>> {
+    try_lock(&paths::lock_file(data_home, key)).unwrap_or_else(|e| fail(&e))
 }
 
 /// Who holds a box's claim, for a refusal that names them. Empty when the

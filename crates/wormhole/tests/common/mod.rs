@@ -221,8 +221,10 @@ pub fn said(output: &std::process::Output) -> String {
 /// covering it.
 pub fn a_record(workspace: &Path, id: &str, alias: Option<&str>) -> wormhole_core::home::Record {
     wormhole_core::home::Record {
+        key: wormhole_core::paths::box_key(workspace, id),
         id: id.to_owned(),
         workspace: workspace.to_owned(),
+        earlier: Vec::new(),
         role: None,
         source: None,
         alias: alias.map(str::to_owned),
@@ -236,14 +238,23 @@ pub fn a_record(workspace: &Path, id: &str, alias: Option<&str>) -> wormhole_cor
 /// A kept box on disk: its home, its record, and one file standing in for
 /// everything an agent leaves behind. Returns the home.
 pub fn keep_box(data_home: &Path, record: &wormhole_core::home::Record) -> std::path::PathBuf {
-    let key = wormhole_core::paths::box_key(&record.workspace, &record.id);
-    let home = wormhole_core::paths::home_dir(data_home, &key);
-    std::fs::create_dir_all(home.join(".wormhole")).expect("home");
-    std::fs::write(
-        home.join(wormhole_core::home::RECORD),
-        wormhole_core::home::to_toml(record).expect("toml"),
-    )
-    .expect("record");
+    let home = wormhole_core::paths::home_dir(data_home, &record.key);
+    std::fs::create_dir_all(&home).expect("home");
+    let file = wormhole_core::paths::record_file(data_home, &record.key);
+    std::fs::create_dir_all(file.parent().expect("records dir")).expect("records dir");
+    std::fs::write(file, wormhole_core::home::to_toml(record).expect("toml")).expect("record");
     std::fs::write(home.join("history.jsonl"), "what the agent knew\n").expect("history");
     home
+}
+
+/// The record the host keeps for the box living in `home`.
+pub fn kept_record(data_home: &Path, home: &Path) -> wormhole_core::home::Record {
+    let key = home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a home is named by its key");
+    let file = wormhole_core::paths::record_file(data_home, key);
+    let text = std::fs::read_to_string(&file)
+        .unwrap_or_else(|e| panic!("no host-side record at {}: {e}", file.display()));
+    wormhole_core::home::parse(&text, key).expect("a valid record")
 }

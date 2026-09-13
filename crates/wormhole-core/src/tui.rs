@@ -687,8 +687,10 @@ mod tests {
                 .enumerate()
                 .map(|(n, pid)| Listing {
                     record: crate::home::Record {
+                        key: format!("w-{n:012x}"),
                         id: format!("{n:012x}"),
                         workspace: std::path::PathBuf::from("/w"),
+                        earlier: Vec::new(),
                         role: None,
                         source: None,
                         alias: None,

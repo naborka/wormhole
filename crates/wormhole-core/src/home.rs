@@ -1,11 +1,12 @@
-//! What a kept home records about the box it belongs to, and which box a
-//! `wormhole box` should be.
+//! What wormhole records about a kept box, and which box a `wormhole box`
+//! should be.
 //!
 //! A box outlives every process that ever ran it: its home holds the
 //! agent's history, its logins and whatever the preflight hook installed.
-//! So the home is where the box's own record lives — one file, written by
-//! the box itself on every start. Nothing else has to be kept in step,
-//! and a home carried to another machine carries its box with it.
+//! Its record does not live there. The home is the agent's to write, and a
+//! record the agent could rewrite would let it pick which workspace the
+//! next start mounts and which role resumes it. So the record sits beside
+//! the lock, host-side.
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::table;
 
-/// Where a box's record sits, relative to its home.
-pub const RECORD: &str = ".wormhole/box.toml";
+/// Where an older wormhole kept a box's record, relative to its home.
+/// Read until that box's next start moves it host-side.
+pub const LEGACY_RECORD: &str = ".wormhole/box.toml";
 
 /// What wormhole wrote there before boxes had ids: the workspace path,
 /// alone. Still read, so a home from before this change is picked up as
@@ -28,11 +30,18 @@ pub const LEGACY_STAMP: &str = ".wormhole/workspace";
 /// that stops parsing is a box that can no longer be listed or resumed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
+    /// What the box's store entries are named by: its home, its lock and
+    /// this record's own file. Taken from where the record was found and
+    /// never written into it, so the two cannot disagree.
+    #[serde(skip)]
+    pub key: String,
     pub id: String,
-    /// The workspace this box works in. A home is named by a digest, and
-    /// a digest cannot be inverted: without this nothing could ever tell
-    /// which workspace a home belongs to, or whether it still exists.
+    /// Where this box last ran. Nothing else says which trees a home has
+    /// seen, or whether any of them still exists.
     pub workspace: PathBuf,
+    /// Every other workspace it has run in, most recent first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<PathBuf>,
     /// The role this box was started from, as the user wrote it. `None`
     /// means the workspace's own manifest.
     ///
@@ -71,13 +80,35 @@ pub fn to_toml(record: &Record) -> Result<String, String> {
     toml::to_string(record).map_err(|e| format!("cannot serialize the box record: {e}"))
 }
 
-pub fn parse(text: &str) -> Result<Record, String> {
+/// A record's text, read as the box `key` names.
+pub fn parse(text: &str, key: &str) -> Result<Record, String> {
     toml::from_str(text)
-        .map(Record::healed)
-        .map_err(|e| format!("box.toml is not valid: {}", e.message()))
+        .map(|record: Record| Record {
+            key: key.to_owned(),
+            ..record.healed()
+        })
+        .map_err(|e| format!("box record is not valid: {}", e.message()))
 }
 
 impl Record {
+    /// This record once the box has run in `here`: there first, and
+    /// every other workspace kept once, most recent first.
+    #[must_use]
+    pub fn ran_in(mut self, here: &Path) -> Record {
+        if self.workspace != here {
+            let previous = std::mem::replace(&mut self.workspace, here.to_owned());
+            self.earlier.retain(|workspace| workspace != here);
+            self.earlier.insert(0, previous);
+        }
+        self
+    }
+
+    /// Whether this box has ever run in `here`.
+    #[must_use]
+    pub fn serves(&self, here: &Path) -> bool {
+        self.workspace == here || self.earlier.iter().any(|workspace| workspace == here)
+    }
+
     /// A wormhole once wrote a start's name into `source` and its role's
     /// identity into `alias`. An identity is tagged (`dir:`/`repo:`) and a
     /// usable alias holds no `:`, so the two are mutually exclusive: route
@@ -101,14 +132,17 @@ impl Record {
 /// its directory name already ends in. Both zero times, so a listing sorts
 /// it last and the first start writes the real thing.
 pub fn from_legacy(home: &Path, stamped: &str) -> Option<Record> {
-    let id = crate::paths::key_id(home.file_name()?.to_str()?)?.to_owned();
+    let key = home.file_name()?.to_str()?;
+    let id = crate::paths::key_id(key)?.to_owned();
     let workspace = stamped.trim();
     if workspace.is_empty() {
         return None;
     }
     Some(Record {
+        key: key.to_owned(),
         id,
         workspace: PathBuf::from(workspace),
+        earlier: Vec::new(),
         role: None,
         source: None,
         alias: None,
@@ -238,7 +272,7 @@ pub fn target(
     if let Some(record) = find(records, workspace, wanted) {
         return Some(Target {
             id: record.id.clone(),
-            key: crate::paths::box_key(&record.workspace, &record.id),
+            key: record.key.clone(),
             record: Some(record.clone()),
         });
     }
@@ -430,8 +464,10 @@ impl Record {
     /// carry one.
     fn from_entry(entry: &crate::registry::Entry) -> Record {
         Record {
+            key: entry.key(),
             id: entry.box_id.clone(),
             workspace: entry.workspace.clone(),
+            earlier: Vec::new(),
             role: None,
             source: None,
             alias: entry.alias.clone(),
@@ -509,8 +545,10 @@ mod tests {
 
     fn record(id: &str, workspace: &str, role: Option<&str>, started: u64) -> Record {
         Record {
+            key: crate::paths::box_key(Path::new(workspace), id),
             id: id.to_owned(),
             workspace: PathBuf::from(workspace),
+            earlier: Vec::new(),
             role: role.map(str::to_owned),
             source: None,
             alias: None,
@@ -825,8 +863,41 @@ mod tests {
 
     #[test]
     fn a_record_survives_the_round_trip() {
-        let written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
-        assert_eq!(parse(&to_toml(&written).expect("toml")), Ok(written));
+        let mut written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
+        written.earlier = vec![PathBuf::from("/w/other")];
+        assert_eq!(
+            parse(&to_toml(&written).expect("toml"), &written.key),
+            Ok(written)
+        );
+    }
+
+    /// The key names the file, so it is never written into it: a record
+    /// that said one key inside a file named by another would be two
+    /// answers to which box this is.
+    #[test]
+    fn the_key_comes_from_where_the_record_was_found_not_from_its_text() {
+        let written = record("0123456789ab", "/w/proj", None, 100);
+        let text = to_toml(&written).expect("toml");
+        assert!(!text.contains("key"), "{text}");
+        assert_eq!(
+            parse(&text, "elsewhere-0123456789ab").expect("parses").key,
+            "elsewhere-0123456789ab"
+        );
+    }
+
+    /// A box that runs somewhere new keeps every place it ran before, and
+    /// the new one is where it last ran.
+    #[test]
+    fn running_in_a_workspace_puts_it_first_and_keeps_the_rest_once() {
+        let mut kept = record("0123456789ab", "/a", Some("alphaca"), 100);
+        kept.earlier = vec![PathBuf::from("/b")];
+        let moved = kept.ran_in(Path::new("/b"));
+        assert_eq!(moved.workspace, PathBuf::from("/b"));
+        assert_eq!(moved.earlier, [PathBuf::from("/a")]);
+        let again = moved.clone().ran_in(Path::new("/b"));
+        assert_eq!(again, moved);
+        assert!(again.serves(Path::new("/a")));
+        assert!(!again.serves(Path::new("/c")));
     }
 
     /// A wormhole once filed a start's name under `source` and the role's
@@ -838,13 +909,13 @@ mod tests {
         let mut swapped = record("0123456789ab", "/w", Some("./roles/a"), 100);
         swapped.alias = Some("dir:/w/roles/a".to_owned());
         swapped.source = Some("api".to_owned());
-        let healed = parse(&to_toml(&swapped).expect("toml")).expect("parses");
+        let healed = parse(&to_toml(&swapped).expect("toml"), "w-0123456789ab").expect("parses");
         assert_eq!(healed.alias.as_deref(), Some("api"));
         assert_eq!(healed.source.as_deref(), Some("dir:/w/roles/a"));
 
         let mut unnamed = record("0123456789ab", "/w", Some("r"), 100);
         unnamed.alias = Some("repo:https://example.test/r".to_owned());
-        let healed = parse(&to_toml(&unnamed).expect("toml")).expect("parses");
+        let healed = parse(&to_toml(&unnamed).expect("toml"), "w-0123456789ab").expect("parses");
         assert_eq!(healed.alias, None);
         assert_eq!(
             healed.source.as_deref(),
@@ -853,7 +924,7 @@ mod tests {
 
         let mut named_only = record("0123456789ab", "/w", None, 100);
         named_only.source = Some("api".to_owned());
-        let healed = parse(&to_toml(&named_only).expect("toml")).expect("parses");
+        let healed = parse(&to_toml(&named_only).expect("toml"), "w-0123456789ab").expect("parses");
         assert_eq!(healed.alias.as_deref(), Some("api"));
         assert_eq!(healed.source, None);
 
@@ -861,13 +932,16 @@ mod tests {
             called(record("0123456789ab", "/w", None, 1), "api"),
             "dir:/r",
         );
-        assert_eq!(parse(&to_toml(&right).expect("toml")), Ok(right));
+        assert_eq!(
+            parse(&to_toml(&right).expect("toml"), "w-0123456789ab"),
+            Ok(right)
+        );
     }
 
     #[test]
     fn an_unreadable_record_is_refused_rather_than_guessed_at() {
-        assert!(parse("id = 4\n").is_err());
-        assert!(parse("").is_err());
+        assert!(parse("id = 4\n", "w-0123456789ab").is_err());
+        assert!(parse("", "w-0123456789ab").is_err());
     }
 
     /// A key wormhole has stopped writing must not orphan the box that
@@ -878,7 +952,7 @@ mod tests {
         let written = record("0123456789ab", "/w/proj", Some("alphaca"), 100);
         let mut text = to_toml(&written).expect("toml");
         text.push_str("member = \"ship\"\n");
-        assert_eq!(parse(&text), Ok(written));
+        assert_eq!(parse(&text, &written.key), Ok(written));
     }
 
     /// A home written before boxes had ids is that workspace's first box.
@@ -984,6 +1058,7 @@ mod tests {
         crate::registry::Entry {
             pid,
             box_id: id.to_owned(),
+            key: None,
             workspace: PathBuf::from("/w/proj"),
             image: "/data/img".to_owned(),
             agent: Some("claude".to_owned()),

@@ -376,11 +376,7 @@ fn a_workspace_holds_as_many_boxes_as_you_make() {
     assert_eq!(homes.len(), 2, "{homes:?}");
     let ids: std::collections::BTreeSet<String> = homes
         .iter()
-        .map(|home| {
-            let text = std::fs::read_to_string(home.join(".wormhole/box.toml"))
-                .unwrap_or_else(|e| panic!("{}: {e}", home.display()));
-            wormhole_core::home::parse(&text).expect("record").id
-        })
+        .map(|home| common::kept_record(&data_home, home).id)
         .collect();
     assert_eq!(ids.len(), 2, "two boxes must not share an id: {ids:?}");
 
@@ -437,14 +433,12 @@ fn a_start_records_its_name_and_its_role_where_each_belongs() {
         "--",
         "/bin/true",
     ]);
-    let text = std::fs::read_to_string(kept_home(&data_home).join(".wormhole/box.toml"))
-        .unwrap_or_else(|e| panic!("record written: {e}\n{first}"));
-    let record = wormhole_core::home::parse(&text).expect("record");
-    assert_eq!(record.alias.as_deref(), Some("api"), "{text}");
+    let record = common::kept_record(&data_home, &kept_home(&data_home));
+    assert_eq!(record.alias.as_deref(), Some("api"), "{first}");
     assert_eq!(
         record.source,
         Some(wormhole_core::source::dir_source(&role)),
-        "{text}"
+        "{first}"
     );
 
     assert!(run(&["ps", "--all"]).contains("api"));
@@ -506,10 +500,52 @@ fn a_home_from_before_box_ids_is_resumed_not_orphaned() {
             .count(),
         1
     );
-    // And it now carries the full record, so the next start needs no
-    // guessing at all.
-    let text = std::fs::read_to_string(legacy.join(".wormhole/box.toml")).expect("record written");
-    assert_eq!(wormhole_core::home::parse(&text).expect("record").id, id);
+    // And its full record is now the host's, out of the agent's reach, so
+    // the next start needs no guessing and no trust in the home.
+    assert_eq!(common::kept_record(&data_home, &legacy).id, id);
+    assert!(!legacy.join(".wormhole/workspace").exists());
+    assert!(!legacy.join(".wormhole/box.toml").exists());
+}
+
+/// A record an older wormhole left in the home is read once, then moved
+/// out. Left there, the agent could rewrite which workspace or role the
+/// next start trusts it for.
+#[test]
+fn a_record_left_in_the_home_moves_host_side_at_the_next_start() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (url, digest) = rootfs_tarball(temp.path());
+    let workspace = temp.path().join("workspace");
+    let data_home = temp.path().join("data");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    write_manifest(&workspace, &url, &digest, "");
+    let real = workspace.canonicalize().expect("real workspace");
+    let id = wormhole_core::paths::box_id(&real, 0);
+    let mut record = common::a_record(&real, &id, Some("api"));
+    record.agent = None;
+    let home = wormhole_core::paths::home_dir(&data_home, &record.key);
+    std::fs::create_dir_all(home.join(".wormhole")).expect("home");
+    std::fs::write(
+        home.join(wormhole_core::home::LEGACY_RECORD),
+        wormhole_core::home::to_toml(&record).expect("toml"),
+    )
+    .expect("legacy record");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wormhole"))
+        .args(["box", "--id", "api", "--", "/bin/true"])
+        .current_dir(&workspace)
+        .env("XDG_DATA_HOME", &data_home)
+        .output()
+        .expect("wormhole binary should spawn");
+    let said = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+
+    let moved = common::kept_record(&data_home, &home);
+    assert_eq!(moved.id, id, "{said}");
+    assert_eq!(moved.alias.as_deref(), Some("api"), "{said}");
+    assert!(
+        !home.join(wormhole_core::home::LEGACY_RECORD).exists(),
+        "the agent can still rewrite its record:\n{said}"
+    );
 }
 
 /// A `wormhole ps --all` that could not see an idle box would make it

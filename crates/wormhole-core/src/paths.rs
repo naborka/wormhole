@@ -130,6 +130,20 @@ pub fn lock_file(data_home: &Path, key: &str) -> PathBuf {
     locks_dir(data_home).join(format!("{key}.lock"))
 }
 
+/// What wormhole knows about a box: which workspaces it ran in, its role,
+/// its product and its alias. Beside the lock and never in the home, for
+/// the lock's reason: the home is the agent's, and an identity the agent
+/// can rewrite is not an identity.
+pub fn record_file(data_home: &Path, key: &str) -> PathBuf {
+    records_dir(data_home).join(format!("{key}.toml"))
+}
+
+/// Where every box's record lives. `gc` reads it: a record whose home is
+/// gone belongs to a box that no longer exists.
+pub fn records_dir(data_home: &Path) -> PathBuf {
+    data_home.join("wormhole/records")
+}
+
 /// Where every box's claim token lives. `gc` reads the directory: a lock
 /// whose home is gone is a claim on a box that no longer exists, and the
 /// file stem is exactly the key its home is named by.
