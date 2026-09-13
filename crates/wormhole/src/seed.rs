@@ -91,9 +91,9 @@ pub(crate) fn seed_preflight(manifest: &manifest::Manifest, manifest_dir: &Path,
     seed_file(home, manifest::PREFLIGHT_SEED, &script);
 }
 
-/// Answers the agent's first-run questions in its own config file —
+/// Writes what the box settles into each of the agent's config files —
 /// merged, never overwritten, so logins and the agent's own choices in
-/// the kept home survive. Which file and which format is the registry's
+/// the kept home survive. Which files, keys and values is the registry's
 /// answer, not a string compared here. A login handed over carries the
 /// host's account fields along, where the box has none of its own.
 pub(crate) fn seed_agent_config(
@@ -102,32 +102,19 @@ pub(crate) fn seed_agent_config(
     home: &Path,
     credentials: manifest::Credentials,
 ) {
-    let Some(kind) = manifest::config_seed(manifest) else {
-        return;
-    };
-    let file = home.join(kind.file());
-    let existing = read_if_present(&file);
     let workspace = workspace.display().to_string();
-    let config = match kind {
-        manifest::ConfigSeed::ClaudeJson => {
-            let host_login = match credentials {
-                manifest::Credentials::None => None,
-                _ => read_if_present(&host_home().join(".claude.json")),
-            };
-            wormhole_core::seed::claude_config(
-                existing.as_deref(),
-                &workspace,
-                host_login.as_deref(),
-            )
-        }
-        manifest::ConfigSeed::CodexToml => wormhole_core::seed::codex_config(
-            existing.as_deref(),
-            &workspace,
-            manifest.agent.model.as_deref(),
-        ),
+    for write in manifest::config_writes(manifest, &workspace) {
+        let file = home.join(write.file);
+        let existing = read_if_present(&file);
+        let host = match credentials {
+            manifest::Credentials::None => None,
+            _ if write.login_fields.is_empty() => None,
+            _ => read_if_present(&host_home().join(write.file)),
+        };
+        let config = wormhole_core::seed::config_file(&write, existing.as_deref(), host.as_deref())
+            .unwrap_or_else(|e| fail(&e));
+        replace_file(&file, config).unwrap_or_else(|e| fail(&e));
     }
-    .unwrap_or_else(|e| fail(&e));
-    replace_file(&file, config).unwrap_or_else(|e| fail(&e));
 }
 
 /// A file's text, `None` when there is no such file.

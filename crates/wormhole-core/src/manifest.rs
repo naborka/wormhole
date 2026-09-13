@@ -265,27 +265,116 @@ pub enum Pointer {
     Symlink,
 }
 
-/// Which config file a box start seeds first-run answers into. The
-/// formats differ structurally — JSON merged one way, TOML another — so
-/// the writer dispatches on this once, in one place.
+/// Whether what a start writes replaces what the file already holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigSeed {
-    /// Claude Code's `.claude.json`: onboarding, bypass warning, trust.
-    ClaudeJson,
-    /// Codex's `.codex/config.toml`: workspace trust, and the model —
-    /// codex reads no env var for one.
-    CodexToml,
+pub enum Rule {
+    /// The box settles it, so every start writes it over whatever a past
+    /// session left there.
+    Settled,
+    /// A starting point, written only where the file has no value: a
+    /// choice the agent or its user makes later survives.
+    Initial,
 }
 
-impl ConfigSeed {
-    /// The file this seeding writes, relative to the box home.
-    #[must_use]
-    pub fn file(self) -> &'static str {
-        match self {
-            Self::ClaudeJson => ".claude.json",
-            Self::CodexToml => ".codex/config.toml",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Json,
+    Toml,
+}
+
+/// A table on the way to a key a start writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Name(&'static str),
+    /// The box's workspace path, which agents keep per-directory answers
+    /// under.
+    Workspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Literal {
+    Bool(bool),
+    Text(&'static str),
+}
+
+/// One key a start writes, as the registry spells it.
+struct Answer {
+    table: &'static [Key],
+    key: &'static str,
+    value: Literal,
+    rule: Rule,
+}
+
+const fn settled(table: &'static [Key], key: &'static str, value: Literal) -> Answer {
+    Answer {
+        table,
+        key,
+        value,
+        rule: Rule::Settled,
+    }
+}
+
+const fn initial(table: &'static [Key], key: &'static str, value: Literal) -> Answer {
+    Answer {
+        table,
+        key,
+        value,
+        rule: Rule::Initial,
+    }
+}
+
+impl Answer {
+    fn resolve(&self, workspace: &str) -> Entry {
+        Entry {
+            table: self
+                .table
+                .iter()
+                .map(|key| match key {
+                    Key::Name(name) => (*name).to_owned(),
+                    Key::Workspace => workspace.to_owned(),
+                })
+                .collect(),
+            key: self.key.to_owned(),
+            value: match self.value {
+                Literal::Bool(value) => serde_json::Value::Bool(value),
+                Literal::Text(value) => serde_json::Value::String(value.to_owned()),
+            },
+            rule: self.rule,
         }
     }
+}
+
+/// One of an agent's own config files, and what a start writes into it.
+struct ConfigFile {
+    /// Relative to the box home.
+    file: &'static str,
+    format: Format,
+    answers: &'static [Answer],
+    /// Where the manifest's `model` goes, for an agent that reads no env
+    /// var for one.
+    model_key: Option<&'static str>,
+    /// Top-level fields of the host's own copy that are the other half of
+    /// a login handed over; the credential file is the first.
+    login_fields: &'static [&'static str],
+}
+
+/// A config file as one start writes it, every value resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigWrite {
+    /// Relative to the box home, and to the host's home for `login_fields`.
+    pub file: &'static str,
+    pub format: Format,
+    pub entries: Vec<Entry>,
+    pub login_fields: &'static [&'static str],
+}
+
+/// One value, written at `key` inside the nested `table`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub table: Vec<String>,
+    pub key: String,
+    pub value: serde_json::Value,
+    pub rule: Rule,
 }
 
 /// How an agent saves a login, which decides whether its credential file
@@ -325,9 +414,113 @@ struct KnownAgent {
     credential_files: &'static [&'static str],
     /// How the agent saves one, which decides whether it can share one.
     credential_write: CredentialWrite,
-    /// `None` for an agent that asks nothing a start could answer for it.
-    config: Option<ConfigSeed>,
+    /// The agent's own config files and what a start writes into each:
+    /// every question the box existing already answers.
+    config: &'static [ConfigFile],
+    /// Variables the box sets for this agent, for what it settles that no
+    /// config file holds. A manifest that declares one means it and wins.
+    env: &'static [(&'static str, &'static str)],
 }
+
+const TRUE: Literal = Literal::Bool(true);
+const PROJECT: &[Key] = &[Key::Name("projects"), Key::Workspace];
+const EFFORT_NUDGE: &[Key] = &[Key::Name("hasSeenEffortMediumNudgeByModel")];
+
+/// Claude Code's state file: questions it asks once. Key names read off
+/// Claude Code 2.1.270, and present in 2.1.246, the oldest a role pins.
+const CLAUDE_STATE: ConfigFile = ConfigFile {
+    file: ".claude.json",
+    format: Format::Json,
+    answers: &[
+        settled(&[], "hasCompletedOnboarding", TRUE),
+        // Newer builds read `skipDangerousModePermissionPrompt` instead and
+        // move this one there themselves; an older pinned build may read
+        // only this.
+        settled(&[], "bypassPermissionsModeAccepted", TRUE),
+        settled(&[], "hasAcknowledgedCostThreshold", TRUE),
+        // An offer to make auto mode the default, brought on by the
+        // `defaultMode` the settings carry. Accepted, the box is gated by a
+        // classifier.
+        settled(&[], "hasSeenAutoDefaultNudge", TRUE),
+        // An offer to drop effort to medium. Builds before 2.1.270 read the
+        // flat key; later ones one key per model they offer it for.
+        settled(&[], "hasSeenEffortMediumNudge", TRUE),
+        settled(EFFORT_NUDGE, "claude-opus-5", TRUE),
+        settled(EFFORT_NUDGE, "claude-fable-5-1", TRUE),
+        initial(&[], "theme", Literal::Text("dark")),
+        settled(PROJECT, "hasTrustDialogAccepted", TRUE),
+        settled(PROJECT, "hasCompletedProjectOnboarding", TRUE),
+        // A CLAUDE.md importing from outside the workspace asks first, and
+        // an unanswered ask loads nothing. The box can import only what it
+        // can see.
+        settled(PROJECT, "hasClaudeMdExternalIncludesApproved", TRUE),
+        settled(PROJECT, "hasClaudeMdExternalIncludesWarningShown", TRUE),
+    ],
+    model_key: None,
+    login_fields: &["oauthAccount"],
+};
+
+/// Claude Code's user settings. The flag reaches only the process wormhole
+/// starts; a resumed session, a background worker and a `claude` typed in
+/// an attached shell start from these.
+const CLAUDE_SETTINGS: ConfigFile = ConfigFile {
+    file: ".claude/settings.json",
+    format: Format::Json,
+    answers: &[
+        settled(&[], "skipDangerousModePermissionPrompt", TRUE),
+        settled(
+            &[Key::Name("permissions")],
+            "defaultMode",
+            Literal::Text("bypassPermissions"),
+        ),
+        settled(&[], "enableAllProjectMcpServers", TRUE),
+        // After a safeguard flag, pause rather than switch to an older
+        // model. CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK goes further but is
+        // undocumented; this documented key is what holds if it goes.
+        initial(&[], "switchModelsOnFlag", Literal::Bool(false)),
+    ],
+    model_key: None,
+    login_fields: &[],
+};
+
+/// Codex's config. The flag's two answers are here as well, for the paths
+/// it does not reach: a `codex resume` typed in an attached shell, an
+/// app-server thread.
+const CODEX_CONFIG: ConfigFile = ConfigFile {
+    file: ".codex/config.toml",
+    format: Format::Toml,
+    answers: &[
+        // Asked per directory, even under the bypass flag.
+        settled(PROJECT, "trust_level", Literal::Text("trusted")),
+        settled(&[], "approval_policy", Literal::Text("never")),
+        settled(&[], "sandbox_mode", Literal::Text("danger-full-access")),
+        // Otherwise `cached`: an index of the web, not the web.
+        settled(&[], "web_search", Literal::Text("live")),
+        // A popup offering a cheaper model near the rate limit.
+        settled(&[Key::Name("notice")], "hide_rate_limit_model_nudge", TRUE),
+    ],
+    model_key: Some("model"),
+    login_fields: &[],
+};
+
+/// Grok's config. `grok agent`, a session its leader spawns and any start
+/// without the flag read the mode here, and the TUI saves a mode toggled
+/// by hand to the same key.
+const GROK_CONFIG: ConfigFile = ConfigFile {
+    file: ".grok/config.toml",
+    format: Format::Toml,
+    answers: &[
+        settled(
+            &[Key::Name("ui")],
+            "permission_mode",
+            Literal::Text("always-approve"),
+        ),
+        // Off by default, which leaves search and no fetch.
+        settled(&[Key::Name("features")], "web_fetch", TRUE),
+    ],
+    model_key: None,
+    login_fields: &[],
+};
 
 const KNOWN_AGENTS: [KnownAgent; 3] = [
     KnownAgent {
@@ -339,10 +532,23 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         pointer: Pointer::Import("@~/AGENTS.md\n"),
         model_env: Some("ANTHROPIC_MODEL"),
         // The account fields in `.claude.json` travel with it; see
-        // `seed::claude_config`.
+        // `CLAUDE_STATE`.
         credential_files: &[".claude/.credentials.json"],
         credential_write: CredentialWrite::InPlace,
-        config: Some(ConfigSeed::ClaudeJson),
+        config: &[CLAUDE_STATE, CLAUDE_SETTINGS],
+        env: &[
+            // A safeguard flag ends the turn instead of moving the session,
+            // or a subagent, to an older model.
+            ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"),
+            // Capacity errors and usage limits are waited out rather than
+            // ending the run.
+            ("CLAUDE_CODE_RETRY_WATCHDOG", "1"),
+            // The box is the sandbox: no server-forced Bash sandbox inside
+            // it, and no trust dialog for a nested repository the seeded
+            // trust does not name.
+            ("IS_SANDBOX", "1"),
+            ("CLAUDE_CODE_SANDBOXED", "1"),
+        ],
     },
     KnownAgent {
         name: "codex",
@@ -356,7 +562,8 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         model_env: None,
         credential_files: &[".codex/auth.json"],
         credential_write: CredentialWrite::InPlace,
-        config: Some(ConfigSeed::CodexToml),
+        config: &[CODEX_CONFIG],
+        env: &[],
     },
     KnownAgent {
         name: "grok",
@@ -372,7 +579,10 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         model_env: Some("GROK_DEFAULT_MODEL"),
         credential_files: &[".grok/auth.json"],
         credential_write: CredentialWrite::Replace,
-        config: None,
+        config: &[GROK_CONFIG],
+        // `--trust` grants the launch directory alone; a nested repository
+        // or a moved workspace would ask again.
+        env: &[("GROK_FOLDER_TRUST", "0")],
     },
 ];
 
@@ -657,9 +867,39 @@ pub fn pointer_link(target: &str) -> String {
     link
 }
 
-/// Which config file a start seeds for this agent.
-pub fn config_seed(manifest: &Manifest) -> Option<ConfigSeed> {
-    known(manifest.agent.product()?).and_then(|agent| agent.config)
+/// Every config file a start writes for this agent, every value resolved:
+/// the registry's answers at this workspace, and the manifest's model
+/// where the agent reads it from a file. Empty with no agent.
+#[must_use]
+pub fn config_writes(manifest: &Manifest, workspace: &str) -> Vec<ConfigWrite> {
+    let Some(agent) = manifest.agent.product().and_then(known) else {
+        return Vec::new();
+    };
+    agent
+        .config
+        .iter()
+        .map(|config| {
+            let mut entries: Vec<Entry> = config
+                .answers
+                .iter()
+                .map(|answer| answer.resolve(workspace))
+                .collect();
+            if let (Some(key), Some(model)) = (config.model_key, manifest.agent.model.as_deref()) {
+                entries.push(Entry {
+                    table: Vec::new(),
+                    key: key.to_owned(),
+                    value: serde_json::Value::String(model.to_owned()),
+                    rule: Rule::Settled,
+                });
+            }
+            ConfigWrite {
+                file: config.file,
+                format: config.format,
+                entries,
+                login_fields: config.login_fields,
+            }
+        })
+        .collect()
 }
 
 /// Why a start that did not name a product cannot go on.
@@ -908,6 +1148,16 @@ pub fn declarations(manifest: &Manifest) -> BTreeMap<String, EnvVar> {
     }
     if let Some(name) = manifest.agent.product() {
         declared.insert(RUN_ENV.to_owned(), fixed(name.to_owned()));
+    }
+    let agent_env = manifest
+        .agent
+        .product()
+        .and_then(known)
+        .map_or(&[][..], |agent| agent.env);
+    for (name, value) in agent_env {
+        declared
+            .entry((*name).to_owned())
+            .or_insert_with(|| fixed((*value).to_owned()));
     }
     // Mounting the host's bundle is not enough on its own: the clients in
     // the box mostly do not read that path unless they are told to, and
@@ -1881,33 +2131,80 @@ mod tests {
     }
 
     #[test]
-    fn each_agent_says_which_config_a_start_seeds_and_where() {
+    fn each_agent_says_which_files_a_start_writes() {
+        let files = |extra: &str| -> Vec<&str> {
+            config_writes(&full(extra), "/w")
+                .iter()
+                .map(|write| write.file)
+                .collect()
+        };
         assert_eq!(
-            config_seed(&full("[agent]\nrun = \"claude\"\n")),
-            Some(ConfigSeed::ClaudeJson)
+            files("[agent]\nrun = \"claude\"\n"),
+            [".claude.json", ".claude/settings.json"]
         );
-        assert_eq!(ConfigSeed::ClaudeJson.file(), ".claude.json");
-        assert_eq!(
-            config_seed(&full("[agent]\nrun = \"codex\"\n")),
-            Some(ConfigSeed::CodexToml)
-        );
-        assert_eq!(ConfigSeed::CodexToml.file(), ".codex/config.toml");
-        assert_eq!(config_seed(&full("[agent]\nrun = \"grok\"\n")), None);
-        assert_eq!(config_seed(&full("")), None);
+        assert_eq!(files("[agent]\nrun = \"codex\"\n"), [".codex/config.toml"]);
+        assert_eq!(files("[agent]\nrun = \"grok\"\n"), [".grok/config.toml"]);
+        assert!(files("").is_empty());
     }
 
     /// A manifest's `model` must have somewhere to go: an env var the
-    /// agent reads, or the config file a start seeds for it. An agent
+    /// agent reads, or a key in a config file a start writes. An agent
     /// with neither would take a `model` and silently drop it.
     #[test]
     fn every_agent_has_somewhere_to_put_a_model() {
         for agent in &KNOWN_AGENTS {
             assert!(
-                agent.model_env.is_some() || agent.config == Some(ConfigSeed::CodexToml),
+                agent.model_env.is_some() || agent.config.iter().any(|f| f.model_key.is_some()),
                 "{} takes a model nowhere",
                 agent.name
             );
         }
+    }
+
+    /// The box is the sandbox, so claude is told it is in one, and a
+    /// safeguard flag ends a turn rather than moving the session to an
+    /// older model. The host cannot undo any of it.
+    #[test]
+    fn a_claude_box_tells_claude_what_the_box_settles() {
+        let env = box_env(
+            &full("[agent]\nrun = \"claude\"\n"),
+            &host(&[("IS_SANDBOX", "0")]),
+        );
+        for (name, value) in [
+            ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"),
+            ("CLAUDE_CODE_RETRY_WATCHDOG", "1"),
+            ("CLAUDE_CODE_SANDBOXED", "1"),
+            ("IS_SANDBOX", "1"),
+        ] {
+            assert_eq!(env.get(name).map(String::as_str), Some(value), "{name}");
+        }
+    }
+
+    #[test]
+    fn each_agent_is_told_only_its_own_settings() {
+        let grok = box_env(&full("[agent]\nrun = \"grok\"\n"), &host(&[]));
+        assert_eq!(grok.get("GROK_FOLDER_TRUST").map(String::as_str), Some("0"));
+        assert!(!grok.contains_key("IS_SANDBOX"), "{grok:?}");
+        let codex = box_env(&full("[agent]\nrun = \"codex\"\n"), &host(&[]));
+        assert!(!codex.contains_key("IS_SANDBOX"), "{codex:?}");
+        assert!(!codex.contains_key("GROK_FOLDER_TRUST"), "{codex:?}");
+    }
+
+    /// A role that wants a flagged message to switch models after all
+    /// says so in its own `[env]`.
+    #[test]
+    fn a_manifest_takes_back_a_setting_by_declaring_it() {
+        let env = box_env(
+            &full(
+                "[agent]\nrun = \"claude\"\n[env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK]\nfixed = \"\"\n",
+            ),
+            &host(&[]),
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK")
+                .map(String::as_str),
+            Some("")
+        );
     }
 
     #[test]

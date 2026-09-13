@@ -323,6 +323,17 @@ fn box_seeds_the_kept_home_with_the_instructions() {
         config.contains(&format!("\"{}\"", workspace.display())),
         "trust must name the workspace:\n{config}"
     );
+    let settings =
+        std::fs::read_to_string(home.join(".claude/settings.json")).expect("settings seeded");
+    for answered in [
+        "\"skipDangerousModePermissionPrompt\": true",
+        "\"defaultMode\": \"bypassPermissions\"",
+    ] {
+        assert!(
+            settings.contains(answered),
+            "{answered} missing:\n{settings}"
+        );
+    }
 }
 
 /// A workspace holds as many boxes as you make, each with its own kept
