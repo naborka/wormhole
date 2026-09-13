@@ -264,6 +264,25 @@ MAKE A ROLE
 
 "#;
 
+const HOOK: &str = r#"
+THE HOOK
+  hooks/setup.sh runs in the box before the agent, with WORMHOLE_RUN set
+  to claude, codex or grok. Set up that one product. Install into $HOME:
+  the box's cwd is your workspace, and a tool told nothing writes there.
+
+  case "$WORMHOLE_RUN" in         # every tool has its own name for a CLI
+    claude) skills_agent=claude-code ;;   # the `skills` installer's name
+    codex)  skills_agent=codex ;;
+    grok)   skills_agent=grok ;;
+  esac
+  npx -y skills add owner/repo --skill '*' -a "$skills_agent" -g --yes
+  "$WORMHOLE_RUN" mcp add context7 -- npx -y @upstash/context7-mcp
+  [ "$WORMHOLE_RUN" = claude ] && claude plugin install name@marketplace
+
+  Warn and go on when an extra fails. exit 1 only when the CLI itself is
+  missing: a failing hook stops the box. No secrets here; use [env] ask.
+"#;
+
 const UPDATE: &str = r#"
 MOVE THE AGENT'S VERSION
   Pinned in the image, moving it is an edit and a rebuild; an agent that
@@ -309,6 +328,7 @@ pub fn page() -> String {
     section(&mut out, BOXES);
     out.push_str(AFTER_BOXES);
     section(&mut out, ROLES);
+    out.push_str(HOOK);
     out.push_str(UPDATE);
     section(&mut out, REST);
     out.push_str(TAIL);
@@ -344,7 +364,7 @@ mod tests {
     fn the_page_fits_a_terminal_and_a_context_window() {
         let page = page();
         let lines: Vec<&str> = page.lines().collect();
-        assert!(lines.len() < 140, "{} lines is too long", lines.len());
+        assert!(lines.len() < 160, "{} lines is too long", lines.len());
         for line in &lines {
             assert!(
                 line.chars().count() <= 80,
@@ -379,6 +399,10 @@ mod tests {
             "unreferenced",
             "--run",
             "pick which CLI",
+            "WORMHOLE_RUN",
+            "claude-code",
+            "-g",
+            "mcp add",
         ] {
             assert!(page.contains(topic), "the page never mentions {topic:?}");
         }

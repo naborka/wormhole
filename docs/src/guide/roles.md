@@ -29,23 +29,67 @@ wormhole box --role alphaca --run grok # skip the pick
 A kept box resumes the CLI it already runs. Off a terminal, a new box
 needs `--run`.
 
-## What the hook installs
+## The hook: skills, MCP, plugins
 
-Before the agent starts, `hooks/preflight.sh` runs *inside the box*. It
-reads `WORMHOLE_RUN` and sets up only that product:
+Before the agent starts, `hooks/preflight.sh` runs *inside the box*, in
+the box's kept home, with `WORMHOLE_RUN` set to `claude`, `codex` or
+`grok`. One box is one product. Set up that product and nothing else.
 
-1. the CLI binary (claude / codex / grok)
-2. skills: `npx skills add <repo> -a $RUN` (caveman, mattpocock, rust-skills)
-3. MCP: `claude|codex|grok mcp add context7`
-4. rtk, aimed at that product
+Nothing here is a wormhole schema. The hook calls each CLI's own
+commands, so wormhole never lags behind a CLI it does not control.
 
-Claude plugins (for example rust-analyzer-lsp) have no grok/codex
-analogue. The hook installs them only for claude and prints that it
-skipped them otherwise.
+Four rules:
 
-Nothing of this is a wormhole schema. The hook calls each CLI's own
-commands. A failing required install stops the box; the rest warn and
-continue.
+1. **Branch on `WORMHOLE_RUN`.** Each product has its own binary, its own
+   MCP command and its own idea of a plugin.
+2. **Map the product name for every tool that has its own.** The `skills`
+   installer calls Claude Code `claude-code`. Pass it `claude` and it
+   refuses with "Invalid agents" and installs nothing.
+3. **Install into `$HOME`, never into the cwd.** The box's cwd is the
+   user's workspace. `skills add` without `-g` writes `.claude/skills` and
+   `.agents/skills` into their project. With `-g` it writes into the kept
+   home, which survives between boxes.
+4. **Warn and go on when an extra fails.** `exit 1` only when the CLI
+   itself is missing: a failing hook stops the box, and a box with no
+   skills is still a box.
+
+The shipped `alphaca` hook does exactly this. The shape, cut down:
+
+```sh
+#!/bin/sh
+set -eu
+run="${WORMHOLE_RUN:?}"
+
+case "$run" in                       # the CLI, and each tool's name for it
+    claude) install_claude; skills_agent=claude-code ;;
+    codex)  install_codex;  skills_agent=codex ;;
+    grok)   install_grok;   skills_agent=grok ;;
+    *) echo "unknown product $run" >&2; exit 1 ;;
+esac
+
+# skills: -g puts them in the kept home, not the workspace
+for repo in JuliusBrussee/caveman mattpocock/skills; do
+    npx -y skills add "$repo" --skill '*' -a "$skills_agent" -g --yes </dev/null \
+        || echo "WARN: skills add $repo failed" >&2
+done
+
+# MCP: every CLI has `mcp add`, each with its own config file
+"$run" mcp add context7 -- npx -y @upstash/context7-mcp </dev/null \
+    || echo "WARN: context7 failed" >&2
+
+# plugins: claude only; codex and grok have no analogue
+if [ "$run" = claude ]; then
+    claude plugin marketplace add anthropics/claude-plugins-official </dev/null
+    claude plugin install rust-analyzer-lsp@claude-plugins-official </dev/null \
+        || echo "WARN: plugin failed" >&2
+fi
+```
+
+`</dev/null` on each call: the hook has no terminal to answer with, and a
+tool that waits for one hangs the start.
+
+No secrets in the hook. A key belongs in `[env] ask`, which hands it to
+the box masked; the login belongs to `[access] credentials`.
 
 ## The three ways to name one
 

@@ -147,7 +147,7 @@ preflight = "hooks/preflight.sh"
 | `run` | `claude`, `codex`, `grok`. A list: pick on a terminal, or `--run`. Each name is its own box. Absent: no agent. A list cannot carry `model` |
 | `model` | Passed the way the product reads a model: `ANTHROPIC_MODEL` in the box for `claude`, `GROK_DEFAULT_MODEL` for `grok`, the `model` key in `.codex/config.toml` for `codex`. Only with a single `run` name |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
-| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts. `WORMHOLE_RUN` is set to this box's product, so one hook can install skills and MCP the way that CLI understands. The agent then replaces the shell. A failing hook stops the box. Non-secret setup only. Secrets belong to `ask`; the login to `[access] credentials` |
+| `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts. `WORMHOLE_RUN` is set to this box's product, so one hook can install skills and MCP the way that CLI understands; see [the hook](roles.md#the-hook-skills-mcp-plugins) for the rules and a worked example. The agent then replaces the shell. A failing hook stops the box. Non-secret setup only. Secrets belong to `ask`; the login to `[access] credentials` |
 
 ### What every box answers for its agent
 
