@@ -9,6 +9,64 @@ true.
 
 ## Unreleased
 
+### A seccomp filter closes the box's one open escalation path
+
+The box drops every capability, but a *new* user namespace starts with a
+full set again — so an agent that ran `unshare(CLONE_NEWUSER)` got its
+capabilities straight back and reached `mount`, overlayfs and the rest of
+the admin-only kernel. The box now carries a seccomp filter that denies
+the syscalls that make a namespace (`unshare`, `setns`, `clone` with a
+namespace flag, `clone3`) and the ones with the worst container-escape
+record (`io_uring`, the kernel keyring, BPF, `kexec`, module loading).
+Each returns "not supported", so an ordinary tool that probes for one
+does without it while the box keeps `fork`, threads and everything a
+build needs. `CONCEPT.md` had promised this filter all along; now it is
+real, and proven from inside a running box.
+
+### Fixed: `doctor` said "cannot run wormhole" on hosts that run it fine
+
+`wormhole doctor` failed the whole host — exit 1, "this host cannot run
+wormhole" — when `/etc/subuid` had no range or the cgroup hierarchy was
+not delegated. Neither stops a box: wormhole maps only your own uid (no
+range needed) and a box with no `[limits]` needs no cgroup delegation.
+Both are now informational, with a line saying what each is actually for,
+so the verdict is `ok` exactly when a box will start. Overlayfs and
+Landlock, which the boundary does not use or does not yet apply, moved to
+informational for the same reason. Only the two things a box truly needs —
+unprivileged user namespaces, and a non-zero limit on them — still fail
+the host.
+
+### Fixed: an attach session was a weaker box than the one it joined
+
+`wormhole attach` opens a second terminal into a running box — usually
+onto the agent itself. It dropped that session in with a full capability
+set, no `no_new_privs`, and no seccomp filter, so the second way into the
+box was weaker than the first. Now one path narrows both: the capability
+drop, `no_new_privs` and the filter apply to every session.
+
+### Fixed: closing the terminal left the agent running over your files
+
+Killing the `wormhole` that launched a box — closing the terminal, an OOM
+kill — left the agent running, detached, over the live workspace. Worse,
+the `flock` that means "one process per box" dies with the launcher, so a
+second `wormhole box` would open the same home behind the orphan: two
+agents writing one history. The box's process is now tied to its
+launcher's life, so it goes down when the launcher does.
+
+### Fixed: `--as` names and role identity were filed the wrong way round
+
+A start wrote its box name where the role's identity belongs, and the
+identity where the name belongs. So `wormhole box --new --as api` gave a
+box that `ps --all` showed with no name, that `box --id api` could not
+find, and that a bare `wormhole box` no longer resumed: it made a new
+box instead. A role box without `--as` showed `dir:/path/to/role` as its
+name, and its role was matched by spelling again.
+
+The record is now built with named fields, so the two cannot swap. A
+record the old version wrote is read back the right way round — an
+identity always starts `dir:` or `repo:` and a name holds no `:` — so
+every box it misfiled answers to its name and resumes again.
+
 ### Changed: a multi-product role asks which CLI
 
 A list in `[agent] run` used to start the first name. A terminal now

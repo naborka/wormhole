@@ -46,8 +46,13 @@ throwaway root from the image; the workspace read-write at its host path; the
 granted paths and nothing else; the host's network and its resolver, or one named resolver; only the environment the
 manifest declares; its own `PATH`; an **empty capability bounding set and
 no-new-privs**, so nothing in the box can regain a capability or raise
-privilege through any `execve`; `Ctrl-C` that reaches the agent and not
-wormhole. The agent is PID 1 and its uid matches yours, so files it writes in the
+privilege through any `execve`; a **seccomp filter** that denies a nested
+user namespace (which would hand every capability back), `io_uring`, the
+kernel keyring, BPF, `kexec` and module loading, and `clone` when it asks
+for a namespace — inherited across `execve` and by every child, applied
+before the agent and before every attach session alike; `Ctrl-C` that
+reaches the agent and not wormhole. The box's PID 1 dies with the
+`wormhole` that launched it, so nothing survives the terminal closing. The agent is PID 1 and its uid matches yours, so files it writes in the
 workspace belong to you. Its `$HOME` is kept per box under
 `~/.local/share/wormhole/homes/<workspace>-<box id>`, so history, settings, logins
 and installed toolchains survive every restart of that box while the root stays
@@ -109,14 +114,15 @@ does survives into the next box or back into the image.
 | N4 | `wormhole box` — the built image, declared env only, grants, preflight, then the agent | **done**, confirmed on the host |
 | N5 | Persistent box home, kept per box; bare `run` stays throwaway | **done**, needs a host run to confirm |
 | N6 | Default `AGENT.md` baked in, seeded as the agent's own instructions file (`~/.claude/CLAUDE.md`) on every start; manifest `instructions` appends a workspace file. `name` waits for N7, the first thing that reads it | **done** |
-| N6b | First-run prompts pre-accepted: onboarding, bypass warning, workspace trust and theme merged into the home's `.claude.json` — never overwriting what the agent wrote there itself. All four keys read off Claude Code 2.1.228 (`hasCompletedOnboarding`, `bypassPermissionsModeAccepted`, per-project `hasTrustDialogAccepted` + `hasCompletedProjectOnboarding`, `theme`); they all live in `.claude.json`, none in `settings.json` | **done**, needs a host run to confirm the agent reaches a prompt |
+| N6b | First-run prompts pre-accepted: onboarding, bypass warning, workspace trust and theme merged into the home's `.claude.json` — never overwriting what the agent wrote there itself. All four keys read off Claude Code 2.1.228 (`hasCompletedOnboarding`, `bypassPermissionsModeAccepted`, per-project `hasTrustDialogAccepted` + `hasCompletedProjectOnboarding`, `theme`) | **done**, superseded by N14 |
+| N14 | Every box answers for its agent what the launch flag does not reach: a resumed session, a background worker, a CLI typed in an attached shell, a mode toggled in a past session, a safeguard flag that would switch models. Each `KnownAgent` carries its config files and the keys a start writes (`Rule::Settled` every start, `Rule::Initial` only where absent) plus fixed env a manifest can take back; one merge, `seed::config_file`, serves JSON and TOML. Claude: `.claude.json` (the offers of auto mode as default and of medium effort among the rest) and `.claude/settings.json` (`skipDangerousModePermissionPrompt`, `permissions.defaultMode`, `enableAllProjectMcpServers`, `switchModelsOnFlag`) and `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK`, `CLAUDE_CODE_RETRY_WATCHDOG`, `IS_SANDBOX`, `CLAUDE_CODE_SANDBOXED`. Codex: `approval_policy`, `sandbox_mode`, `web_search`, the rate-limit nudge. Grok: `ui.permission_mode`, `features.web_fetch`, `GROK_FOLDER_TRUST`. Research and what no setting can remove: `docs/research/agent-autonomy.md` | **done**, seeded files read back by claude 2.1.270, codex 0.154.0 and grok 1.0.30 |
 | N7 | Box registry: `boxes/<pid>/box.toml` beside the root copy, written at start, removed on exit, dead entries reaped. `wormhole ps` lists them; starting the same box twice is refused | **done** |
 | N8 | `wormhole attach <id>`: joins the box's user, UTS, PID and mount namespaces through its PID 1 (host pid kept in `boxes/<id>/init.pid`), runs a shell or command in the workspace. The box gets its own `devpts` and `/dev/ptmx`, so terminal-opening tools work | **done**, needs a host run to confirm (`attach_joins_a_running_box`) |
 | N10 | Roles: `wormhole build/box --role <name\|dir>` reads the manifest, instructions and preflight from `~/.config/wormhole/roles/<name>/` or a directory path. An explicit `--role` beats the workspace's own manifest; `instructions` and `hooks.preflight` resolve against the role's directory (the hook is seeded into the box home) | **done** |
 | N9 | The panel, first slice: bare `wormhole` lists running boxes live, Enter joins the box's agent (execs `attach`), `n` starts a new box from the current workspace's manifest, `d` kills the box's PID 1, `q` quits. Pure state machine in `wormhole-core::tui`, thin `crossterm` shell around it. The role/grant picker is N9b | **done**, needs a host terminal to confirm |
 | N12 | The rest of a box's life: `wormhole rename`, `reset` and `remove`, and `x`/`r`/`y` in the panel. One rule for all three — the box must be idle, proven by taking its own claim rather than by reading a list. `gc` learns to prove a built thing unreferenced by reading every kept box's recipe, and reclaims orphaned locks. Every decision stays pure: `run::parse_*`, `tui::Act` and `tui::Key::from_char`, `gc::Sweep`/`plan`/`built_verdict`/`lock_verdict`, `manifest::referenced_digests`, `paths::key_id`, `home::target`/`find`/`alias_conflict`. The claim is the *type* the verbs act on (`Claimed`), so a fourth verb cannot forget to take it | **done**, 14 lifecycle tests plus the panel driven on a real pty |
 | N11 | Usage limits in the conversation, polled host-side and fed into a seeded status line. Built, then **removed** with the broker on 2026-09-08: with a login inside the box, Claude Code's own `/usage` and status bar work and wormhole has nothing to render for it | **removed** |
-| N13 | The broker gone. Every box is on the host's network and speaks to the API for itself; what it logs in with is `[access] credentials = "none" \| "copy" \| "share"` or `--credentials` on the start. Pure pieces: `manifest::Credentials`, `manifest::credential_files`, `seed::claude_config` (host login merged in), `run::RunArgs.shared_credentials`, `run::BoxArgs.credentials`; `mount_plan::Resolver` (the named nameserver or the host's `resolv.conf`, bound read-only) and `mount_plan::Grant::shared`; the binary's `seed_credentials` copies or prepares the target and refuses a host with no login, `boundary.rs` refuses a host with no `resolv.conf`. Manifests naming `network`, `broker` or `egress` are refused by name (`ManifestError::Removed`). `TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` are built-in `[env]` defaults in `manifest::declarations`, so no manifest declares them. The `RouteExists` launch assertion went with the network namespace | **done** |
+| N13 | The broker gone. Every box is on the host's network and speaks to the API for itself; what it logs in with is `[access] credentials = "none" \| "copy" \| "share"` or `--credentials` on the start. Pure pieces: `manifest::Credentials`, `manifest::credential_files`, `seed::config_file` (host login merged in), `run::RunArgs.shared_credentials`, `run::BoxArgs.credentials`; `mount_plan::Resolver` (the named nameserver or the host's `resolv.conf`, bound read-only) and `mount_plan::Grant::shared`; the binary's `seed_credentials` copies or prepares the target and refuses a host with no login, `boundary.rs` refuses a host with no `resolv.conf`. Manifests naming `network`, `broker` or `egress` are refused by name (`ManifestError::Removed`). `TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` are built-in `[env]` defaults in `manifest::declarations`, so no manifest declares them. The `RouteExists` launch assertion went with the network namespace | **done** |
 
 What the first real runs taught, each fixed at the root rather than patched:
 
@@ -227,6 +233,46 @@ What running the panel on a real terminal found:
   another — the claim would stop being a claim. Unset, empty and relative
   now all take the default under `$HOME`, which is what the XDG spec says
   and what the store's whole purpose needs.
+
+What a review on 2026-09-12 found by running real boxes, each fixed at the root:
+
+- **A start filed the box's name and its role's identity the wrong way
+  round.** `write_record` took three `Option<&str>` in a row and the call
+  passed two of them swapped, so `--as` names were lost, resume after
+  `--as` made a new box, and role identity was never matched. Every test
+  wrote records by hand, so none started a box and read what it wrote.
+  The record is built with named fields now, old records heal on read,
+  and `tests/build.rs` starts a box and reads the record back.
+- **The kernel suite only ran on a usr-merged host.** A bare `__run`
+  borrowed the host's `/usr` and linked `/bin` and `/lib` into it, so on
+  Alpine — or any host that keeps real top-level directories — 27 of 33
+  kernel tests found no shell. The box now borrows each program directory
+  as the host has it: a link stays a link, a directory is lent read-only.
+- **A nested user namespace handed every capability back.** The box drops
+  its whole capability bounding set, but `unshare(CLONE_NEWUSER)` from
+  inside makes a fresh namespace with a full set again — proven live:
+  `unshare(0x50000000)` returned exit 0 on the host and now `Function not
+  implemented` in the box. A seccomp filter (rust-vmm `seccompiler`, pure
+  Rust) denies `unshare`/`setns`/`clone3`, `clone` with any namespace flag,
+  and `io_uring`, keyring, BPF, `kexec` and module loading — all ENOSYS, so
+  a probing tool degrades rather than breaks. The filter is pure to build
+  (`seccomp::filter`) and applied in `narrow_to_agent`, which also drops
+  capabilities and sets no-new-privs.
+- **An attach session ran with every capability and no filter.** `wormhole
+  attach` — the ordinary way to a second terminal on the agent — dropped
+  the session into the box without the capability drop, no-new-privs or
+  seccomp the first session got: proven, `CapBnd: 000001ffffffffff` in an
+  attached session against `0000000000000000` in PID 1. Both cross
+  `narrow_to_agent` now, and a kernel test reads the attached session's own
+  `/proc/self/status` and denies its nested namespace.
+- **A killed launcher orphaned the agent, and let a second one in.** Proven
+  live: `kill -9` the `wormhole box` process left the boxed agent running
+  over the workspace, and a second `wormhole box --id` into the same home
+  then succeeded — two agents, one home, the exact corruption the `flock`
+  exists to prevent, because the lock dies with the launcher. `PR_SET_PDEATHSIG`
+  now ties `__boxed` to the launcher and PID 1 to `__boxed`, so a killed or
+  hung-up launcher takes the whole box down. Kernel test kills the launcher
+  and asserts the box's process is gone.
 
 ## Next — what to build now
 

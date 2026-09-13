@@ -23,39 +23,64 @@ pub fn max_user_namespaces(content: &str) -> Outcome {
     }
 }
 
+/// Informational: wormhole maps only your own uid into a box — a single
+/// `{uid} {uid} 1` line, or `0 {uid} 1` while building — which needs no
+/// `/etc/subuid` range and no `newuidmap`. A range is for mapping *other*
+/// or *several* uids, which wormhole never does, so its absence stops
+/// nothing. Reported because a person expecting the usual container
+/// prerequisite should hear it is simply not one here.
 pub fn subid(content: &str, user: &str, uid: u32, path: &str) -> Outcome {
     if parse::has_subid_range(content, user, uid) {
         Outcome::Pass
     } else {
-        Outcome::Fail(format!("no range for {user} (uid {uid}) in {path}"))
+        Outcome::Info(format!(
+            "no range for {user} (uid {uid}) in {path}; not needed — \
+             a box maps only your own uid"
+        ))
     }
 }
 
+/// Informational: Landlock is a probed prerequisite the boundary does not
+/// yet apply (CONCEPT.md §10), so its absence blocks no box today. Kept as
+/// a probe so the day the boundary adds it, a host that cannot is already
+/// visible.
 pub fn landlock(create: Result<(), String>) -> Outcome {
     match create {
         Ok(()) => Outcome::Pass,
-        Err(e) => Outcome::Fail(format!("Landlock ABI v1 ruleset creation failed: {e}")),
-    }
-}
-
-/// Passes when an unprivileged overlay mount works, or when
-/// `fuse-overlayfs` is present as the fallback.
-pub fn overlayfs(mount: Result<(), String>, fuse_present: bool) -> Outcome {
-    match mount {
-        Ok(()) => Outcome::Pass,
-        Err(_) if fuse_present => Outcome::Pass,
-        Err(e) => Outcome::Fail(format!(
-            "unprivileged overlay mount failed ({e}) and fuse-overlayfs is not in PATH"
+        Err(e) => Outcome::Info(format!(
+            "Landlock ABI v1 unavailable ({e}); the boundary does not yet apply it"
         )),
     }
 }
 
+/// Informational: wormhole builds a box from a copied (or read-only bound)
+/// image tree, never an overlay mount, so overlayfs is not a prerequisite.
+/// The probe stays because digest-pinned layers would want it, and a host
+/// that has it is worth knowing.
+pub fn overlayfs(mount: Result<(), String>, fuse_present: bool) -> Outcome {
+    match mount {
+        Ok(()) => Outcome::Pass,
+        Err(_) if fuse_present => Outcome::Pass,
+        Err(e) => Outcome::Info(format!(
+            "unprivileged overlay unavailable ({e}) and no fuse-overlayfs; \
+             not needed — a box copies its image"
+        )),
+    }
+}
+
+/// Informational: only `[limits]` needs a delegated cgroup hierarchy, and a
+/// start that asks for a limit it cannot apply already refuses loudly. A
+/// box with no `[limits]` runs without it, so its absence is not a reason
+/// the host cannot run wormhole.
 pub fn cgroup_delegation(content: &str) -> Outcome {
     let missing = parse::missing_cgroup_controllers(content);
     if missing.is_empty() {
         Outcome::Pass
     } else {
-        Outcome::Fail(format!("controllers not delegated: {}", missing.join(", ")))
+        Outcome::Info(format!(
+            "controllers not delegated: {}; needed only for [limits]",
+            missing.join(", ")
+        ))
     }
 }
 
@@ -119,25 +144,27 @@ mod tests {
         );
     }
 
+    /// A missing subid range is informational, not a failure: wormhole
+    /// maps only the invoking uid, which needs none. Proven by boxes that
+    /// run on a host with no `/etc/subuid` at all.
     #[test]
-    fn subid_names_user_and_file() {
+    fn a_missing_subid_range_does_not_block_the_host() {
         assert_eq!(
             subid("nabor:100000:65536\n", "nabor", 1000, "/etc/subuid"),
             Outcome::Pass
         );
-        assert_eq!(
+        assert!(matches!(
             subid("", "nabor", 1000, "/etc/subgid"),
-            Outcome::Fail("no range for nabor (uid 1000) in /etc/subgid".to_owned())
-        );
+            Outcome::Info(_)
+        ));
     }
 
+    /// Landlock is not applied yet, so its absence informs rather than
+    /// blocks — a Fail here would say the host cannot run a box it can.
     #[test]
-    fn landlock_judges_ruleset_creation() {
+    fn landlock_is_informational_until_the_boundary_applies_it() {
         assert_eq!(landlock(Ok(())), Outcome::Pass);
-        assert_eq!(
-            landlock(err()),
-            Outcome::Fail("Landlock ABI v1 ruleset creation failed: EPERM".to_owned())
-        );
+        assert!(matches!(landlock(err()), Outcome::Info(_)));
     }
 
     #[test]
@@ -146,28 +173,26 @@ mod tests {
         assert_eq!(overlayfs(Ok(()), true), Outcome::Pass);
     }
 
+    /// wormhole copies its image rather than stacking it, so a host with
+    /// no unprivileged overlay still runs boxes: the probe informs.
     #[test]
-    fn overlayfs_mount_failure_passes_only_with_fuse_fallback() {
+    fn overlayfs_absence_is_informational_not_a_failure() {
         assert_eq!(overlayfs(err(), true), Outcome::Pass);
-        assert_eq!(
-            overlayfs(err(), false),
-            Outcome::Fail(
-                "unprivileged overlay mount failed (EPERM) and fuse-overlayfs is not in PATH"
-                    .to_owned()
-            )
-        );
+        assert!(matches!(overlayfs(err(), false), Outcome::Info(_)));
     }
 
+    /// Only `[limits]` needs delegation, and a start that cannot apply a
+    /// limit refuses on its own, so the missing controllers inform here.
     #[test]
-    fn cgroup_delegation_lists_missing_controllers() {
+    fn cgroup_delegation_informs_because_only_limits_need_it() {
         assert_eq!(
             cgroup_delegation("cpuset cpu io memory pids\n"),
             Outcome::Pass
         );
-        assert_eq!(
+        assert!(matches!(
             cgroup_delegation("cpuset io memory\n"),
-            Outcome::Fail("controllers not delegated: cpu, pids".to_owned())
-        );
+            Outcome::Info(_)
+        ));
     }
 
     #[test]

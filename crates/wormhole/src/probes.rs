@@ -58,10 +58,14 @@ fn subid_ranges() -> Outcome {
         .map(|u| u.name)
         .unwrap_or_default();
 
+    // An absent or unreadable file is simply no range, which the grader
+    // treats as informational — wormhole maps only this uid, so a range is
+    // not a prerequisite. Reading it here (rather than through
+    // `read_and_check`, which fails closed) is what keeps a missing file
+    // from reading as a host that cannot run wormhole.
     for path in ["/etc/subuid", "/etc/subgid"] {
-        let result = read_and_check(path, |content| {
-            outcome::subid(content, &user, uid.as_raw(), path)
-        });
+        let content = fs::read_to_string(path).unwrap_or_default();
+        let result = outcome::subid(&content, &user, uid.as_raw(), path);
         if result != Outcome::Pass {
             return result;
         }
@@ -84,7 +88,12 @@ fn cgroup_delegation() -> Outcome {
     let uid = nix::unistd::getuid();
     let path =
         format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers");
-    read_and_check(&path, outcome::cgroup_delegation)
+    // No file means no controllers delegated, which the grader treats as
+    // informational: only `[limits]` needs delegation, and a start that
+    // asks for a limit it cannot apply refuses on its own. Failing closed
+    // here would say the host cannot run a box it runs fine.
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    outcome::cgroup_delegation(&content)
 }
 
 /// `cp --reflink=always` in the invocation directory tells us whether a

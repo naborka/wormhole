@@ -66,9 +66,8 @@ impl Grant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountOp {
-    /// An empty tmpfs as the root — the interim rootfs for a bare
-    /// `__run`, filled by the host-`/usr` binds. Step 4 replaces
-    /// this with real overlay layers.
+    /// An empty tmpfs as the root, for a bare `__run`, filled with the
+    /// host's program directories.
     TmpfsRoot,
     Tmpfs {
         target: PathBuf,
@@ -272,27 +271,37 @@ fn resolv_op(resolver: &Resolver) -> MountOp {
     }
 }
 
-/// Interim rootfs until Step 4 ships digest-pinned layers: the host's
-/// `/usr` read-only plus the usr-merge symlinks, mirroring an Arch-style
-/// host. Deleted when real layers land.
-fn interim_host_usr() -> Vec<MountOp> {
-    let mut ops = vec![MountOp::Bind {
-        source: PathBuf::from("/usr"),
-        target: PathBuf::from("/usr"),
-        rw: false,
-    }];
-    for (link, to) in [
-        ("/bin", "usr/bin"),
-        ("/sbin", "usr/bin"),
-        ("/lib", "usr/lib"),
-        ("/lib64", "usr/lib"),
-    ] {
-        ops.push(MountOp::Symlink {
-            link: PathBuf::from(link),
-            to: PathBuf::from(to),
-        });
-    }
-    ops
+/// The top-level directories of the host a bare `__run` borrows to have
+/// programs to run, when the host has them.
+pub const HOST_ROOT_ENTRIES: [&str; 7] = [
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr",
+];
+
+/// What one of [`HOST_ROOT_ENTRIES`] is on this host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEntry {
+    /// A real directory, lent read-only at the same path.
+    Dir(PathBuf),
+    /// A symlink, made again in the box with the same target.
+    Link { link: PathBuf, to: PathBuf },
+}
+
+/// The host's own layout, read-only: a usr-merged host lends `/usr` and
+/// its links, Alpine lends each real directory.
+fn borrowed_host_root(host: &[HostEntry]) -> Vec<MountOp> {
+    host.iter()
+        .map(|entry| match entry {
+            HostEntry::Dir(dir) => MountOp::Bind {
+                source: dir.clone(),
+                target: dir.clone(),
+                rw: false,
+            },
+            HostEntry::Link { link, to } => MountOp::Symlink {
+                link: link.clone(),
+                to: to.clone(),
+            },
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,9 +367,9 @@ pub enum Root<'a> {
     /// Because nothing is copied, the image is shared by every box using
     /// it, and read-only is what makes that safe rather than merely fast.
     ImageReadOnly(&'a Path),
-    /// The interim rootfs for a bare `__run`: the host's `/usr`
-    /// read-only over a tmpfs root. Goes away when nothing needs it.
-    HostUsr,
+    /// The root for a bare `__run`: the host's program directories,
+    /// read-only, over a tmpfs root. What the kernel tests run behind.
+    Host(&'a [HostEntry]),
 }
 
 /// Where the box's home lands, decided beside the passwd entry and the
@@ -402,9 +411,9 @@ pub fn compute(
                 });
             }
         }
-        Root::HostUsr => {
+        Root::Host(host) => {
             ops.push(MountOp::TmpfsRoot);
-            ops.extend(interim_host_usr());
+            ops.extend(borrowed_host_root(host));
         }
     }
     ops.extend(device_ops());
@@ -552,7 +561,7 @@ mod tests {
         compute(
             Path::new("/home/nabor/proj"),
             Path::new("/home/nabor/.local/share/wormhole/workspaces/abc/home"),
-            Root::HostUsr,
+            Root::Host(&[]),
             &user(),
             grants,
             resolver,
@@ -1032,39 +1041,61 @@ mod tests {
         assert_eq!(proc, vec![Path::new("/proc")]);
     }
 
+    /// A usr-merged host — Arch, Fedora, Debian 12 — keeps everything under
+    /// `/usr` and links the rest into it. The box gets the same links.
     #[test]
-    fn interim_rootfs_binds_only_usr_read_only() {
-        let sources: Vec<_> = interim_host_usr()
-            .iter()
-            .filter_map(|op| match op {
-                MountOp::Bind { source, rw, .. } => Some((source.clone(), *rw)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(sources, vec![(PathBuf::from("/usr"), false)]);
-    }
-
-    #[test]
-    fn interim_rootfs_symlinks_point_into_usr() {
-        let links: Vec<_> = interim_host_usr()
-            .iter()
-            .filter_map(|op| match op {
-                MountOp::Symlink { link, to } => Some((link.clone(), to.clone())),
-                _ => None,
-            })
-            .collect();
+    fn a_merged_host_lends_its_usr_and_the_links_into_it() {
+        let host = [
+            HostEntry::Link {
+                link: PathBuf::from("/bin"),
+                to: PathBuf::from("usr/bin"),
+            },
+            HostEntry::Link {
+                link: PathBuf::from("/lib64"),
+                to: PathBuf::from("usr/lib"),
+            },
+            HostEntry::Dir(PathBuf::from("/usr")),
+        ];
         assert_eq!(
-            links,
+            borrowed_host_root(&host),
             vec![
-                (PathBuf::from("/bin"), PathBuf::from("usr/bin")),
-                (PathBuf::from("/sbin"), PathBuf::from("usr/bin")),
-                (PathBuf::from("/lib"), PathBuf::from("usr/lib")),
-                (PathBuf::from("/lib64"), PathBuf::from("usr/lib")),
+                MountOp::Symlink {
+                    link: PathBuf::from("/bin"),
+                    to: PathBuf::from("usr/bin"),
+                },
+                MountOp::Symlink {
+                    link: PathBuf::from("/lib64"),
+                    to: PathBuf::from("usr/lib"),
+                },
+                MountOp::Bind {
+                    source: PathBuf::from("/usr"),
+                    target: PathBuf::from("/usr"),
+                    rw: false,
+                },
             ]
         );
-        for (_, to) in links {
-            assert!(to.is_relative(), "symlink targets must be relative");
-        }
+    }
+
+    /// Alpine, and any host not merged into `/usr`, keeps real directories
+    /// at the top. Linking `/bin` into `/usr` there leaves no shell at all,
+    /// which is how the whole kernel suite failed on such a host.
+    #[test]
+    fn a_host_with_real_top_level_directories_lends_each_read_only() {
+        let host = [
+            HostEntry::Dir(PathBuf::from("/bin")),
+            HostEntry::Dir(PathBuf::from("/lib")),
+            HostEntry::Dir(PathBuf::from("/usr")),
+        ];
+        let ops = borrowed_host_root(&host);
+        assert_eq!(
+            binds(&ops),
+            vec![
+                (Path::new("/bin"), Path::new("/bin"), false),
+                (Path::new("/lib"), Path::new("/lib"), false),
+                (Path::new("/usr"), Path::new("/usr"), false),
+            ]
+        );
+        assert!(!ops.iter().any(|op| matches!(op, MountOp::Symlink { .. })));
     }
 
     #[test]
@@ -1240,7 +1271,7 @@ mod tests {
         let err = compute(
             Path::new("proj"),
             Path::new("/data/home"),
-            Root::HostUsr,
+            Root::Host(&[]),
             &user(),
             &[],
             &host_resolver(),
@@ -1254,7 +1285,7 @@ mod tests {
         let err = compute(
             Path::new("/proj"),
             Path::new("home"),
-            Root::HostUsr,
+            Root::Host(&[]),
             &user(),
             &[],
             &host_resolver(),

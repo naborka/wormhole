@@ -149,6 +149,40 @@ preflight = "hooks/preflight.sh"
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
 | `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts. `WORMHOLE_RUN` is set to this box's product, so one hook can install skills and MCP the way that CLI understands. The agent then replaces the shell. A failing hook stops the box. Non-secret setup only. Secrets belong to `ask`; the login to `[access] credentials` |
 
+### What every box answers for its agent
+
+The box holds the line, so the CLI does not have to. Every question it
+would stop to ask about permissions, trust or its own sandbox is answered
+before it starts, whatever the role. There is nothing to write for it.
+
+| Product | Written into the box home | Set in the box |
+|---|---|---|
+| `claude` | `.claude.json`: onboarding, workspace trust, the bypass warning, `CLAUDE.md` imports from outside the workspace, the cost notice, and the offers to make auto mode the default or drop effort to medium. `.claude/settings.json`: `skipDangerousModePermissionPrompt`, `permissions.defaultMode = "bypassPermissions"`, `enableAllProjectMcpServers`, and `switchModelsOnFlag = false` | `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`, `CLAUDE_CODE_RETRY_WATCHDOG=1`, `IS_SANDBOX=1`, `CLAUDE_CODE_SANDBOXED=1` |
+| `codex` | `.codex/config.toml`: workspace trust, `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, `web_search = "live"`, no model nudge near the rate limit | |
+| `grok` | `.grok/config.toml`: `ui.permission_mode = "always-approve"`, `features.web_fetch = true` | `GROK_FOLDER_TRUST=0` |
+
+The launch flags already cover the process wormhole starts. These cover
+the rest: a resumed session, a background worker, a CLI typed in an
+attached shell.
+
+Merged, never overwritten: the rest of each file is the agent's own. The
+answers are written again on every start, so a mode toggled in a past
+session does not stick. `theme` and `switchModelsOnFlag` are only written
+where the file has no value yet.
+
+A message Anthropic's safeguards flag ends its turn instead of moving the
+box to an older model. The flag is decided on Anthropic's servers and no
+setting changes it; their
+[Cyber Verification Program](https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude)
+is what reduces it.
+
+A role takes any variable in the last column back by declaring it:
+
+```toml
+[env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK]
+fixed = ""   # switch models on a flag after all
+```
+
 ## `[access]` — what the box can reach
 
 ```toml
@@ -298,9 +332,9 @@ built. What a box *does* redo on every start:
 
 - copies the image into a throwaway root (free on Btrfs and XFS, a full
   copy on ext4, skipped entirely with `[runtime] rootfs = "readonly"`)
-- re-seeds the instructions file, the preflight hook and the Claude Code
-  config into the kept home, so a manifest edit or a wormhole upgrade
-  takes effect at once
+- re-seeds the instructions file, the preflight hook and the agent's
+  [answers](#what-every-box-answers-for-its-agent) into the kept home, so
+  a manifest edit or a wormhole upgrade takes effect at once
 
 The kept home itself survives — one per box — so history, settings, logins
 and installed toolchains carry over every time that box starts again. A
