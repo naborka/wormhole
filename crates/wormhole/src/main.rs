@@ -675,7 +675,7 @@ fn gc_cmd(args: &[String]) -> ! {
         };
         items.push(gc::Item {
             bytes: tree_bytes(&path),
-            verdict: gc::lock_verdict(keys.contains(key)),
+            verdict: gc::lock_verdict(key, &keys),
             path,
         });
     }

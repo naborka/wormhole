@@ -326,3 +326,23 @@ fn gc_reclaims_a_lock_whose_box_is_gone() {
     assert!(output.status.success(), "{}", said(&output));
     assert!(!orphan.exists(), "the orphaned lock survived");
 }
+
+/// A build's claim sits beside the box claims and has no home. Unlinked
+/// while held, the next builder locks a new file and two processes write
+/// one `.partial`.
+#[test]
+fn gc_never_takes_a_build_claim() {
+    use nix::fcntl::{Flock, FlockArg};
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let ws = workspace(data, "proj");
+    let lock = paths::build_lock(data, &"c".repeat(64));
+    std::fs::create_dir_all(lock.parent().expect("locks dir")).expect("locks dir");
+    let file = std::fs::File::create(&lock).expect("lock file");
+    let _held = Flock::lock(file, FlockArg::LockExclusiveNonblock).expect("the build claim");
+
+    let output = wormhole(data, &ws, &["gc", "--delete"]);
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(lock.exists(), "a held build claim was removed");
+}

@@ -209,9 +209,17 @@ pub fn baked_env(box_dir: &Path) -> PathBuf {
 /// a box that builds its own image does, because two boxes started at once
 /// want the same image at once.
 pub fn build_lock(data_home: &Path, digest: &str) -> PathBuf {
-    data_home
-        .join("wormhole/locks")
-        .join(format!("build-{digest}.lock"))
+    locks_dir(data_home).join(format!("{BUILD_LOCK_PREFIX}{digest}.lock"))
+}
+
+const BUILD_LOCK_PREFIX: &str = "build-";
+
+/// Whether a lock file's stem is a build's claim rather than a box's. A
+/// build is named by a full digest, a box key ends in a twelve-character
+/// id, so a workspace called `build` cannot be mistaken for one.
+pub fn is_build_lock(stem: &str) -> bool {
+    stem.strip_prefix(BUILD_LOCK_PREFIX)
+        .is_some_and(|digest| crate::is_lowercase_hex(digest, 64))
 }
 
 /// Where a directory is assembled before it is renamed into place. A

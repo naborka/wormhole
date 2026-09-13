@@ -106,16 +106,22 @@ pub fn built_verdict(
     }
 }
 
-/// Whether a lock file is still a claim on anything. A lock is an empty
-/// token beside a home; one whose home is gone belongs to a box that no
-/// longer exists.
+/// Whether a lock file is still a claim on anything, from its file stem
+/// and the key of every kept home. A box's lock whose home is gone belongs
+/// to a box that no longer exists.
 ///
 /// `rm` leaves one behind on purpose: unlinking the lock it is holding
 /// would let another start take a second, different one for the same box.
 /// So reclaiming them is this command's job, and the rule lives here with
 /// every other verdict.
-pub fn lock_verdict(home_exists: bool) -> Verdict {
-    if home_exists {
+///
+/// A build claim lives in the same directory and never has a home. It is
+/// never taken: unlinked while held, the next builder locks a new file.
+pub fn lock_verdict(stem: &str, kept: &std::collections::BTreeSet<String>) -> Verdict {
+    if crate::paths::is_build_lock(stem) {
+        return Verdict::Live("a build's claim, never a box's".to_owned());
+    }
+    if kept.contains(stem) {
         Verdict::Live("the box that claims it is still kept".to_owned())
     } else {
         Verdict::Dead("the box that claimed it is gone".to_owned())
@@ -285,8 +291,24 @@ mod tests {
     /// what eventually takes it — and only once its box is provably gone.
     #[test]
     fn a_lock_outlives_its_box_and_then_becomes_reclaimable() {
-        assert!(taken(&lock_verdict(false), LOOK));
-        assert!(!taken(&lock_verdict(true), WIDE));
+        let kept = keys(&["proj-0123456789ab"]);
+        assert!(taken(&lock_verdict("gone-0123456789ab", &kept), LOOK));
+        assert!(!taken(&lock_verdict("proj-0123456789ab", &kept), WIDE));
+    }
+
+    fn keys(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// A build claim shares the directory and never has a home. Unlinked
+    /// while held, a second builder locks a fresh file and both write one
+    /// `.partial`.
+    #[test]
+    fn a_build_claim_is_never_judged_as_a_box_that_is_gone() {
+        let build = format!("build-{}", "ab".repeat(32));
+        assert!(!taken(&lock_verdict(&build, &keys(&[])), WIDE));
+        // A workspace called `build` is still a box, judged by its home.
+        assert!(taken(&lock_verdict("build-0123456789ab", &keys(&[])), LOOK));
     }
 
     /// The report prints the plan and the caller deletes from it, so the
