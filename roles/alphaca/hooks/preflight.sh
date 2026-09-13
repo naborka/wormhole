@@ -76,10 +76,11 @@ install_grok() {
     fi
 }
 
+# The `skills` installer has its own name for each product.
 case "$run" in
-    claude) install_claude ;;
-    codex) install_codex ;;
-    grok) install_grok ;;
+    claude) install_claude; skills_agent=claude-code ;;
+    codex) install_codex; skills_agent=codex ;;
+    grok) install_grok; skills_agent=grok ;;
     *)
         echo "[preflight] ERROR: unknown product $run" >&2
         exit 1
@@ -100,14 +101,15 @@ elif [ "${tag#v}" != "$have" ]; then
     fi
 fi
 
-# Skills via the installer, aimed at this product. Each repo on its own
-# so one bad source does not take the rest down.
+# Skills via the installer, into this product's directory in the kept
+# home; without -g they land in the workspace. Each repo on its own so
+# one bad source does not take the rest down.
 for repo in \
     JuliusBrussee/caveman \
     mattpocock/skills \
     leonardomso/rust-skills
 do
-    if npx -y skills add "$repo" --skill '*' -a "$run" --yes </dev/null; then
+    if npx -y skills add "$repo" --skill '*' -a "$skills_agent" -g --yes </dev/null; then
         echo "[preflight] installed skills from $repo ($run)"
     else
         echo "[preflight] WARN: skills add $repo failed" >&2

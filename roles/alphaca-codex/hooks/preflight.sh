@@ -50,14 +50,15 @@ elif [ "${tag#v}" != "$have" ]; then
     fi
 fi
 
-# Skills -> codex's skills directory, via the `skills` installer. Each on
-# its own so one bad source does not take the rest down.
+# Skills -> codex's skills directory in the kept home, via the `skills`
+# installer; without -g they land in the workspace. Each on its own so
+# one bad source does not take the rest down.
 for repo in \
     JuliusBrussee/caveman \
     mattpocock/skills \
     leonardomso/rust-skills
 do
-    if npx -y skills add "$repo" --skill '*' -a codex --yes </dev/null; then
+    if npx -y skills add "$repo" --skill '*' -a codex -g --yes </dev/null; then
         echo "[preflight] installed skills from $repo"
     else
         echo "[preflight] WARN: skills add $repo failed" >&2

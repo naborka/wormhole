@@ -9,6 +9,19 @@ true.
 
 ## Unreleased
 
+### Fixed: the alphaca preflight installed no skills
+
+The hook passed wormhole's product name straight to the `skills`
+installer as the agent to install for. The installer calls Claude Code
+`claude-code`, not `claude`, so every claude box printed "Invalid agents:
+claude" and started with no skills. The hook now maps the product to the
+installer's name. It also installs globally: without `-g` the installer
+writes into the current directory, which in a box is your workspace, so
+a working install would have dropped `.claude/skills` and
+`.agents/skills` into your project. The codex and grok hooks had the
+same scope bug and get the same `-g`. Skills now live in the kept home,
+so they survive between boxes.
+
 ### A seccomp filter closes the box's one open escalation path
 
 The box drops every capability, but a *new* user namespace starts with a

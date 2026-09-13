@@ -52,14 +52,15 @@ elif [ "${tag#v}" != "$have" ]; then
     fi
 fi
 
-# Skills -> grok's own skills directory, via the `skills` installer. Each
-# on its own so one bad source does not take the rest down.
+# Skills -> grok's skills directory in the kept home, via the `skills`
+# installer; without -g they land in the workspace. Each on its own so
+# one bad source does not take the rest down.
 for repo in \
     JuliusBrussee/caveman \
     mattpocock/skills \
     leonardomso/rust-skills
 do
-    if npx -y skills add "$repo" --skill '*' -a grok --yes </dev/null; then
+    if npx -y skills add "$repo" --skill '*' -a grok -g --yes </dev/null; then
         echo "[preflight] installed skills from $repo"
     else
         echo "[preflight] WARN: skills add $repo failed" >&2
