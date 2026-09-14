@@ -442,6 +442,7 @@ fn run_box(args: &[String]) -> ! {
     );
     seed::seed_instructions(&manifest, &manifest_dir, &home);
     seed::seed_preflight(&manifest, &manifest_dir, &home);
+    seed::seed_rules(&manifest, &manifest_dir, &home);
     seed::seed_agent_config(&manifest, &workspace, &home, credentials);
     let shared_credentials = seed::seed_credentials(credentials, &manifest, &home);
     if manifest.access.dns.is_none() && !Path::new("/etc/resolv.conf").exists() {

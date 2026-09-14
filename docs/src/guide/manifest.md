@@ -140,6 +140,7 @@ is what `[access] host_ca` is for, and it now reaches the build box too.
 run = "claude"                    # or ["claude", "codex", "grok"]
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
+rules = "rules"                   # files the agent reads when their subject comes up
 resume = "anywhere"               # a role's box follows you to every workspace
 ```
 
@@ -149,6 +150,7 @@ resume = "anywhere"               # a role's box follows you to every workspace
 | `model` | Passed the way the product reads a model: `ANTHROPIC_MODEL` in the box for `claude`, `GROK_DEFAULT_MODEL` for `grok`, the `model` key in `.codex/config.toml` for `codex`. Only with a single `run` name |
 | `instructions` | A file beside the manifest, appended after the built-in instructions so it wins where they disagree |
 | `preflight` | A script beside the manifest, seeded into the box home and run before the agent starts. `WORMHOLE_RUN` is set to this box's product, so one hook can install skills and MCP the way that CLI understands; see [the hook](roles.md#the-hook-skills-mcp-plugins) for the rules and a worked example. The agent then replaces the shell. A failing hook stops the box. Non-secret setup only. Secrets belong to `ask`; the login to `[access] credentials` |
+| `rules` | A directory beside the manifest, files only. Each file lands in `~/rules/` in the box home, fresh on every start and gone when the key goes. Not read at start: the instructions name each file and the work that calls for it, so a rule set costs context only then; see [rules on demand](roles.md#rules-the-agent-reads-on-demand) |
 | `resume` | `"here"` (the default) or `"anywhere"`: where a bare start looks for this role's box to resume. `"here"` looks only at boxes that already ran in this workspace, so each workspace gets its own. `"anywhere"` takes the most recently used free box from any workspace, so one home, its login and everything its hook installed serve every project, and every project's history is in reach of every other. Only a role can say it: a workspace's own manifest with `"anywhere"` is refused. See [one box, many workspaces](boxes.md#one-box-many-workspaces) |
 
 ### What every box answers for its agent

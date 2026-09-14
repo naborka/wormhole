@@ -53,6 +53,7 @@ into = "/tmp/rustup-init"
 run = "codex"
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
+rules = "rules"
 
 # One `codex login` on the host serves every box.
 [access]

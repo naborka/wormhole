@@ -8,6 +8,7 @@ my-role/
   wormhole.toml       # the recipe: image, agent, access, env
   ROLE.md             # persona, named by `[agent] instructions`
   hooks/preflight.sh  # runtime setup, named by `[agent] preflight`
+  rules/rust.md       # read on demand, named by `[agent] rules`
 ```
 
 This repository ships `alphaca`. It can run as claude, codex, or grok.
@@ -132,6 +133,43 @@ tool that waits for one hangs the start.
 
 No secrets in the hook. A key belongs in `[env] ask`, which hands it to
 the box masked; the login belongs to `[access] credentials`.
+
+## Rules the agent reads on demand
+
+A persona read at every start costs context on every task. Rules that
+apply to one kind of work belong in their own file, read only when that
+work comes up:
+
+```
+my-role/
+  ROLE.md          # who it is, and which rule file to read when
+  rules/rust.md    # one subject per file
+```
+
+```toml
+[agent]
+instructions = "ROLE.md"
+rules = "rules"
+```
+
+Every file in `rules/` lands in `~/rules/` in the box home. Nothing reads
+it at start. `ROLE.md` does the pointing:
+
+```markdown
+## Rules on demand
+
+- Rust (`.rs`, `Cargo.toml`, benchmarks): read `~/rules/rust.md` first.
+```
+
+Three rules:
+
+1. **One subject per file.** The agent loads a whole file; a file that
+   mixes subjects loads both every time.
+2. **Name the trigger in the persona.** Which files, and the work that
+   calls for each. A rule file nothing points at is never read.
+3. **Edit the role, never the box.** `~/rules/` is a copy the agent may
+   write; every start throws it away and copies the role's files again.
+   The role directory itself is never in the box.
 
 ## The three ways to name one
 
@@ -383,7 +421,7 @@ above, and [boxes](boxes.md).
 
 ## How a role's files reach the box
 
-The role directory itself is never mounted into the box. Its two files
+The role directory itself is never mounted into the box. Its files
 travel by seeding into the box's kept home before start:
 
 - `[agent] instructions` is composed after the built-in instructions into
@@ -396,6 +434,10 @@ travel by seeding into the box's kept home before start:
   and run from there, fresh on every start, with `WORMHOLE_RUN` set to the
   product this box is. Removed when the manifest stops naming one, so
   nothing stale survives a recipe change
+- `[agent] rules` is copied file by file to `rules/` in the box home, fresh
+  on every start and gone when the manifest stops naming it. Nothing reads
+  them at start: the instructions say which file to read when, so a rule
+  set costs context only when its subject comes up
 
 A hook the manifest names but the role does not carry stops the launch on
 the host, with the path in the error.

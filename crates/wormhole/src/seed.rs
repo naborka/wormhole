@@ -91,6 +91,51 @@ pub(crate) fn seed_preflight(manifest: &manifest::Manifest, manifest_dir: &Path,
     seed_file(home, manifest::PREFLIGHT_SEED, &script);
 }
 
+/// Copies the role's rule files into `rules/` at the kept home, where the
+/// instructions can point the agent at them. The whole directory is made
+/// afresh on every start and gone when the manifest names none, so a rule
+/// the role dropped does not linger in the box. Flat on purpose: a rule
+/// is a file the instructions name by one path. A directory or file the
+/// manifest names but the role does not carry stops the launch here, on
+/// the host, with the path in the error.
+pub(crate) fn seed_rules(manifest: &manifest::Manifest, manifest_dir: &Path, home: &Path) {
+    let source = manifest.agent.rules.as_ref().map(|path| {
+        let dir = manifest_dir.join(path);
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| fail(&format!("cannot read rules directory {path}: {e}")));
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.unwrap_or_else(|e| fail(&format!("cannot read rules directory {path}: {e}")));
+            let file = entry.path();
+            if !file.is_file() {
+                fail(&format!(
+                    "rules directory {path} holds {}, which is not a file",
+                    file.display()
+                ));
+            }
+            files.push(file);
+        }
+        files
+    });
+    let seed = home.join(manifest::RULES_SEED);
+    if let Err(e) = std::fs::remove_dir_all(&seed)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        fail(&format!("cannot remove stale {}: {e}", seed.display()));
+    }
+    let Some(files) = source else {
+        return;
+    };
+    std::fs::create_dir_all(&seed)
+        .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", seed.display())));
+    for file in files {
+        let name = file.file_name().expect("read_dir yields named entries");
+        std::fs::copy(&file, seed.join(name))
+            .unwrap_or_else(|e| fail(&format!("cannot copy rule {}: {e}", file.display())));
+    }
+}
+
 /// Writes what the box settles into each of the agent's config files —
 /// merged, never overwritten, so logins and the agent's own choices in
 /// the kept home survive. Which files, keys and values is the registry's

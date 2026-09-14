@@ -81,6 +81,7 @@ than quietly meaning something else.
 | `[agent] model` | Passed the way that agent reads a model: `ANTHROPIC_MODEL` for claude, `GROK_DEFAULT_MODEL` for grok, the `model` key in `.codex/config.toml` for codex |
 | `[agent] instructions` | A file beside the manifest, appended after the built-in `AGENT.md` in the agent's instructions file, so it wins where they disagree |
 | `[agent] preflight` | A script beside the manifest, seeded into the box home and run there, then the agent replaces the shell |
+| `[agent] rules` | A directory beside the manifest, its files copied to `rules/` in the box home on every start. The instructions name which file to read when, so the agent loads a rule set only for work on its subject |
 | `[access] grants` | Host paths the box may see. `~` expands. Symlinks, `..` and workspace overlap are refused |
 | `[access] dns` | The resolver for the build box and the running box alike. Absent means the host's own `/etc/resolv.conf`, bound read-only |
 | `[access] credentials` | `"none"` (default): a clean box home, `/login` inside the box. `"copy"`: the host's credential files copied into the box home once, where absent. `"share"`: the host's files bound read-write at the same path in the box home. `--credentials` on a start beats it |
