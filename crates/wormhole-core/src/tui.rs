@@ -430,6 +430,10 @@ pub fn preview(manifest: &Manifest, source: &str, image_ready: bool) -> String {
         Some(file) => text.push_str(&format!("instructions: {file}\n")),
         None => text.push_str("instructions: built-in only\n"),
     }
+    match &manifest.agent.rules {
+        Some(dir) => text.push_str(&format!("rules: {dir}\n")),
+        None => text.push_str("rules: none\n"),
+    }
     text.push_str(&format!(
         "image: {}\n",
         if image_ready {
@@ -543,6 +547,7 @@ mod tests {
             "model = \"claude-fable-5\"\n",
             "instructions = \"ROLE.md\"\n",
             "preflight = \"hooks/preflight.sh\"\n",
+            "rules = \"rules\"\n",
             "[access]\n",
             "grants = [\"~/some/path\"]\n",
             "dns = \"1.1.1.1\"\n",
@@ -566,6 +571,7 @@ mod tests {
             "ANTHROPIC_API_KEY (host value, empty default)",
             "preflight: hooks/preflight.sh",
             "instructions: ROLE.md",
+            "rules: rules",
             "image: ready",
             "home: kept per box; each workspace starts its own",
         ] {
@@ -667,6 +673,7 @@ mod tests {
             "credentials: none — /login in the box",
             "env: none",
             "preflight: none",
+            "rules: none",
             "image: not built",
             "packages: none",
             "build: nothing runs",

@@ -233,6 +233,7 @@ MANIFEST
   model = "claude-opus-5"           # the way this agent reads a model
   instructions = "ROLE.md"          # added to the built-in instructions
   preflight = "hooks/setup.sh"      # runs in the box before the agent
+  rules = "rules"                   # read on demand; ~/rules in the box
   resume = "anywhere"               # one box for every folder; default "here"
 
   [access]                          # baseline: this folder, no login
@@ -247,22 +248,21 @@ MANIFEST
   # ask = true                      # asked once, kept for every box, masked
 
   [runtime]
-  rootfs = "copy"                   # or "readonly": no copy, faster, and
-                                    # no installing at run time
+  rootfs = "copy"                   # "readonly": no copy, faster, no installs
 
 MAKE A ROLE
   The same manifest, kept outside the tree, so one recipe serves any folder.
 
-  mkdir -p myrole/hooks
   # myrole/wormhole.toml    the manifest above
   # myrole/ROLE.md          extra instructions for the agent   (optional)
   # myrole/hooks/setup.sh   runs in the box before the agent   (optional)
+  # myrole/rules/rust.md    one subject per file, at ~/rules in the box
   wormhole role add ./myrole --as mine
-  wormhole box --role mine               # pick which CLI
-  wormhole box --role mine --run grok    # skip the pick
+  wormhole box --role mine [--run grok]  # pick which CLI; --run skips the pick
 
-  A role is identified by where it comes from, never by what you typed.
-  Two products of one role are two boxes.
+  Rules are not read at start: ROLE.md names each file and the work that
+  calls for it. Edit the role; ~/rules is a copy remade on every start.
+  A role is where it comes from, not what you typed; each product is a box.
 
 "#;
 
@@ -404,6 +404,7 @@ mod tests {
             "--run",
             "pick which CLI",
             "WORMHOLE_RUN",
+            "~/rules",
             "claude-code",
             "-g",
             "mcp add",

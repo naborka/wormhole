@@ -746,6 +746,90 @@ fn a_missing_preflight_script_is_refused_before_the_box_starts() {
     );
 }
 
+/// Rule files are role data like the hook: every file of the named
+/// directory lands in `rules/` at the box home, fresh on every start, so
+/// a file the role dropped does not survive in the box.
+#[test]
+fn box_seeds_the_rules_dir_into_the_kept_home_freshly() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (url, digest) = rootfs_tarball(temp.path());
+    let workspace = temp.path().join("workspace");
+    let data_home = temp.path().join("data");
+    let config_home = temp.path().join("config");
+    let role = config_home.join("wormhole/roles/tester");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(role.join("rules")).expect("role dir");
+    write_manifest(
+        &role,
+        &url,
+        &digest,
+        "[agent]\nrun = \"claude\"\nrules = \"rules\"\n",
+    );
+    std::fs::write(role.join("rules/rust.md"), "Rust rules.\n").expect("rule written");
+    std::fs::write(role.join("rules/old.md"), "Dropped later.\n").expect("rule written");
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_wormhole"))
+            .args(args)
+            .current_dir(&workspace)
+            .env("XDG_DATA_HOME", &data_home)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .output()
+            .expect("wormhole binary should spawn")
+    };
+    assert!(run(&["build", "--role", "tester"]).status.success());
+    let _ = run(&["box", "--role", "tester", "--", "/bin/true"]);
+    let seeded = kept_home(&data_home).join("rules");
+    assert_eq!(
+        std::fs::read_to_string(seeded.join("rust.md")).expect("rule seeded"),
+        "Rust rules.\n"
+    );
+    assert!(seeded.join("old.md").is_file());
+
+    std::fs::remove_file(role.join("rules/old.md")).expect("rule dropped");
+    let _ = run(&["box", "--role", "tester", "--", "/bin/true"]);
+    assert!(seeded.join("rust.md").is_file());
+    assert!(!seeded.join("old.md").exists(), "a dropped rule survived");
+
+    write_manifest(&role, &url, &digest, "[agent]\nrun = \"claude\"\n");
+    let _ = run(&["box", "--role", "tester", "--", "/bin/true"]);
+    assert!(
+        !seeded.exists(),
+        "rules survived the manifest dropping them"
+    );
+}
+
+/// A manifest that names a rules directory the role does not carry stops
+/// the launch on the host, with the path in the error.
+#[test]
+fn a_missing_rules_dir_is_refused_before_the_box_starts() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (url, digest) = rootfs_tarball(temp.path());
+    let workspace = temp.path().join("workspace");
+    let data_home = temp.path().join("data");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    write_manifest(
+        &workspace,
+        &url,
+        &digest,
+        "[agent]\nrun = \"claude\"\nrules = \"rules\"\n",
+    );
+    assert!(build_in(&workspace, &data_home).status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wormhole"))
+        .args(["box", "--", "/bin/true"])
+        .current_dir(&workspace)
+        .env("XDG_DATA_HOME", &data_home)
+        .output()
+        .expect("wormhole binary should spawn");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("rules"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// A role argument with a path separator is the role's directory itself —
 /// no install into the config dir needed to try one out.
 #[test]

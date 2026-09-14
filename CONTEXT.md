@@ -31,7 +31,7 @@ One terminal attached to a box. The launch holds the first; `wormhole attach` op
 _Avoid_: tab, instance, agent run
 
 **Role**:
-A directory holding a manifest and whatever that manifest names — an instructions file, a preflight hook — that is not tied to one workspace. Reached by path, by installed name, or by pinned commit; those are three ways to *reach* one role, never three roles. A role may offer more than one product; that does not make it more than one role.
+A directory holding a manifest and whatever that manifest names — an instructions file, a preflight hook, rule files read on demand — that is not tied to one workspace. Reached by path, by installed name, or by pinned commit; those are three ways to *reach* one role, never three roles. A role may offer more than one product; that does not make it more than one role.
 _Avoid_: profile, template, persona (a persona is a file a role ships, not the role)
 
 **Product**:

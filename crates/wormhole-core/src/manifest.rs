@@ -120,6 +120,12 @@ pub struct Agent {
     /// role's especially — is not in the box.
     #[serde(default)]
     pub preflight: Option<String>,
+    /// A directory beside the manifest whose files the agent reads on
+    /// demand, not at start: the instructions name each one and when it
+    /// applies, so a box pays for a rule set only when its subject comes
+    /// up. Seeded into `rules/` at the box home, fresh on every start.
+    #[serde(default)]
+    pub rules: Option<String>,
     /// Whether a bare start in a workspace this role's boxes never ran in
     /// resumes one of them. One home then keeps its login and its setup
     /// for every workspace, and puts every project's history in reach of
@@ -243,6 +249,11 @@ pub struct Runtime {
 /// Where the preflight hook is seeded, relative to the box home. The
 /// launcher writes it there; `launch_command` runs it from there.
 pub const PREFLIGHT_SEED: &str = ".wormhole/preflight";
+
+/// Where `[agent] rules` files are seeded, relative to the box home. Not
+/// a dotfile: the agent is told to read them, so they sit where a `~/`
+/// path in its instructions reaches without a hidden hop.
+pub const RULES_SEED: &str = "rules";
 
 /// The product this start bound, so a preflight hook can branch without
 /// wormhole parsing it. Injected as a fixed env variable.
@@ -2276,6 +2287,13 @@ mod tests {
             manifest.agent.preflight.as_deref(),
             Some("hooks/preflight.sh")
         );
+    }
+
+    #[test]
+    fn a_rules_dir_is_kept_as_written() {
+        let manifest = full("[agent]\nrules = \"rules\"\n");
+        assert_eq!(manifest.agent.rules.as_deref(), Some("rules"));
+        assert_eq!(RULES_SEED, "rules");
     }
 
     #[test]

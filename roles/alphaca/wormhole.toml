@@ -59,6 +59,7 @@ into = "/tmp/rustup-init"
 run = ["claude", "codex", "grok"]
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
+rules = "rules"
 # One box per CLI for every project: the login and the setup are made
 # once. Every project's history is then in reach of every other.
 resume = "anywhere"

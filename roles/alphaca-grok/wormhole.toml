@@ -56,6 +56,7 @@ into = "/tmp/rustup-init"
 run = "grok"
 instructions = "ROLE.md"
 preflight = "hooks/preflight.sh"
+rules = "rules"
 
 # `grok login --device-auth` in the box: it prints a URL and a code, so a
 # box with no browser can still sign in. Not `share` — grok saves a login

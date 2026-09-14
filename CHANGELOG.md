@@ -25,6 +25,15 @@ The alphaca hook now sets up skills, MCP and plugins once per box, and
 again only when that part of the hook changes. Before, every start fetched all three
 skill repositories again, about three seconds each.
 
+### Rules the agent reads only when needed
+
+A role can ship rule files beside its persona instead of inside it.
+`rules = "rules"` under `[agent]` names a directory; every file in it is
+copied to `~/rules/` in the box home on every start. Nothing reads them at
+start. The persona says which file to read when, so a box spends context
+on, say, Rust rules only when Rust work comes up. `alphaca` does this: its
+Rust section moved from `ROLE.md` to `rules/rust.md`.
+
 ### Fixed: a box's record lived where the agent could rewrite it
 
 Which folder a box ran in and which role it was sat in its home, which the
