@@ -9,6 +9,14 @@ true.
 
 ## Unreleased
 
+### One role, not three
+
+`alphaca-codex` and `alphaca-grok` are gone. They were copies of
+`alphaca` from before one role could offer three CLIs, and `wormhole box
+--role alphaca --run codex` has done their job since. A box still
+recorded against either name keeps its home, but can no longer be
+resumed by that name.
+
 ### One box for every project
 
 A role can keep one box for all your projects instead of one per project.
