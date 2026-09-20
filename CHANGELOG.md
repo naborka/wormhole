@@ -9,6 +9,24 @@ true.
 
 ## Unreleased
 
+### The alphaca box carries fewer skills, and the same ones every time
+
+The hook installed every skill in three repositories — 59 of them, to use
+about twenty. Whatever a third party added last week arrived at the next
+start, unread. And every installed skill's description sits in the
+model's prompt for the whole session, called or not.
+
+The hook now names the skills it wants and pins each repository to a
+commit, and it owns the home's set: anything it does not name is removed
+on the next start. Twenty-one skills instead of fifty-nine, and a session
+starts about 900 tokens lighter.
+
+The `rust-skills` repository went with them. Its single file costs about
+9,500 tokens the moment it is invoked, over ground the role's own
+`rules/rust.md` mostly covered already. That file grew instead, by what
+it was missing — numbers, async, memory, concurrency — and still costs
+about 1,400.
+
 ### Fixed: codex could not use code mode
 
 Codex is no longer one program. It starts a second one,

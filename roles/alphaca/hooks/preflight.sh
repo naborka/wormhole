@@ -152,20 +152,41 @@ warn() {
     setup_ok=0
 }
 
-# Skills via the installer, into this product's directory in the kept
-# home; without -g they land in the workspace. Each repo on its own so
-# one bad source does not take the rest down.
-for repo in \
-    JuliusBrussee/caveman \
-    mattpocock/skills \
-    leonardomso/rust-skills
-do
-    if npx -y skills add "$repo" --skill '*' -a "$skills_agent" -g --yes </dev/null; then
-        echo "[preflight] installed skills from $repo ($run)"
+# Skills, named and pinned. A skill is instructions the agent follows,
+# so an unpinned HEAD would change how the box behaves between starts,
+# and `--skill '*'` would let a new one in unread. The installer still
+# does the placing, so each product's own directory stays its business.
+# `-g`, or they land in the workspace.
+add_skills() {
+    src="$HOME/.cache/alphaca/skills-src"
+    rm -rf "$src"
+    if ! git init -q "$src" \
+        || ! git -C "$src" fetch -q --depth 1 "https://github.com/$1" "$2" \
+        || ! git -C "$src" checkout -q FETCH_HEAD; then
+        warn "cannot fetch $1 at $2"
     else
-        warn "skills add $repo failed"
+        # Unquoted on purpose: $3 is a list, every name [a-z-] only.
+        flags=
+        for skill in $3; do flags="$flags -s $skill"; done
+        if npx -y skills add "$src" $flags -a "$skills_agent" -g --yes </dev/null; then
+            echo "[preflight] skills from $1 ($run)"
+        else
+            warn "skills add $1 failed"
+        fi
     fi
-done
+    rm -rf "$src"
+}
+
+# The hook owns this home's skills, so the set is what it names and
+# nothing more: an earlier run's picks go before this run's land.
+npx -y skills remove --all -g </dev/null >/dev/null 2>&1 || true
+
+add_skills JuliusBrussee/caveman 3ee70a102609e550bd2e68004bf5990a9341c851 \
+    "caveman cavecrew caveman-compress caveman-stats lean-build migration
+     safe-refactor surgical-patch verify-and-stop"
+add_skills mattpocock/skills c55ee46073ed923f86ce59a5eb3b6d895095d1b7 \
+    "code-review codebase-design diagnosing-bugs domain-modeling grilling pr
+     prototype research resolving-merge-conflicts tdd wizard writing-for-agents"
 
 # RTK flavour: claude gets a PreToolUse rewrite; the others get a rules
 # file. grok has no rewrite hook, so CODEX_HOME aims the same text at

@@ -9,7 +9,7 @@ Repository's own stack, lints and style win over picks and style here. Benchmark
 - Exhaustive `match`; avoid `_` catch-all where possible.
 - Types: private fields, accessors when needed. Builder for complex construction. Composition, not `Deref` inheritance. Derive `Debug`, `Clone`, `PartialEq`, `Default` where sensible.
 - No wildcard imports, except preludes and `use super::*` in tests. Import order: std, external, local.
-- `unsafe` only when no safe way exists.
+- `unsafe` only when no safe way exists. Smallest block that covers the operation, never the safe code around it. Any crate carrying `unsafe` runs `cargo miri test` in CI. Rust 2024 spellings: `unsafe extern { }`, `#[unsafe(no_mangle)]`.
 - Tests: Arrange-Act-Assert. Fake external APIs and databases behind trait. Real temp directories for file tests.
 - Small, light crate that replaces much new code at optimal performance: use it.
 - Picks:
@@ -22,6 +22,38 @@ Repository's own stack, lints and style win over picks and style here. Benchmark
   - Tables: `polars`. Inspect max 10 rows at once. Print frame alone, not with row count or schema.
   - Secrets: `.env` (in `.gitignore`) via `dotenvy` or `std::env`, held in `secrecy` types.
 - Read `Cargo.lock` only when extremely relevant.
+- Shipped release profile: `lto = true`, `codegen-units = 1`. Never `target-cpu`: it trades portability for speed, and the benchmark rules below forbid it.
+- `#[inline]` on small hot functions, `#[inline(always)]` only where profiling proved it, `#[cold]` on error paths.
+
+## Numbers
+
+- Integer overflow is a decision, never a default: pick `checked_`, `saturating_`, `wrapping_` or `overflowing_` on purpose.
+- No `as` for narrowing. `From` widens, `TryFrom` narrows and reports.
+- Never compare floats with `==`. Tolerance for equality, `total_cmp` for ordering.
+- `NonZero*` where zero is invalid: the compiler forbids it and the niche pays for itself.
+
+## Async
+
+- Never hold a `Mutex` or `RwLock` across `.await`.
+- `tokio::fs`, not `std::fs`. CPU work to `spawn_blocking`.
+- Independent futures: `join!`, or `try_join!` when they can fail.
+- Every future in a `select!` branch must be cancellation-safe.
+- Bounded channels, so a slow consumer pushes back instead of growing memory. `oneshot` for request-response, `watch` for latest value, `broadcast` for pub/sub, `JoinSet` for a changing set of tasks.
+- `async fn` in traits directly; `async_trait` only for dyn-safety it cannot give.
+
+## Memory
+
+- `Box` a large enum variant: every value of the enum pays for the biggest one.
+- `mem::take` or `mem::replace` to move out of a `&mut` instead of cloning.
+- `write!` into a buffer over `format!` in a loop. `clone_from` to reuse an allocation. Clear and refill a collection rather than building a new one each pass.
+- `Box<[T]>` over `Vec<T>` once the length is fixed.
+- Drop order is load-bearing wherever a guard is: struct fields top to bottom, locals in reverse.
+
+## Concurrency
+
+- Weakest correct `Ordering` on every atomic, with a comment saying why when it is not `SeqCst`.
+- `std::thread::scope` to borrow stack data across threads.
+- `thread_local!` with `Cell` or `RefCell`, never `static mut`.
 
 ## Benchmarks
 
