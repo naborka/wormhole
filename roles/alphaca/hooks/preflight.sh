@@ -6,13 +6,28 @@ set -eu
 
 run="${WORMHOLE_RUN:?wormhole: WORMHOLE_RUN is unset; the start did not bind a product}"
 bin="$HOME/.local/bin"
+musl="$(uname -m)-unknown-linux-musl"
 mkdir -p "$bin"
 
 # The tag behind GitHub's latest-release redirect, without the API's
 # rate limit. Empty when it cannot be read.
 latest_tag() {
-    curl -fsSI "https://github.com/$1/releases/latest" 2>/dev/null \
+    curl -fsSI --connect-timeout 10 "https://github.com/$1/releases/latest" 2>/dev/null \
         | sed -n 's|^[Ll]ocation: .*/tag/\([^[:space:]]*\).*|\1|p' | tr -d '\r'
+}
+
+# What a tool reports, empty when it is not installed.
+installed_version() {
+    "$1" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p'
+}
+
+# A release tarball from repo $1 at tag $2 into $4: all of it, or only
+# the members named after it.
+fetch_release() {
+    url="https://github.com/$1/releases/download/$2/$3.tar.gz"
+    dir=$4
+    shift 4
+    curl -fsSL --connect-timeout 10 "$url" | tar -xz -C "$dir" "$@"
 }
 
 install_claude() {
@@ -23,7 +38,7 @@ install_claude() {
         else
             echo "[preflight] WARN: claude update failed; keeping $(version)" >&2
         fi
-    elif curl -fsSL https://claude.ai/install.sh | bash \
+    elif curl -fsSL --connect-timeout 10 https://claude.ai/install.sh | bash \
         && command -v claude >/dev/null 2>&1; then
         echo "[preflight] installed claude $(version)"
     else
@@ -32,31 +47,53 @@ install_claude() {
     fi
 }
 
+# Codex is a tree, not a binary: it spawns codex-code-mode-host from
+# beside its own real path, so $bin/codex is a link into the tree.
+codex_pkg="$HOME/.local/codex"
+
+# The new tree is built whole before the old one goes, so a failed
+# download leaves the working codex alone.
+fetch_codex() {
+    mkdir -p "$codex_pkg.new" || return 1
+    if ! fetch_release openai/codex "$1" "codex-package-$musl" "$codex_pkg.new"; then
+        rm -rf "$codex_pkg.new"
+        return 1
+    fi
+    rm -rf "$codex_pkg"
+    mv "$codex_pkg.new" "$codex_pkg"
+    ln -sfn "$codex_pkg/bin/codex" "$bin/codex"
+    codex --version >/dev/null 2>&1
+}
+
 install_codex() {
+    # A start killed mid-download leaves one; nothing else reclaims it.
+    rm -rf "$codex_pkg.new"
     tag=$(latest_tag openai/codex)
-    have=$(codex --version 2>/dev/null | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p')
-    if [ -z "$tag" ] && [ -z "$have" ]; then
+    runs=$(installed_version codex)
+    # A plain file is the old one-binary install: nothing to spawn
+    # beside it, so it goes even when its version matches.
+    packaged=$runs
+    [ -L "$bin/codex" ] || packaged=
+
+    if [ -n "$tag" ] && [ "${tag#rust-v}" = "$packaged" ]; then
+        return
+    elif [ -z "$tag" ] && [ -z "$runs" ]; then
         echo "[preflight] ERROR: cannot read codex's latest release and none is installed" >&2
         exit 1
     elif [ -z "$tag" ]; then
-        echo "[preflight] WARN: cannot read codex's latest release; keeping $have" >&2
-    elif [ "${tag#rust-v}" != "$have" ]; then
-        target="$(uname -m)-unknown-linux-musl"
-        url="https://github.com/openai/codex/releases/download/$tag/codex-$target.tar.gz"
-        if curl -fsSL "$url" | tar -xz -C "$bin" "codex-$target" \
-            && mv "$bin/codex-$target" "$bin/codex"; then
-            echo "[preflight] codex $tag"
-        elif [ -n "$have" ]; then
-            echo "[preflight] WARN: codex $tag download failed; keeping $have" >&2
-        else
-            echo "[preflight] ERROR: codex $tag download failed; nothing to run" >&2
-            exit 1
-        fi
+        echo "[preflight] WARN: cannot read codex's latest release; keeping $runs" >&2
+    elif fetch_codex "$tag"; then
+        echo "[preflight] codex $tag"
+    elif [ -n "$runs" ]; then
+        echo "[preflight] WARN: codex $tag install failed; keeping $runs" >&2
+    else
+        echo "[preflight] ERROR: codex $tag install failed; nothing to run" >&2
+        exit 1
     fi
 }
 
 install_grok() {
-    latest=$(curl -fsSL https://x.ai/cli/stable 2>/dev/null | tr -d '[:space:]')
+    latest=$(curl -fsSL --connect-timeout 10 https://x.ai/cli/stable 2>/dev/null | tr -d '[:space:]')
     have=$(grok --version 2>/dev/null | sed -n 's/^grok \([^ ]*\).*/\1/p')
     if [ -z "$latest" ] && [ -z "$have" ]; then
         echo "[preflight] ERROR: cannot read grok's latest version and none is installed" >&2
@@ -64,7 +101,7 @@ install_grok() {
     elif [ -z "$latest" ]; then
         echo "[preflight] WARN: cannot read grok's latest version; keeping $have" >&2
     elif [ "$latest" != "$have" ]; then
-        if curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR="$bin" bash -s "$latest" \
+        if curl -fsSL --connect-timeout 10 https://x.ai/cli/install.sh | GROK_BIN_DIR="$bin" bash -s "$latest" \
             && grok --version >/dev/null 2>&1; then
             echo "[preflight] grok $latest"
         elif [ -n "$have" ]; then
@@ -89,12 +126,11 @@ esac
 
 # rtk, latest release, same place.
 tag=$(latest_tag rtk-ai/rtk)
-have=$(rtk --version 2>/dev/null | sed -n 's/.* \([0-9][0-9.]*\).*/\1/p')
+have=$(installed_version rtk)
 if [ -z "$tag" ]; then
     echo "[preflight] WARN: cannot read rtk's latest release; keeping ${have:-none}" >&2
 elif [ "${tag#v}" != "$have" ]; then
-    url="https://github.com/rtk-ai/rtk/releases/download/$tag/rtk-$(uname -m)-unknown-linux-musl.tar.gz"
-    if curl -fsSL "$url" | tar -xz -C "$bin" rtk; then
+    if fetch_release rtk-ai/rtk "$tag" "rtk-$musl" "$bin" rtk; then
         echo "[preflight] rtk $tag"
     else
         echo "[preflight] WARN: rtk $tag download failed" >&2

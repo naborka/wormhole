@@ -9,6 +9,20 @@ true.
 
 ## Unreleased
 
+### Fixed: codex could not use code mode
+
+Codex is no longer one program. It starts a second one,
+`codex-code-mode-host`, from the folder its own binary sits in. The hook
+installed only the first, so code mode failed part-way through a task
+with "host executable was not found" — and a box already on the newest
+codex never repaired itself, because the version it reported looked
+right.
+
+The hook now installs the whole package OpenAI publishes, the same one
+their own installer uses, into `~/.local/codex`, and points
+`~/.local/bin/codex` at it. Whatever helper codex adds next arrives with
+it. That costs about 30 MB more than the bare binary.
+
 ### One role, not three
 
 `alphaca-codex` and `alphaca-grok` are gone. They were copies of

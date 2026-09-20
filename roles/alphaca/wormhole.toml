@@ -39,8 +39,8 @@ packages = [
   "zstd",
 ]
 
-# The product binary and rtk are not in the image: the preflight hook
-# keeps the latest of both in the box home's ~/.local/bin. zstd is here
+# The product and rtk are not in the image: the preflight hook keeps the
+# latest of both in the box home, on its ~/.local/bin. zstd is here
 # because grok's installer prefers the zstd build; the others ignore it.
 build = [
   # rustup-init reads its own argv[0], so it keeps its name.

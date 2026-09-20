@@ -61,7 +61,7 @@ the box's kept home, with `WORMHOLE_RUN` set to `claude`, `codex` or
 Nothing here is a wormhole schema. The hook calls each CLI's own
 commands, so wormhole never lags behind a CLI it does not control.
 
-Four rules:
+Six rules:
 
 1. **Branch on `WORMHOLE_RUN`.** Each product has its own binary, its own
    MCP command and its own idea of a plugin.
@@ -91,6 +91,20 @@ Four rules:
 
    Keep what should stay current, like updating the CLI itself, above
    the guard.
+
+6. **Install a CLI the way its own installer does.** A CLI is often a
+   tree, not a binary: codex spawns `codex-code-mode-host` from beside
+   its own real path, so a lone `codex` binary starts, reports the right
+   version, and then fails mid-task with "host executable was not
+   found". Take the vendor's whole package and link to it, so the next
+   helper it adds arrives on its own.
+
+   ```sh
+   # the tree moves as one; $HOME/.local/bin/codex is a link into it
+   curl -fsSL ".../codex-package-$musl.tar.gz" | tar -xz -C "$pkg.new"
+   rm -rf "$pkg" && mv "$pkg.new" "$pkg"
+   ln -sfn "$pkg/bin/codex" "$bin/codex"
+   ```
 
 The shipped `alphaca` hook does exactly this. Measured on 2026-09-13,
 one `skills add` of `mattpocock/skills` took 3.6 s into an empty home and
