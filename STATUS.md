@@ -360,6 +360,13 @@ Three processes. `run` on the host spawns `__boxed`, which unshares user, UTS an
 PID, writes the id maps, sets the hostname, and forks. **That fork is the box's
 PID 1**: it unshares the mount namespace, applies every mount from the plan
 including `proc`, pivots into the new root, and `execvp`s the command. `__boxed`
+**GNU utilities in every Alpine recipe.** BusyBox's `grep`, `find`, `sed`,
+`diff` and `tree` refuse the GNU flags agents write and wrappers emit; rtk's
+`--null` alone broke every plain `grep` from Claude. `grep`, `findutils`, `sed`,
+`coreutils`, `diffutils`, `gawk` and `tree` cost 3 MB and a test in
+`tests/manifests.rs` keeps them in every shipped recipe. Measurements and the
+verdict on the other tools: `docs/research/box-tools.md`.
+
 waits and turns the box's wait status into our exit code.
 
 One process does all the privileged work, because `unshare` grants capabilities to

@@ -1717,6 +1717,38 @@ mod tests {
         assert!(found > 10, "only found {found} commands to check");
     }
 
+    /// The default instructions reach every agent in every box, and the
+    /// agent has no terminal: a full-screen program it is told to run
+    /// never returns and never prints. The tools table used to send it to
+    /// `ncdu` and `btop`.
+    #[test]
+    fn the_tools_table_names_no_program_that_needs_a_person() {
+        const INTERACTIVE: [&str; 9] = [
+            "btop", "htop", "top", "ncdu", "less", "more", "vim", "nano", "fzf",
+        ];
+        let mut rows = 0;
+        for line in super::DEFAULT_INSTRUCTIONS.lines() {
+            let mut cells = line.split('|').skip(1).map(str::trim);
+            let (Some(instead), Some(uses)) = (cells.next(), cells.next()) else {
+                continue;
+            };
+            if instead.is_empty() || instead.starts_with("--") || instead == "Instead of" {
+                continue;
+            }
+            rows += 1;
+            for program in INTERACTIVE {
+                let names_it = uses
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|word| word == program);
+                assert!(
+                    !names_it,
+                    "the tools table sends the agent to `{program}`, which needs a terminal: {line}"
+                );
+            }
+        }
+        assert!(rows > 3, "only {rows} table rows were found to check");
+    }
+
     /// And the other way: a page that lists a command the tool does not
     /// answer to sends the reader somewhere that does not exist.
     #[test]

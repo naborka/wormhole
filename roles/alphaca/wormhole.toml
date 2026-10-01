@@ -31,9 +31,29 @@ packages = [
   "openssh-client",
   "ca-certificates",
   "build-base",
+
+  # GNU, not BusyBox. Agents write GNU flags and rtk passes `--null` to
+  # grep; BusyBox refuses both. Measured in docs/research/box-tools.md.
+  "grep",
+  "findutils",
+  "sed",
+  "coreutils",
+  "diffutils",
+  "gawk",
+  "tree",
+
+  "jq",
   "ripgrep",
   "fd",
   "eza",
+  "ast-grep",
+  "hyperfine",
+  # Linker. Relink after an edit drops from 2.3 s to 1.0 s.
+  "mold",
+  # Gates on this repository's own shell and prose.
+  "shellcheck",
+  "typos",
+  # For a person in `wormhole attach`; the agent is not sent to them.
   "btop",
   "ncdu",
   "zstd",
@@ -47,6 +67,9 @@ build = [
   "mkdir -p /tmp/rustup && cp /tmp/rustup-init /tmp/rustup/ && chmod +x /tmp/rustup/rustup-init",
   "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /tmp/rustup/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 -c rustfmt -c clippy -c rust-analyzer",
   "ln -s /usr/local/cargo/bin/* /usr/local/bin/",
+  "tar -xzf /tmp/cargo-nextest.tar.gz -C /usr/local/bin cargo-nextest",
+  # A cc that links with mold; CARGO_TARGET_*_LINKER below points at it.
+  "printf '#!/bin/sh\\nexec cc -fuse-ld=mold \"$@\"\\n' > /usr/local/bin/cc-mold && chmod 0755 /usr/local/bin/cc-mold",
 ]
 
 # Rust from rustup, not apk: Alpine 3.22 pins rustc 1.87 for good.
@@ -54,6 +77,13 @@ build = [
 url = "https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init"
 sha256 = "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1"
 into = "/tmp/rustup-init"
+
+# A prebuilt musl binary, not the apk package: that one depends on Alpine's
+# own cargo and would install rustc 1.87 beside the rustup toolchain.
+[[image.artifact]]
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "6d891c18105ec2d33f6e441a4f92b7ccab47ba263e22055c8bb66884243f3389"
+into = "/tmp/cargo-nextest.tar.gz"
 
 [agent]
 run = ["claude", "codex", "grok"]
@@ -77,6 +107,19 @@ grants = ["~/.ssh"]
 # survives between boxes.
 [env.RUSTUP_HOME]
 fixed = "/usr/local/rustup"
+
+# The linker is part of cargo's fingerprint: changing it rebuilds the
+# tree, so it is fixed here and never toggled per session.
+[env.CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER]
+fixed = "/usr/local/bin/cc-mold"
+
+# nextest otherwise prints one line per passing test: 59 KB for this
+# repository's suite, 510 bytes with these two.
+[env.NEXTEST_STATUS_LEVEL]
+fixed = "fail"
+
+[env.NEXTEST_FINAL_STATUS_LEVEL]
+fixed = "fail"
 
 [env.CAVEMAN_DEFAULT_MODE]
 fixed = "ultra"

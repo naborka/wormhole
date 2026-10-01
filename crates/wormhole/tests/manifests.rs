@@ -33,6 +33,48 @@ fn every_manifest_this_repo_ships_parses() {
     }
 }
 
+/// Alpine's `grep`, `find`, `sed`, `diff`, `tree` and the rest are BusyBox
+/// applets, and BusyBox refuses the GNU flags every agent writes and every
+/// wrapper emits: rtk passes `--null` to `grep`, so in a BusyBox image each
+/// plain `grep` from Claude fails, and `rtk tree` prints its own options
+/// back as errors. Measured in `docs/research/box-tools.md`. Every Alpine
+/// recipe this repository ships, the starter included, installs the GNU
+/// ones.
+#[test]
+fn every_alpine_recipe_this_repo_ships_installs_the_gnu_tools() {
+    const GNU: [&str; 7] = [
+        "grep",
+        "findutils",
+        "sed",
+        "coreutils",
+        "diffutils",
+        "gawk",
+        "tree",
+    ];
+    let mut recipes = shipped_manifests();
+    recipes.push(repo_root().join("templates/wormhole.toml"));
+    let mut checked = 0;
+    for path in &recipes {
+        let text = std::fs::read_to_string(path).expect("manifest");
+        let parsed = manifest::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        if !parsed.image.base.contains("alpine") {
+            continue;
+        }
+        checked += 1;
+        for package in GNU {
+            assert!(
+                parsed.image.packages.iter().any(|p| p == package),
+                "{} is an Alpine recipe without the GNU `{package}` package",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        checked > 1,
+        "only {checked} Alpine recipes were found to check"
+    );
+}
+
 /// A digest of zeros is a note to fill in later, and a build that reaches
 /// it fails on the download it names. It has no place in a shipped recipe.
 #[test]
