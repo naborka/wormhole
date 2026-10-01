@@ -9,6 +9,48 @@ true.
 
 ## Unreleased
 
+### Fixed: the box's `grep` was BusyBox, and it refused the agent
+
+Alpine's `grep`, `find`, `sed`, `diff` and `tree` are BusyBox applets,
+and BusyBox refuses the GNU flags every agent writes. Worse, the rtk hook
+that compacts Claude's command output passes `--null` to whatever `grep`
+is on the path, so in the shipped image every plain `grep` from Claude
+failed with a usage message, and `rtk tree` printed its own options back
+as errors. Run directly, BusyBox grep took four and a half minutes over
+this repository where GNU grep took nine seconds and ripgrep well under
+one — longer than the agent waits, so it looked like a hang.
+
+Every Alpine recipe this repository ships — the workspace's own, the
+`alphaca` role, and the starter `wormhole init` writes — now installs the
+GNU `grep`, `findutils`, `sed`, `coreutils`, `diffutils`, `gawk` and
+`tree`, three megabytes together, and a test keeps it so. The default
+instructions no longer send the agent to `ncdu` and `btop`, which are
+full-screen programs that never return in a pipe; a second test keeps
+that table free of programs that need a person.
+
+### Fixed: a codex box got nothing from rtk
+
+rtk is what keeps command output short for the agent. For codex it did
+nothing: its codex hook answers no rewrite for the payload codex sends,
+and the instructions line it appended went through wormhole's
+`.codex/AGENTS.md` symlink into the canonical file, which the next start
+rewrites. The alphaca hook now writes codex's `hooks.json` itself, pointing
+at the rtk processor that does answer, and the role's own instructions
+carry the text rtk used to append. The guide says why: pointer files are
+rewritten every start. Measurements in `docs/research/box-tools-jvm.md`.
+
+### The alphaca box builds and tests faster, and says less
+
+Measured inside the box, on this repository: linking with `mold` takes a
+rebuild after an edit from 2.3 s to 1.0 s; `cargo nextest` runs the suite
+in 1.8 s instead of 2.4 s and, with two environment variables the role now
+fixes, reports 595 tests in 510 bytes instead of 44 KB. `ast-grep` answers
+"any `.unwrap()` outside tests?" with the exact number where ripgrep hands
+back 25 lines to read. `jq`, `hyperfine`, `shellcheck` and `typos` join
+them; the last two found a one-item loop in the role's own hook and two
+misspelled test names, both fixed. The measurements and the verdict on
+every other tool from the usual lists are in `docs/research/box-tools.md`.
+
 ### The alphaca box carries fewer skills, and the same ones every time
 
 The hook installed every skill in three repositories — 59 of them, to use
