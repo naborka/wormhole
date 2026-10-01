@@ -2,7 +2,9 @@
 
 Repository's own stack, lints and style win over picks and style here. Benchmark rules always apply.
 
-- Gates before done, plus repository's own: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. Deny warnings by flag or CI, never `#![deny(warnings)]` in source.
+- Gates before done, plus repository's own: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`. Deny warnings by flag or CI, never `#![deny(warnings)]` in source.
+- Tests run with `cargo nextest run`: faster, one process per test, failures only in the report. nextest runs no doctests; `cargo test --doc` does.
+- Claim about the code (every `.unwrap()`, every caller of X): `ast-grep run -p '<pattern>' -l rust`, `--json=compact` to count. Regex finds text; this finds syntax.
 - Follow Rust API Guidelines. Make invalid states unrepresentable: newtypes, enums, `Option` over sentinel values.
 - No `.unwrap()` outside tests. `.expect("<why it holds>")` only for invariants.
 - Borrow over own: `&str` over `String`, `Cow<'_, str>` when ownership is conditional. Clone on purpose; no hidden clones in closures or iterators. `Vec::with_capacity` when size is known.
@@ -58,6 +60,7 @@ Repository's own stack, lints and style win over picks and style here. Benchmark
 ## Benchmarks
 
 - Run benchmarks alone: no parallel benchmarks, builds or tests. No `target-cpu=native` or other `RUSTFLAGS`.
+- Time commands with `hyperfine -N -w 3 -r 10 --export-markdown <file> '<cmd>'`, never bare `time`: warmup, repeats, mean and deviation.
 - Never game benchmarks to meet target. Compare apples to apples. Keep each benchmark independent; disable caching that couples them.
 
 ## Web front end

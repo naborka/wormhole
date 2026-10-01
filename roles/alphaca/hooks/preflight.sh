@@ -168,6 +168,7 @@ add_skills() {
         # Unquoted on purpose: $3 is a list, every name [a-z-] only.
         flags=
         for skill in $3; do flags="$flags -s $skill"; done
+        # shellcheck disable=SC2086
         if npx -y skills add "$src" $flags -a "$skills_agent" -g --yes </dev/null; then
             echo "[preflight] skills from $1 ($run)"
         else
@@ -256,10 +257,8 @@ esac
 # say so; rust-analyzer-lsp is the one that is not also a skill repo.
 case "$run" in
     claude)
-        for marketplace in anthropics/claude-plugins-official; do
-            claude plugin marketplace add "$marketplace" </dev/null \
-                || warn "marketplace $marketplace failed"
-        done
+        claude plugin marketplace add anthropics/claude-plugins-official </dev/null \
+            || warn "marketplace anthropics/claude-plugins-official failed"
         if claude plugin install rust-analyzer-lsp@claude-plugins-official </dev/null; then
             echo "[preflight] rust-analyzer-lsp plugin installed"
         else

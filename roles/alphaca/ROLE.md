@@ -83,6 +83,11 @@ Aim: robust, maintainable, elegant.
 
 - Never create PR, merge or push unless user asks.
 - Commit no commented-out code or tests, no debug prints.
+## Gates
+
+- Before done, on top of the language gates in `~/rules/`: `typos` over the tree; `shellcheck` on every `.sh` touched.
+- Gate fails: fix cause. Never silence a finding without a reason in the config or directive.
+
 
 ## Rules on demand
 

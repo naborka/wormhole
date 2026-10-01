@@ -173,7 +173,7 @@ fn a_dead_box_that_never_wrote_an_entry_is_still_reaped() {
 /// A box that died without cleanup must not haunt the listing: its entry
 /// is removed, not just skipped.
 #[test]
-fn a_dead_boxs_entry_is_reaped() {
+fn a_dead_box_entry_is_reaped() {
     let temp = tempfile::tempdir().expect("temp dir");
     let dead = 4_000_000; // beyond any default pid_max
     write_entry(temp.path(), dead);
