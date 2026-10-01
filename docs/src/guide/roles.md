@@ -464,7 +464,9 @@ travel by seeding into the box's kept home before start:
   actually reads gets a pointer to it — `.claude/CLAUDE.md` holding
   `@~/AGENTS.md`, or a symlink at `.codex/AGENTS.md` and
   `.grok/rules/AGENTS.md` — so the text exists once however many agents
-  learn to read it
+  learn to read it. Both are rewritten on every start, so a line a tool
+  appends to either lives one session; text that must stay belongs in the
+  role's instructions
 - `[agent] preflight` is copied to `.wormhole/preflight` in the box home
   and run from there, fresh on every start, with `WORMHOLE_RUN` set to the
   product this box is. Removed when the manifest stops naming one, so

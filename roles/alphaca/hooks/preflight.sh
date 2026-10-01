@@ -189,9 +189,9 @@ add_skills mattpocock/skills c55ee46073ed923f86ce59a5eb3b6d895095d1b7 \
     "code-review codebase-design diagnosing-bugs domain-modeling grilling pr
      prototype research resolving-merge-conflicts tdd wizard writing-for-agents"
 
-# RTK flavour: claude gets a PreToolUse rewrite; the others get a rules
-# file. grok has no rewrite hook, so CODEX_HOME aims the same text at
-# the directory it reads every *.md from.
+# RTK flavour: claude and codex get a PreToolUse rewrite, grok a rules
+# file. The text rtk appends to an instructions file is wiped at the next
+# start, so ROLE.md carries it instead.
 if command -v rtk >/dev/null 2>&1; then
     rtk telemetry disable >/dev/null 2>&1 </dev/null || true
     rtk_ok=0
@@ -200,9 +200,15 @@ if command -v rtk >/dev/null 2>&1; then
             rtk init -g --auto-patch </dev/null && rtk_ok=1
             ;;
         codex)
-            rtk init -g --codex </dev/null && rtk_ok=1
+            # `rtk hook codex` answers nothing; the claude one speaks the
+            # same JSON. docs/research/box-tools-jvm.md.
+            mkdir -p "$HOME/.codex" \
+                && printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}\n' \
+                    >"$HOME/.codex/hooks.json" \
+                && rtk_ok=1
             ;;
         grok)
+            # grok reads every *.md in that directory, RTK.md included.
             CODEX_HOME="$HOME/.grok/rules" rtk init -g --codex </dev/null && rtk_ok=1
             ;;
     esac

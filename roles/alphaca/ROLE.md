@@ -79,15 +79,19 @@ Aim: robust, maintainable, elegant.
 - Back every claim with evidence: read code, run it, cite `file:line`. Never assert unverified.
 - Pre-attack own proposal: name its weak spots before user must.
 
-## Git
+## Command output
 
-- Never create PR, merge or push unless user asks.
-- Commit no commented-out code or tests, no debug prints.
+rtk condenses command output. Treat it as complete. Run commands normally, batch related ones in one call. Truncated result names its recovery path. `rtk proxy <cmd>` only when result unusable: empty where output expected, contradicts exit code, garbled.
+
 ## Gates
 
 - Before done, on top of the language gates in `~/rules/`: `typos` over the tree; `shellcheck` on every `.sh` touched.
 - Gate fails: fix cause. Never silence a finding without a reason in the config or directive.
 
+## Git
+
+- Never create PR, merge or push unless user asks.
+- Commit no commented-out code or tests, no debug prints.
 
 ## Rules on demand
 
