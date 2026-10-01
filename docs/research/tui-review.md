@@ -752,3 +752,24 @@ for one thing is a key that starts meaning something else.
 | Keystrokes to resume somewhere else | quit, `cd`, retype the id | Enter, move, Enter |
 | Discoverable without reading anything | no | yes |
 | Keys on the box tab | 8 | 7 |
+
+## 11. Enter returns
+
+The cheap step §5.6 named is built. `tui()` no longer calls anything that
+is `-> !`: Enter, the workspace picker and the `n` form each hand an
+argument list to `session`, which runs this same binary as a child on the
+terminal the panel just gave back, waits, and lets the loop draw the panel
+again. One body, the same shape `Host::run` already had for the palette.
+
+What it costs is what §5.6 said: one more `wormhole` process alive for the
+session's life, and `Ctrl-C` now reaching two processes. The second is
+handled the way `boundary` already handled it for `__boxed` and `attach`:
+`SIGINT` and `SIGQUIT` are ignored while the child runs — and, new here,
+restored after, because this waiter goes on living.
+
+A session that exits non-zero prints to the terminal and the panel would
+cover it, so the panel waits for a key under the message before it comes
+back. On a real pty: Enter, Enter into a box whose folder has no manifest
+fails at once, the pause is shown, a key brings the panel, `q` leaves it.
+
+Still open, and still a separate step: `Ctrl-\` while the agent runs (T5).

@@ -25,7 +25,8 @@ use wormhole_core::tui::{
 };
 
 /// What the user chose in the panel. The terminal is already restored
-/// when this returns, so the caller can exec straight into it.
+/// when this returns, so the caller can run the session on it and come
+/// back.
 pub enum Pick {
     /// Join this running box (`wormhole attach <id>`).
     Attach(String),
@@ -296,6 +297,29 @@ fn ask_on(raw: &mut Raw, asking: &mut tui::Ask) -> Result<Option<String>, String
 /// bottom of the terminal and could not be reached.
 pub fn confirm(text: &str) -> Result<bool, String> {
     read(text, tui::Reading::Confirm)
+}
+
+/// A line under whatever the terminal already shows, and a wait for any
+/// key — for a session that ended badly, whose words would otherwise be
+/// covered by the panel the moment it came back. No alternate screen, so
+/// nothing is hidden. Errors on the way are said and swallowed: there is
+/// no better place for them than this terminal.
+pub fn pause(text: &str) {
+    use std::io::Write as _;
+    let mut out = stdout();
+    let _ = writeln!(out, "{text}. any key for the panel");
+    let _ = out.flush();
+    if let Err(e) = terminal::enable_raw_mode() {
+        eprintln!("cannot wait for a key: {e}");
+        return;
+    }
+    loop {
+        match next_input() {
+            Ok(Input::Press(_)) | Err(_) => break,
+            Ok(Input::Resized | Input::Ignored) => {}
+        }
+    }
+    let _ = terminal::disable_raw_mode();
 }
 
 /// The same screen, for something there is nothing to agree to — a

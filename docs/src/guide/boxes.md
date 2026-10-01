@@ -354,7 +354,10 @@ tool has, bound to the row the cursor is on and showing the exact command
 line each one is. `q` leaves; `esc` takes back a filter first.
 
 On the boxes tab, enter does the one thing that row allows — join a box
-that is running, start one that is not.
+that is running, start one that is not. The session runs on this
+terminal, and when it ends the panel is back, with the list as it now
+is. A session that failed waits for a key first, so what it printed can
+be read before the panel covers it.
 
 | Key | What it does |
 |---|---|

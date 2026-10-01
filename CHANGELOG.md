@@ -9,6 +9,16 @@ true.
 
 ## Unreleased
 
+### The panel comes back
+
+Enter used to exec into the box: the panel was a launcher that exited,
+and when the agent ended you had a shell prompt and typed `wormhole`
+again. Now the session runs as a child on the same terminal and the panel
+is drawn again when it ends, with the list as it now is. A session that
+failed waits for a key first, so its message is read before the panel
+covers it. Ctrl-C still belongs to the session: the panel waiting behind
+it ignores the signal while it waits, and takes its handlers back after.
+
 ### Fixed: the box's `grep` was BusyBox, and it refused the agent
 
 Alpine's `grep`, `find`, `sed`, `diff` and `tree` are BusyBox applets,

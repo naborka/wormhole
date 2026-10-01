@@ -1048,10 +1048,39 @@ fn tui() -> ! {
         let data_home = machine.data_home.clone();
         match picked {
             panel::Pick::Quit => std::process::exit(0),
-            panel::Pick::Attach(id) => attach_box(&id, None, &[]),
+            panel::Pick::Attach(id) => session(&["attach".to_owned(), id], None),
             panel::Pick::Workspaces(id) => start_somewhere(&data_home, &id),
             panel::Pick::New => new_box_from_panel(&data_home),
         }
+    }
+}
+
+/// Runs one of this tool's own commands on the terminal the panel gave
+/// back, and returns when it ends, so the panel is drawn again: a
+/// launcher that exits is a list you cannot come back to. As itself, in
+/// a child, for the same reason the palette does. A session that failed
+/// waits for a key first, or the panel would cover what it said.
+fn session(argv: &[String], cwd: Option<&Path>) {
+    let line = format!("wormhole {}", argv.join(" "));
+    let me = match std::env::current_exe() {
+        Ok(me) => me,
+        Err(e) => return panel::pause(&format!("cannot find this wormhole to run: {e}")),
+    };
+    let mut command = std::process::Command::new(me);
+    command.args(argv);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let waited = command.spawn().and_then(|mut child| {
+        // Ctrl-C is the session's. A panel that died to it would hand the
+        // shell the prompt while the box still owned the terminal.
+        let _quiet = boundary::ignore_terminal_signals();
+        child.wait()
+    });
+    match waited {
+        Ok(status) if status.success() => {}
+        Ok(status) => panel::pause(&format!("{line}: {status}")),
+        Err(e) => panel::pause(&format!("cannot run {line}: {e}")),
     }
 }
 /// Every kept box with the pid running it, most recently used first —
@@ -1173,11 +1202,12 @@ fn panel_record(data_home: &Path, id: &str) -> Option<home::Record> {
 /// Starting a box is starting it somewhere, so the start stands in that
 /// directory rather than passing it along: `wormhole box` takes no
 /// workspace argument, and the workspace is where you are.
-fn start_in(id: &str, workspace: &Path) -> ! {
-    std::env::set_current_dir(workspace)
-        .unwrap_or_else(|e| fail(&format!("cannot enter {}: {e}", workspace.display())));
+fn start_in(id: &str, workspace: &Path) {
     // No `--role`: a named box starts from the role it records.
-    run_box(&["--id".to_owned(), id.to_owned()])
+    session(
+        &["box".to_owned(), "--id".to_owned(), id.to_owned()],
+        Some(workspace),
+    );
 }
 
 /// `w` in the panel: which workspace to start this box in.
@@ -1322,7 +1352,9 @@ fn new_box_from_panel(data_home: &Path) {
         };
         let text = wormhole_core::tui::preview(&shown, &labels[index], image.is_dir());
         if panel::confirm(&text).unwrap_or_else(|e| fail(&e)) {
-            run_box(&args);
+            let mut argv = vec!["box".to_owned()];
+            argv.extend(args);
+            return session(&argv, None);
         }
     }
 }

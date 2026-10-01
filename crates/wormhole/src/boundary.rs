@@ -85,7 +85,7 @@ pub fn run(
         let _ = child.wait();
         fail(&e);
     }
-    ignore_terminal_signals();
+    let _quiet = ignore_terminal_signals();
     match child.wait() {
         Ok(status) => exit_code(wait_outcome(status)),
         Err(e) => fail(&format!("cannot wait for boxed child: {e}")),
@@ -187,7 +187,7 @@ pub fn attach(
     let forked = unsafe { fork() };
     match forked {
         Ok(ForkResult::Parent { child }) => {
-            ignore_terminal_signals();
+            let _quiet = ignore_terminal_signals();
             report(child)
         }
         Ok(ForkResult::Child) => {
@@ -260,14 +260,33 @@ fn die_with_launcher(child: &mut Command) {
 /// the processes waiting on it died, the shell would take the prompt back
 /// while the box still owned the terminal. Installed only after the child
 /// exists, because `SIG_IGN` survives `execve` and would otherwise
-/// silence the command too.
-fn ignore_terminal_signals() {
+/// silence the command too. Dropping the guard restores the old handlers,
+/// for a waiter that goes on living — the panel.
+#[must_use]
+pub(crate) fn ignore_terminal_signals() -> TerminalSignals {
     let ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+    let mut before = Vec::new();
     for signal in [Signal::SIGINT, Signal::SIGQUIT] {
         #[expect(unsafe_code, reason = "SigIgn installs no handler code")]
         let done = unsafe { sigaction(signal, &ignore) };
-        if let Err(e) = done {
-            fail(&format!("cannot ignore {signal}: {e}"));
+        match done {
+            Ok(old) => before.push((signal, old)),
+            Err(e) => fail(&format!("cannot ignore {signal}: {e}")),
+        }
+    }
+    TerminalSignals { before }
+}
+
+/// What the terminal signals did before they were ignored.
+pub(crate) struct TerminalSignals {
+    before: Vec<(Signal, SigAction)>,
+}
+
+impl Drop for TerminalSignals {
+    fn drop(&mut self) {
+        for (signal, old) in &self.before {
+            #[expect(unsafe_code, reason = "restores the action sigaction handed back")]
+            let _ = unsafe { sigaction(*signal, old) };
         }
     }
 }
@@ -329,7 +348,7 @@ fn fork_into_box(
             {
                 fail(&format!("cannot write pidfile {pidfile}: {e}"));
             }
-            ignore_terminal_signals();
+            let _quiet = ignore_terminal_signals();
             report(child)
         }
         Ok(ForkResult::Child) => {

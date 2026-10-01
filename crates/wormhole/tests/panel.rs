@@ -134,6 +134,32 @@ fn enter_asks_where_to_start_an_idle_box() {
     );
 }
 
+/// Enter used to exec away, so the panel was a launcher that exited. Now
+/// the session runs on the terminal the panel gave back and the panel is
+/// drawn again when it ends. A session that failed waits for a key first,
+/// so what it printed is read before the panel covers it.
+#[test]
+fn a_session_that_ends_comes_back_to_the_panel() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let (id, workspace) = one_box(data);
+    common::keep_box(data, &common::a_record(&workspace, &id, None));
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wormhole"));
+    command.env("XDG_DATA_HOME", data);
+    // Enter opens the picker, Enter starts the box in its only folder. That
+    // start fails at once: the folder has no manifest and the box names no
+    // role. A key brings the panel back, `q` leaves it.
+    let seen = shown(&on_a_terminal(command, "join, or start", b"\r\r\rq"));
+    assert!(
+        seen.contains(&format!("wormhole box --id {id}: exit status")),
+        "{seen:?}"
+    );
+    assert!(seen.contains("any key for the panel"), "{seen:?}");
+    // Drawn twice: before the session and after it.
+    assert!(seen.matches("join, or start").count() >= 2, "{seen:?}");
+}
+
 /// The bug this pins: a resize was dropped on the floor. The panel read
 /// events and returned nothing for anything that was not a key, and the
 /// redraw only happened when the *text* changed — which a resize does
