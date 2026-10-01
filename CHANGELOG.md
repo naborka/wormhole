@@ -9,6 +9,17 @@ true.
 
 ## Unreleased
 
+### Fixed: a codex box died at its first start
+
+Codex now starts a background app-server on every run, and records the
+process it spawned by asking `ps -p <pid> -o stat= -o lstart=`. Alpine's
+`ps` is a BusyBox applet that knows neither `-p` nor `lstart`, so the
+question failed and codex exited with "failed to read start time for
+pid-managed app server" before the agent ever appeared. The `alphaca`
+role now installs `procps-ng`, whose `ps` answers, and a test keeps it in
+every Alpine recipe that can run codex. Same class as the `grep` fix
+below: a BusyBox applet refusing the flags a program writes.
+
 ### The panel comes back
 
 Enter used to exec into the box: the panel was a launcher that exited,

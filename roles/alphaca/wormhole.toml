@@ -42,6 +42,11 @@ packages = [
   "gawk",
   "tree",
 
+  # procps, not BusyBox: codex's app-server records its child with
+  # `ps -p <pid> -o stat= -o lstart=` and codex dies at start when ps
+  # refuses it. BusyBox ps has neither flag.
+  "procps-ng",
+
   "jq",
   "ripgrep",
   "fd",

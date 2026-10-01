@@ -88,3 +88,32 @@ fn no_shipped_manifest_carries_a_placeholder_digest() {
         );
     }
 }
+
+/// Codex's background app-server records the process it spawned by
+/// running `ps -p <pid> -o stat= -o lstart=`, and the whole start fails
+/// when that exits non-zero. Alpine's `ps` is a BusyBox applet with no
+/// `-p` and no `lstart`, so a codex box died on its first start with
+/// "failed to read start time for pid-managed app server". Every Alpine
+/// recipe that can run codex installs `procps-ng`, whose `ps` answers.
+#[test]
+fn every_alpine_recipe_that_runs_codex_installs_procps() {
+    let mut checked = 0;
+    for path in shipped_manifests() {
+        let text = std::fs::read_to_string(&path).expect("manifest");
+        let parsed = manifest::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let runs_codex = parsed.agent.run.iter().any(|product| product == "codex");
+        if !parsed.image.base.contains("alpine") || !runs_codex {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            parsed.image.packages.iter().any(|p| p == "procps-ng"),
+            "{} runs codex on Alpine without the `procps-ng` package",
+            path.display()
+        );
+    }
+    assert!(
+        checked > 0,
+        "no Alpine recipe that runs codex was found to check"
+    );
+}

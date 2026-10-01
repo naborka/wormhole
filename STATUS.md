@@ -367,6 +367,12 @@ do TLS with anyway.
 `tests/manifests.rs` keeps them in every shipped recipe. Measurements and the
 verdict on the other tools: `docs/research/box-tools.md`.
 
+**procps where codex runs.** Codex's app-server daemon records its child with
+`ps -p <pid> -o stat= -o lstart=` and exits on a non-zero answer; BusyBox `ps` has
+neither flag, so a codex box died at start with "failed to read start time for
+pid-managed app server". `alphaca` installs `procps-ng`, and a test in
+`tests/manifests.rs` keeps it in every Alpine recipe that runs codex.
+
 ## How `run` is shaped, and why
 
 Three processes. `run` on the host spawns `__boxed`, which unshares user, UTS and
