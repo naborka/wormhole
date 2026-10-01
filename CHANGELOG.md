@@ -51,6 +51,142 @@ them; the last two found a one-item loop in the role's own hook and two
 misspelled test names, both fixed. The measurements and the verdict on
 every other tool from the usual lists are in `docs/research/box-tools.md`.
 
+### Enter asks which folder, instead of guessing
+
+A box remembers every folder it has worked in, and Enter picked one for
+you: the folder you were standing in if the box had worked there,
+otherwise the one it used last. That guess was right often enough to be
+invisible, and when it was wrong there was no way to say so — which was
+the original complaint, and `w` only answered it for people who had found
+`w`.
+
+Enter on an idle box now asks. The list is the folders that box can
+actually be started in, each marked: the one it used last, the one you are
+standing in, and — when the box may run here and never has — the one you
+are standing in as somewhere new. The cursor starts on the folder the old
+guess would have taken, so agreeing costs one more keystroke than not
+being asked at all, and disagreeing is possible, which it was not before.
+
+Choosing the new folder still shows what it means and the whole recipe
+under it before anything starts: pointing a box's kept home at a tree it
+has never seen is what `wormhole box --id X` typed there already did, and
+it should not happen on a reflex.
+
+`w` is gone. It did exactly what Enter now does, and a second key for one
+thing is a key that can start meaning something else.
+### The panel reaches the whole tool, not just boxes
+
+The panel listed boxes and did six things to them. Roles, the store, the
+kept secrets and the host check had no screen at all, and a start from it
+could not say what to call the box, which login to use, which variable to
+carry or what to run instead of the agent. Those were command-line-only,
+which meant quitting the panel to do most of what this tool does.
+
+It now has five tabs, one per noun the tool has, and `tab` moves between
+them: boxes, roles, store, secrets, host. Roles lists what is installed
+and shows any role's whole recipe; `a` installs one you wrote and `x`
+takes a name back. The store is `wormhole gc` as a list you can look
+through before giving anything back. Secrets lists the names of what has
+been kept, never the values, and keeps or forgets one. Host is the doctor
+check, re-run on a key.
+
+Installing a role pinned to somebody else's commit is still a typed
+command. Fetching a stranger's repository and approving the shell it
+would run on this machine is the one thing here that should not happen on
+a keystroke.
+
+### Every key is on a screen, and every command is on a list
+
+`?` puts the keys of whatever screen you are on onto a screen of its own,
+including the ones the hint line has no room to name. The hints and the
+help and the decoder now read one table, so a key that works and is not
+listed cannot exist, and a keycap on the screen that does nothing cannot
+either.
+
+`:` opens every command this tool has, bound to the row the cursor is on
+and showing the exact command line each one is. Choosing one does the
+same thing the key for it does — they are one body, so the list cannot
+drift from the keys. A test reads the tool's own command dispatch and
+fails if anything it answers to is missing from that list.
+
+### The list can be narrowed, and moved through
+
+`/` narrows the list to what you type. While you are typing it, every
+letter is a letter rather than the key it spells, which is what lets you
+search for `qw` on a screen where `q` leaves and `w` picks a folder. The
+screen says what it is hiding and how much. `esc` takes the filter back
+before it takes the panel.
+
+`g` and `G` go to the first and last row, PageUp and PageDown move a
+screenful, and Home and End are the same two keys under other names.
+
+### A start from the panel can say everything a start can say
+
+`n` now shows what the start will be, as the command line it is: the
+recipe, the product, a name, the login, a variable, a command instead of
+the agent. Enter on a line sets it, enter on the last line starts. What
+is unset reads as what leaving it unset means. The line on the screen is
+the line that runs, and a test parses it back with the same parser
+`wormhole box` uses, so the screen cannot offer an argument the start
+would refuse.
+
+### Naming a box no longer needs the command line
+
+`N` on a box asks for a name and sets it. A name another box already
+answers to is refused with the reason, and what you typed stays on the
+screen to be edited — retyping a whole name because one character was
+taken is the kind of friction that sends people back to the shell.
+
+### The panel says which folders a box has worked in, and lets you pick one
+
+A box remembers every folder it has run in. Until now the only sign of
+that was a `+2` on the end of a line, and there was no way to see what
+those two were or to go back to one. The panel picked for you: the folder
+you were standing in if the box had run there, otherwise the most recent
+one still on disk. Going back to a particular folder meant quitting the
+panel, `cd`-ing there and retyping the box's id.
+
+Now the panel has a pane under the list showing everything about the box
+the cursor is on, including every folder it has served and whether each is
+still there. `w` opens a list of them and starts the box in the one you
+pick. `wormhole ps <id>` prints the same list, so a script can have it too.
+
+`w` also offers the folder you are standing in, when the box has never
+worked there and is allowed to. Choosing it is the same thing `wormhole
+box --id <id>` typed in a new folder already did — it points that box's
+kept home, with its history and its logins, at this folder — so it is not
+done on a keystroke: the screen says what it means, shows the whole recipe
+under it, and Enter is what agrees. A box made from a folder's own
+`wormhole.toml` is never offered a second folder, because its recipe is
+that file.
+
+### The panel fits the terminal it is drawn on
+
+The box table is eight columns wide and a folder path has no length limit,
+so on an ordinary eighty-column terminal every row wrapped and the cursor
+marked half of one. The panel never knew how big the terminal was: it
+built one long string and wrote it. A list longer than the screen ran off
+the bottom, taking the key hints with it, and moving the cursor down moved
+it out of sight. Resizing the window did nothing at all — the panel kept
+whatever the old size had left on the screen until something else changed.
+
+The panel now measures the terminal and draws for it. Columns that do not
+fit are dropped rather than squeezed, emptiest first, and the folder path
+keeps its end rather than its beginning. A long list scrolls and says
+which part of it you are looking at. A resize redraws. And the permission
+preview that a role from someone else is approved on — forty-odd lines,
+of which the last ones are the commands that will actually run — scrolls
+now, instead of being drawn past the bottom edge where nobody could read
+it.
+
+### The cursor follows the box, not the row
+
+The list is sorted by which box ran most recently and it is re-read once a
+second, so a box started in another terminal could re-sort the list under
+your cursor. `d` does not ask before it stops a box. Between one blink and
+the next, the row you were pointing at could be a different box. The
+cursor now holds on to the box itself.
+
 ### The alphaca box carries fewer skills, and the same ones every time
 
 The hook installed every skill in three repositories — 59 of them, to use

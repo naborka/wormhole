@@ -109,7 +109,7 @@ fn add_local(path: &str, name: Option<String>) -> ! {
 /// start right now. The panel shows this too, but only to somebody
 /// sitting at it.
 fn role_list() -> ! {
-    let roles = installed_roles();
+    let roles = listed(&data_home());
     if roles.is_empty() {
         println!(
             "no roles installed in {}",
@@ -117,26 +117,43 @@ fn role_list() -> ! {
         );
         std::process::exit(0);
     }
-    let data_home = data_home();
     let mut rows = vec![["NAME", "FROM", "STATE"].map(str::to_owned).to_vec()];
-    for role in roles {
-        let (from, state) = if role.pinned {
-            pinned_row(&role.dir.join(source::POINTER), &data_home)
-        } else {
-            // `read_link` and not `canonicalize`: the row says where this
-            // name points, which is what `role remove` would unlink.
-            (
-                std::fs::read_link(&role.dir)
-                    .unwrap_or(role.dir)
-                    .display()
-                    .to_string(),
-                source::Missing::Nothing.state().to_owned(),
-            )
-        };
-        rows.push(vec![role.name, from, state]);
-    }
+    rows.extend(
+        roles
+            .into_iter()
+            .map(|role| vec![role.name, role.from, role.state]),
+    );
     print!("{}", wormhole_core::table::render(&rows));
     std::process::exit(0);
+}
+
+/// Every installed role, read off the disk. One body, so `role list` and
+/// the roles tab cannot disagree about what is installed or whether it
+/// can start.
+pub(crate) fn listed(data_home: &Path) -> Vec<wormhole_core::tui::RoleRow> {
+    installed_roles()
+        .into_iter()
+        .map(|role| {
+            let (from, state) = if role.pinned {
+                pinned_row(&role.dir.join(source::POINTER), data_home)
+            } else {
+                // `read_link` and not `canonicalize`: the row says where
+                // this name points, which is what `role remove` unlinks.
+                (
+                    std::fs::read_link(&role.dir)
+                        .unwrap_or(role.dir)
+                        .display()
+                        .to_string(),
+                    source::Missing::Nothing.state().to_owned(),
+                )
+            };
+            wormhole_core::tui::RoleRow {
+                name: role.name,
+                from,
+                state,
+            }
+        })
+        .collect()
 }
 
 /// Where a pinned role points and whether this host holds it. A pin that
@@ -188,7 +205,7 @@ pub(crate) fn preview_of(dir: &Path, source_line: &str) -> String {
 /// it offers. Only `panel::confirm` gets this one — a key offered to a
 /// stdout nobody is watching is a lie.
 pub(crate) fn preview_screen(dir: &Path, source_line: &str) -> String {
-    preview_of(dir, source_line) + wormhole_core::tui::PREVIEW_HINTS
+    preview_of(dir, source_line)
 }
 
 /// Takes a name back. Replaces the `rm -r` the handbook used to give.
@@ -197,22 +214,25 @@ pub(crate) fn preview_screen(dir: &Path, source_line: &str) -> String {
 /// installed local role would take the directory the user works in with
 /// it.
 fn role_remove(name: &str) -> ! {
+    uninstall(name).unwrap_or_else(|e| fail(&e));
+    println!("role {name} removed");
+    std::process::exit(0);
+}
+
+/// Takes a role's name back, without exiting: the panel's `x` and the
+/// command are one body, so neither can leave a role half-removed in a
+/// way the other would not.
+pub(crate) fn uninstall(name: &str) -> Result<(), String> {
     let config = config_home();
     let slot = paths::role_dir(&config, name);
-    let found = std::fs::symlink_metadata(&slot).unwrap_or_else(|_| {
-        fail(&format!(
-            "no role {name} in {}",
-            paths::roles_dir(&config).display()
-        ))
-    });
+    let found = std::fs::symlink_metadata(&slot)
+        .map_err(|_| format!("no role {name} in {}", paths::roles_dir(&config).display()))?;
     let removed = if found.file_type().is_symlink() {
         std::fs::remove_file(&slot)
     } else {
         std::fs::remove_dir_all(&slot)
     };
-    removed.unwrap_or_else(|e| fail(&format!("cannot remove role {name}: {e}")));
-    println!("role {name} removed");
-    std::process::exit(0);
+    removed.map_err(|e| format!("cannot remove role {name}: {e}"))
 }
 
 /// `wormhole role add <ref>@<sha> [--as <name>]`: fetch a role out of a
@@ -627,4 +647,47 @@ fn checkout_for(name: &str, pinned: &source::Source) -> Result<PathBuf, String> 
         return Err(refusal);
     }
     Ok(checkout)
+}
+
+/// The whole recipe a role would run, for the panel to put on a screen.
+///
+/// The same body `role show` prints, so the screen a stranger's role is
+/// read on is the screen it is approved on.
+pub(crate) fn recipe_of(name: &str) -> Result<String, String> {
+    if let source::Names::Repo(_) = source::names(name) {
+        return Err(
+            "a repository is shown by `wormhole role add`, which fetches it first".to_owned(),
+        );
+    }
+    let at = role_source_dir(name, Fetch::Never)?;
+    Ok(preview_of(&at.dir, &at.label))
+}
+
+/// Installs a role the panel was given the directory of.
+///
+/// Local directories only. A role pinned to somebody else's commit is
+/// fetched and approved by `wormhole role add <url>@<sha>`, and that
+/// approval is the one thing standing between a stranger's shell and this
+/// machine — so it stays a command somebody typed, not a keystroke.
+pub(crate) fn install(reference: &str) -> Result<(), String> {
+    let source::Names::Dir(path) = source::names(reference) else {
+        return Err(format!(
+            "{reference} is a repository; `wormhole role add {reference}` fetches it, \
+             shows the whole recipe and asks — which is not something a keystroke should do"
+        ));
+    };
+    let dir = Path::new(path);
+    if !dir.join(MANIFEST).is_file() {
+        return Err(format!("{path} holds no {MANIFEST}"));
+    }
+    let name = source::default_name(path).map_err(|e| e.to_string())?;
+    let config = config_home();
+    let slot = paths::role_dir(&config, &name);
+    if slot.exists() {
+        return Err(format!("a role called {name} is already installed"));
+    }
+    std::fs::create_dir_all(paths::roles_dir(&config))
+        .map_err(|e| format!("cannot create the roles directory: {e}"))?;
+    std::os::unix::fs::symlink(canonical(dir), &slot)
+        .map_err(|e| format!("cannot install {path} as {name}: {e}"))
 }

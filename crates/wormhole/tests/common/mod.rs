@@ -56,13 +56,87 @@ pub fn on_a_refused_terminal(command: Command, wait_for: &str, answer: &[u8]) ->
     seen
 }
 
+/// The words a terminal would be showing, from the bytes drawn on it.
+///
+/// A drawn screen is not a stream of lines: cells are written where they
+/// changed and the cursor is moved over the ones that did not, so `x` and
+/// `remove` arrive with an escape sequence between them and the space
+/// between them is never written at all. Each escape becomes one space
+/// and runs of blanks collapse, which turns the stream back into the
+/// words on the screen — which is what a test about a screen should be
+/// asserting on.
+pub fn shown(drawn: &str) -> String {
+    let mut said = String::new();
+    let mut rest = drawn.chars().peekable();
+    while let Some(c) = rest.next() {
+        if c != '\u{1b}' {
+            said.push(c);
+            continue;
+        }
+        said.push(' ');
+        // CSI and OSC alike: parameter bytes, then one final byte.
+        if rest.peek() == Some(&'[') || rest.peek() == Some(&']') {
+            rest.next();
+        }
+        for byte in rest.by_ref() {
+            if ('@'..='~').contains(&byte) {
+                break;
+            }
+        }
+    }
+    said.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The size every test terminal has.
+///
+/// Given rather than left unset: `openpty(None, ..)` makes a terminal that
+/// reports zero by zero, which is a shape no real terminal has and which
+/// hid the one thing these tests exist to drive — a panel drawn for a
+/// surface it has measured.
+pub const TERMINAL: nix::pty::Winsize = nix::pty::Winsize {
+    ws_row: 24,
+    ws_col: 80,
+    ws_xpixel: 0,
+    ws_ypixel: 0,
+};
+
+nix::ioctl_write_ptr_bad!(set_terminal_size, nix::libc::TIOCSWINSZ, nix::pty::Winsize);
+
+/// Drives a screen, resizes the terminal under it, and returns what was
+/// drawn before the resize and what was drawn after.
+///
+/// The only way to prove a panel reacts to a resize: the kernel raises
+/// `SIGWINCH` on the foreground group when the size is set, which is
+/// where a redraw has to come from. Everything before the resize is the
+/// first answer, everything after it the second.
+pub fn resized(
+    command: Command,
+    wait_for: &str,
+    to: (u16, u16),
+    answer: &[u8],
+) -> (String, String) {
+    let (before, after, status) = drive(command, wait_for, Some(to), answer);
+    assert!(status.success(), "exited {status}:\n{before}{after}");
+    (before, after)
+}
+
 /// The pty loop both wrappers share. The caller judges the exit.
 pub fn drive_terminal(
-    mut command: Command,
+    command: Command,
     wait_for: &str,
     answer: &[u8],
 ) -> (String, std::process::ExitStatus) {
-    let pty = nix::pty::openpty(None, None).expect("a pty");
+    let (before, after, status) = drive(command, wait_for, None, answer);
+    (before + &after, status)
+}
+
+fn drive(
+    mut command: Command,
+    wait_for: &str,
+    resize: Option<(u16, u16)>,
+    answer: &[u8],
+) -> (String, String, std::process::ExitStatus) {
+    let pty = nix::pty::openpty(Some(&TERMINAL), None).expect("a pty");
     let child = command
         .env("TERM", "xterm")
         .stdin(Stdio::from(pty.slave.try_clone().expect("slave fd")))
@@ -89,25 +163,61 @@ pub fn drive_terminal(
 
     let mut master = std::fs::File::from(pty.master);
     let mut seen = String::new();
+    let mut after = String::new();
     let mut buffer = [0u8; 4096];
     let mut answered = false;
+    let mut resizing = false;
     loop {
-        match master.read(&mut buffer) {
+        let read = match master.read(&mut buffer) {
             Ok(0) => break,
-            Ok(bytes) => seen.push_str(&String::from_utf8_lossy(&buffer[..bytes])),
+            Ok(bytes) => String::from_utf8_lossy(&buffer[..bytes]).into_owned(),
             // The child closed the last slave fd: nothing more is coming.
             Err(e) if e.raw_os_error() == Some(nix::errno::Errno::EIO as i32) => break,
             Err(e) => panic!("cannot read the pty: {e}"),
+        };
+        if resizing || answered {
+            after.push_str(&read);
+        } else {
+            seen.push_str(&read);
         }
-        if !answered && seen.contains(wait_for) {
+        // Resized, and now waiting for the redraw it causes. Answering
+        // here instead would race it: the panel could read the key and
+        // leave before it ever looked at the new size, and a test that
+        // cannot tell those apart proves nothing.
+        if resizing && !after.is_empty() {
+            master.write_all(answer).expect("answer the screen");
+            (resizing, answered) = (false, true);
+            continue;
+        }
+        if !answered && !resizing && shown(&seen).contains(wait_for) {
+            if let Some((width, height)) = resize {
+                let size = nix::pty::Winsize {
+                    ws_col: width,
+                    ws_row: height,
+                    ..TERMINAL
+                };
+                #[expect(
+                    unsafe_code,
+                    reason = "an ioctl on a pty this test owns, with a size it owns"
+                )]
+                unsafe {
+                    use std::os::fd::AsRawFd;
+                    set_terminal_size(master.as_raw_fd(), &size).expect("resize the terminal");
+                }
+                resizing = true;
+                continue;
+            }
             master.write_all(answer).expect("answer the screen");
             answered = true;
         }
     }
     let status = child.lock().expect("the child").wait().expect("it exits");
     let _ = done.send(());
-    assert!(answered, "never drew {wait_for:?}:\n{seen}");
-    (seen, status)
+    assert!(
+        answered,
+        "never drew {wait_for:?} or never redrew:\n{seen}{after}"
+    );
+    (seen, after, status)
 }
 
 /// A gzipped tarball of `content`, and its sha256 — what `[image] base`
