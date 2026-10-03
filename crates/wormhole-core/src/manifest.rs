@@ -448,6 +448,8 @@ struct KnownAgent {
     /// Variables the box sets for this agent, for what it settles that no
     /// config file holds. A manifest that declares one means it and wins.
     env: &'static [(&'static str, &'static str)],
+    /// Files the box owns in the home, written fresh at every start.
+    files: &'static [(&'static str, &'static str)],
 }
 
 const TRUE: Literal = Literal::Bool(true);
@@ -577,6 +579,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
             ("IS_SANDBOX", "1"),
             ("CLAUDE_CODE_SANDBOXED", "1"),
         ],
+        files: &[],
     },
     KnownAgent {
         name: "codex",
@@ -592,6 +595,11 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         credential_write: CredentialWrite::InPlace,
         config: &[CODEX_CONFIG],
         env: &[],
+        // Under approval_policy = "never" codex forbids rm -f outright.
+        files: &[(
+            ".codex/rules/wormhole.rules",
+            "prefix_rule(pattern = [\"rm\"], decision = \"allow\")\n",
+        )],
     },
     KnownAgent {
         name: "grok",
@@ -611,6 +619,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         // `--trust` grants the launch directory alone; a nested repository
         // or a moved workspace would ask again.
         env: &[("GROK_FOLDER_TRUST", "0")],
+        files: &[],
     },
 ];
 
@@ -893,6 +902,16 @@ pub fn pointer_link(target: &str) -> String {
     let mut link = "../".repeat(target.matches('/').count());
     link.push_str(INSTRUCTIONS_SEED);
     link
+}
+
+/// The files the box owns in this agent's home, fresh at every start.
+#[must_use]
+pub fn owned_files(manifest: &Manifest) -> &'static [(&'static str, &'static str)] {
+    manifest
+        .agent
+        .product()
+        .and_then(known)
+        .map_or(&[], |agent| agent.files)
 }
 
 /// Every config file a start writes for this agent, every value resolved:
@@ -2107,6 +2126,21 @@ mod tests {
                 "--dangerously-bypass-approvals-and-sandbox".to_owned()
             ])
         );
+    }
+
+    /// `approval_policy = "never"` turns codex's own `rm -f` heuristic
+    /// from a prompt into a refusal, so the box answers it with a rule.
+    #[test]
+    fn codex_may_rm_because_the_box_holds_the_line() {
+        let manifest = full("[agent]\nrun = \"codex\"\n");
+        assert_eq!(
+            owned_files(&manifest),
+            [(
+                ".codex/rules/wormhole.rules",
+                "prefix_rule(pattern = [\"rm\"], decision = \"allow\")\n"
+            )]
+        );
+        assert!(owned_files(&full("[agent]\nrun = \"claude\"\n")).is_empty());
     }
 
     #[test]
