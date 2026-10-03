@@ -98,3 +98,4 @@ rtk condenses command output. Treat it as complete. Run commands normally, batch
 One file per subject under `~/rules/`. Read whole file before first work on its subject, not at start.
 
 - Rust (`.rs`, `Cargo.toml`, benchmarks, WASM front end, PyO3 bindings): `~/rules/rust.md`.
+- Box itself (shell, PATH, test database, pnpm, Playwright, fetching raw files): `~/rules/box.md`.

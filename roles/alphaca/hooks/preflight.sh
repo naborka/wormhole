@@ -217,6 +217,12 @@ if command -v rtk >/dev/null 2>&1; then
     else
         warn "rtk init failed"
     fi
+    # Box rule: no emoji in program output; rtk's default turns them on.
+    rtk_config="$HOME/.config/rtk/config.toml"
+    [ -f "$rtk_config" ] || rtk config --create >/dev/null 2>&1 </dev/null || warn "cannot create rtk config"
+    if grep -qs '^emoji = true$' "$rtk_config"; then
+        sed -i 's/^emoji = true$/emoji = false/' "$rtk_config" || warn "cannot set rtk emoji = false"
+    fi
 else
     warn "rtk binary not on PATH"
 fi

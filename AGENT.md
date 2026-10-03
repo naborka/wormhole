@@ -36,7 +36,7 @@ they print less.
 | `time` | `hyperfine` | Warmup, repeats, a table |
 
 `rg --files` beats `find . -type f`. `fd -e rs` beats `find . -name '*.rs'`.
-`grep`, `find`, `sed`, `diff` and `tree` are the GNU ones here, not BusyBox,
+`grep`, `find`, `sed`, `diff`, `tar` and `tree` are the GNU ones here, not BusyBox,
 so their usual flags work.
 
 Do not write shell aliases for these: a non-interactive shell never reads them,

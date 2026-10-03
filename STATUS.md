@@ -137,6 +137,7 @@ does survives into the next box or back into the image.
 | N15 | A box owns its identity (ADR 0005). Made from one recipe and one product for its life, it records every workspace it ran in, host-side in `records/<key>.toml`; the key is found by id, never rebuilt from the cwd. `[agent] resume = "anywhere"` lets a role's box be resumed from any workspace, so one home keeps the login and the preflight's setup for every project; `alphaca` says it, and its hook now does skills, MCP and plugins once per home per hook version. Pure pieces: `manifest::Resume`, `home::resumable`, `home::target` (aliases host-wide), `home::refused_by_name`, `Record::role_ref`, `home::resume_in`, `gc::recipe`, `gc::home_verdict(Evidence)`. Research: `docs/research/shared-box*.md` | **done**; one process per box still |
 
 | N16 | What the shipped `alphaca` role installs, and how it stays honest. One role, three products: `alphaca-codex` and `alphaca-grok` deleted, `--run` having replaced them. Codex arrives as OpenAI's whole package under `~/.local/codex`, with `~/.local/bin/codex` a link into it, because the CLI spawns `codex-code-mode-host` from beside its own real path — a lone binary starts, reports the right version, then fails mid-task. The install is complete-or-nothing and self-repairing: a plain file where the link should be is the old shape and gets replaced whatever its version says. Skills are named rather than `--skill '*'`, each repository pinned to a commit, and the hook owns the home's set, so what it does not name is removed. `rust-skills` dropped in favour of `rules/rust.md`, which `[agent] rules` already delivers on demand. Measured 2026-09-20: skill listing 1,917 -> 1,028 tokens a session, Rust guidance 9,456 -> 1,390 on invoke | **done** |
+| N17 | A box tooling audit (2026-10-02) traced every hook and rtk failure to one fault: a login shell reads `/etc/profile`, which resets `PATH`. Fixed at the root: `mount_plan::profile_op` writes the box `PATH` into `/etc/profile.d/00-wormhole.sh` at every start. Same audit: codex forbids `rm -f` under `approval_policy = never`, answered by `manifest::owned_files` seeding `~/.codex/rules/wormhole.rules`; `alphaca` gains pnpm, python3, PostgreSQL 17 with pgvector, tzdata, GNU tar, rtk emoji offand `rules/box.md`. Playwright browsers stay out, Alpine cannot run them; `PW_TEST_CONNECT_WS_ENDPOINT` crosses from the host instead | **done** |
 
 What the first real runs taught, each fixed at the root rather than patched:
 
@@ -147,6 +148,9 @@ What the first real runs taught, each fixed at the root rather than patched:
 - **An inherited `PATH` describes the host's filesystem.** Arch has no `/bin`,
   Alpine keeps busybox there, so the box could not find `mkdir`. The box sets its
   own `PATH` now.
+- **A login shell resets `PATH`.** Alpine's `/etc/profile` sets it first thing,
+  so codex's `sh -lc` lost `~/.local/bin` and every hook said `rtk: not found`.
+  The box writes its `PATH` into `/etc/profile.d` too.
 - **Binding all of `~/.claude` imports host wiring.** Its `settings.json` hooks
   call `bash`, `shellfirm` and `rtk`, none of which exist in the box. Only the
   credential file is granted.

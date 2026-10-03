@@ -28,6 +28,9 @@ packages = [
   "diffutils",
   "gawk",
   "tree",
+  "tar",
+  # Zoneinfo: without it TZ names fall back to UTC and PostgreSQL refuses them.
+  "tzdata",
   "ripgrep",
   "fd",
   "eza",

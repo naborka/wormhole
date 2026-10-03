@@ -9,6 +9,40 @@ true.
 
 ## Unreleased
 
+### Fixed: a login shell lost the box's `PATH`
+
+Codex runs every command and hook through `sh -lc`, and Alpine's
+`/etc/profile` opens by setting `PATH` to the image's directories. So
+`rtk`, `codex` and whatever else the preflight put in `~/.local/bin`
+answered "not found" from every hook and every rewritten command, while
+the same binaries ran fine by absolute path. The box now writes its own
+`PATH` into `/etc/profile.d/00-wormhole.sh` at every start, which
+`/etc/profile` sources after its own line, so a login shell ends where
+the exec began.
+
+### Codex may `rm`
+
+Codex forbids `rm -f` outright under `approval_policy = "never"`: with
+prompts off it cannot ask, so it refuses, and the bypass flag does not
+reach that check. In a box the workspace is the only thing that
+survives, version control is the undo point, and the box is what holds
+the line, so every codex start now writes `~/.codex/rules/wormhole.rules`
+allowing `rm`.
+
+### The `alphaca` box carries more of what a task needs
+
+Measured against one day's work in it: `pnpm` (JavaScript build; a
+repository's `packageManager` pin switches to that version's JavaScript
+build, never the native one, which has no musl binary), `python3` for
+the skills that ship scripts, PostgreSQL 17 with pgvector for a
+disposable test database, `tzdata` so a time zone name resolves, GNU
+`tar`. rtk's display emoji are turned off, as the box's writing rule
+asks. Playwright's browsers stay out, Alpine cannot run them; the box
+instead takes `PW_TEST_CONNECT_WS_ENDPOINT` from the host, so a host-side
+`npx playwright run-server` serves the suite. `rules/box.md` says how
+each is used. `tar` and `tzdata` join every Alpine recipe shipped here,
+and a test keeps them there.
+
 ### Fixed: a codex box died at its first start
 
 Codex now starts a background app-server on every run, and records the

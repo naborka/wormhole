@@ -41,6 +41,16 @@ packages = [
   "diffutils",
   "gawk",
   "tree",
+  "tar",
+  # Zoneinfo: without it TZ names fall back to UTC and PostgreSQL refuses them.
+  "tzdata",
+  # Skills ship python scripts.
+  "python3",
+  # JavaScript build; a packageManager pin switches to the same kind.
+  "pnpm",
+  # Disposable test database; rules/box.md says how.
+  "postgresql17",
+  "postgresql-pgvector",
 
   # procps, not BusyBox: codex's app-server records its child with
   # `ps -p <pid> -o stat= -o lstart=` and codex dies at start when ps
@@ -73,6 +83,8 @@ build = [
   "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /tmp/rustup/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 -c rustfmt -c clippy -c rust-analyzer",
   "ln -s /usr/local/cargo/bin/* /usr/local/bin/",
   "tar -xzf /tmp/cargo-nextest.tar.gz -C /usr/local/bin cargo-nextest",
+  # Alpine keeps postgres under /usr/libexec with nothing on PATH.
+  "for f in /usr/libexec/postgresql17/*; do [ -x \"$f\" ] || continue; ln -sf \"$f\" /usr/local/bin/; done",
   # A cc that links with mold; CARGO_TARGET_*_LINKER below points at it.
   "printf '#!/bin/sh\\nexec cc -fuse-ld=mold \"$@\"\\n' > /usr/local/bin/cc-mold && chmod 0755 /usr/local/bin/cc-mold",
 ]
@@ -151,3 +163,8 @@ default = ""
 # The agent hands it to hooks and commands, and it must exist in the box.
 [env.SHELL]
 fixed = "/bin/bash"
+
+# Alpine cannot run Playwright's browsers. A host `npx playwright run-server`
+# can serve the box; its ws:// address crosses here, empty otherwise.
+[env.PW_TEST_CONNECT_WS_ENDPOINT]
+default = ""
