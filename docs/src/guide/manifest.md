@@ -266,6 +266,9 @@ fixed = "/bin/bash"       # the host's value is ignored
 things that describe the box — your host `SHELL` is a path that does not
 exist in there.
 
+`PATH` is never declared: the box has its own, `~/.local/bin` first and
+the image's directories after, in exec and in every login shell alike.
+
 One more per-variable key: `ask = true` fills it by asking you — once,
 ever. The first start that finds an asked variable empty prompts on the
 terminal (input masked) and keeps the answer in

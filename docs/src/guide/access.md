@@ -40,8 +40,11 @@ default deny — see [what it can dial](#what-it-can-dial). Inside:
   workspace, is shared; a box that has been fed something hostile is
   reset (`wormhole reset`), not trusted. See
   [boxes](boxes.md#one-box-many-workspaces).
-- **Environment** — only declared variables. An undeclared host variable
-  never reaches the box.
+- **Environment** — only declared variables, plus a `PATH` of the box's
+  own: `~/.local/bin` first, the image's directories after. A login shell
+  (`sh -lc`, which hooks and codex use) is told the same through
+  `/etc/profile.d/00-wormhole.sh`, so `/etc/profile` cannot reset it. An
+  undeclared host variable never reaches the box.
 - **DNS** — the manifest's named resolver, or the host's own
   `/etc/resolv.conf` bound read-only.
 

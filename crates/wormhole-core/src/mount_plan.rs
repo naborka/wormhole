@@ -239,6 +239,16 @@ fn device_ops() -> Vec<MountOp> {
     ops
 }
 
+/// Where `/etc/profile` reads the box's `PATH` back, after resetting it.
+const PROFILE_D_PATH: &str = "/etc/profile.d/00-wormhole.sh";
+
+fn profile_op(home: &Path) -> MountOp {
+    MountOp::File {
+        target: PathBuf::from(PROFILE_D_PATH),
+        content: format!("export PATH=\"{}\"\n", box_path(home)),
+    }
+}
+
 fn hosts_op() -> MountOp {
     MountOp::File {
         target: PathBuf::from("/etc/hosts"),
@@ -448,6 +458,7 @@ pub fn compute(
         content: format!("{name}:x:{gid}:\n", name = user.name, gid = user.gid),
     });
     ops.push(resolv_op(resolver));
+    ops.push(profile_op(&home_in_box(user)));
     ops.push(MountOp::Bind {
         source: home_src.to_owned(),
         target: home_in_box(user),
@@ -539,6 +550,20 @@ mod tests {
         let path = box_path(Path::new("/home/me"));
         assert!(path.starts_with("/home/me/.local/bin:"), "{path}");
         assert!(path.ends_with(BOX_PATH), "{path}");
+    }
+
+    /// Alpine's `/etc/profile` resets `PATH` first and sources `profile.d` after.
+    #[test]
+    fn a_login_shell_gets_the_same_path_as_the_exec() {
+        let ops = plan(&[]).unwrap();
+        let profile = ops.iter().find_map(|op| match op {
+            MountOp::File { target, content } if target == Path::new(PROFILE_D_PATH) => {
+                Some(content.as_str())
+            }
+            _ => None,
+        });
+        let expected = format!("export PATH=\"{}\"\n", box_path(Path::new("/home/nabor")));
+        assert_eq!(profile, Some(expected.as_str()));
     }
 
     fn user() -> User {
