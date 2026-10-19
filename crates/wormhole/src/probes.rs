@@ -111,9 +111,15 @@ fn reflink_copy() -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+/// Whether `bin` is an executable file somewhere on `PATH`.
 fn which(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+    use std::os::unix::fs::PermissionsExt as _;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            fs::metadata(dir.join(bin))
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    })
 }
 
 /// The parent/child probe protocol: one name per experiment that must run
