@@ -106,6 +106,13 @@ is a file the box does not have) stay shut, and anything that must be
 unreachable belongs behind that gate or off the host, exactly as for any
 other agent you run un-sandboxed on your network.
 
+What has no gate of its own is a way out of every box. Two met in
+practice: moshi-hook's gateway on `127.0.0.1:24543`, which obeys whoever
+reaches it and can type into any tmux pane, and Tailscale SSH, which lets
+any process on a tailnet device log in where the policy allows, with no
+key. Keep both off a host that runs boxes; [From your phone](remote.md)
+reaches every box without either.
+
 Every launch prints what it got beyond the baseline — the workspace, the
 host's own resolver, a copied root:
 

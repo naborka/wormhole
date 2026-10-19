@@ -161,8 +161,8 @@ before it starts, whatever the role. There is nothing to write for it.
 
 | Product | Written into the box home | Set in the box |
 |---|---|---|
-| `claude` | `.claude.json`: onboarding, workspace trust, the bypass warning, `CLAUDE.md` imports from outside the workspace, the cost notice, and the offers to make auto mode the default or drop effort to medium. `.claude/settings.json`: `skipDangerousModePermissionPrompt`, `permissions.defaultMode = "bypassPermissions"`, `enableAllProjectMcpServers`, and `switchModelsOnFlag = false` | `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`, `CLAUDE_CODE_RETRY_WATCHDOG=1`, `IS_SANDBOX=1`, `CLAUDE_CODE_SANDBOXED=1` |
-| `codex` | `.codex/config.toml`: workspace trust, `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, `web_search = "live"`, no model nudge near the rate limit | |
+| `claude` | `.claude.json`: onboarding, workspace trust, the bypass warning, `CLAUDE.md` imports from outside the workspace, the cost notice, and the offers to make auto mode the default or drop effort to medium. `.claude/settings.json`: `skipDangerousModePermissionPrompt`, `permissions.defaultMode = "bypassPermissions"`, `enableAllProjectMcpServers`, `switchModelsOnFlag = false`, and `preferredNotifChannel = "terminal_bell"` | `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`, `CLAUDE_CODE_RETRY_WATCHDOG=1`, `IS_SANDBOX=1`, `CLAUDE_CODE_SANDBOXED=1` |
+| `codex` | `.codex/config.toml`: workspace trust, `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, `web_search = "live"`, no model nudge near the rate limit, and `tui.notification_condition = "always"` | |
 | `grok` | `.grok/config.toml`: `ui.permission_mode = "always-approve"`, `features.web_fetch = true` | `GROK_FOLDER_TRUST=0` |
 
 The launch flags already cover the process wormhole starts. These cover
@@ -171,8 +171,12 @@ attached shell.
 
 Merged, never overwritten: the rest of each file is the agent's own. The
 answers are written again on every start, so a mode toggled in a past
-session does not stick. `theme` and `switchModelsOnFlag` are only written
-where the file has no value yet.
+session does not stick. `theme`, `switchModelsOnFlag`,
+`preferredNotifChannel` and `notification_condition` are only written
+where the file has no value yet. The last two make an agent ring the
+terminal bell whenever it needs you, the one alert every terminal and
+multiplexer passes on: tmux marks the box's tab; see
+[From your phone](remote.md).
 
 A message Anthropic's safeguards flag ends its turn instead of moving the
 box to an older model. The flag is decided on Anthropic's servers and no

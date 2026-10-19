@@ -1658,15 +1658,14 @@ fn attach(args: &[String]) -> ! {
     attach_box(&parsed.id, parsed.command, &parsed.env)
 }
 
-/// Joins the box: its agent by default — attaching means getting back to
-/// the agent, not a shell beside it — or the given command instead.
+/// Runs `command` in the running box, on this terminal. The agent stays
+/// in the terminal the box was started in.
 ///
 /// Takes the same id everything else does. A box is named one way in this
 /// CLI, so what `ps` prints is what `attach` and `--id` accept.
-fn attach_box(id: &str, command: Option<Vec<String>>, env_args: &[run::EnvArg]) -> ! {
+fn attach_box(id: &str, command: Vec<String>, env_args: &[run::EnvArg]) -> ! {
     let data_home = data_home();
     let entry = running_box(&data_home, id);
-    let command = command.unwrap_or_else(|| manifest::attach_command(entry.agent.as_deref()));
     // The baked env, refreshed: the attacher's host wins where it is set,
     // the baked value survives where it is not, fixed never moves. A box
     // started by an older wormhole left none; its attach keeps the old

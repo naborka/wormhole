@@ -18,6 +18,21 @@ it, which a read-only image cannot take. Every such start failed with
 image's own directories lent back read-only, one by one: nothing is copied,
 nothing is written into the image, and `/usr` still refuses every write.
 
+### Every box from a phone, with tmux as it is
+
+A box runs in the terminal you start it in, and in a tmux window that is
+all a phone needs: Moshi, or any SSH app, lists the session, opens the tab
+and finds the agent running. Open a new tab, start the panel there, and
+Enter runs the box right in that tab; another box wants another tab.
+wormhole asks tmux for nothing and needs no setting, on any computer.
+Claude and Codex boxes now ring the terminal bell whenever they need you,
+so tmux marks their tab and every terminal attached hears it.
+`wormhole attach` now opens a shell in the box instead of starting a second
+agent beside the first: the agent stays in its own tab. The handbook's new
+"From your phone" page has the rest, including which tmux defaults to keep
+and why moshi-hook and Tailscale SSH must stay off a wormhole host: every
+box can reach both.
+
 ### Fixed: a login shell lost the box's `PATH`
 
 Codex runs every command and hook through `sh -lc`, and Alpine's

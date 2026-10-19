@@ -508,6 +508,9 @@ const CLAUDE_SETTINGS: ConfigFile = ConfigFile {
         // model. CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK goes further but is
         // undocumented; this documented key is what holds if it goes.
         initial(&[], "switchModelsOnFlag", Literal::Bool(false)),
+        // Read from settings since at least 2.1.246. The bell is the one
+        // alert every terminal and multiplexer passes on.
+        initial(&[], "preferredNotifChannel", Literal::Text("terminal_bell")),
     ],
     model_key: None,
     login_fields: &[],
@@ -528,6 +531,13 @@ const CODEX_CONFIG: ConfigFile = ConfigFile {
         settled(&[], "web_search", Literal::Text("live")),
         // A popup offering a cheaper model near the rate limit.
         settled(&[Key::Name("notice")], "hide_rate_limit_model_nudge", TRUE),
+        // Its default rings only after the terminal reports losing focus,
+        // which tmux does not by default.
+        initial(
+            &[Key::Name("tui")],
+            "notification_condition",
+            Literal::Text("always"),
+        ),
     ],
     model_key: Some("model"),
     login_fields: &[],
@@ -875,15 +885,6 @@ pub fn agent_command(manifest: &Manifest) -> Result<Vec<String>, ManifestError> 
     let name = manifest.agent.product().ok_or(ManifestError::NoAgent)?;
     let agent = known(name).ok_or_else(|| ManifestError::UnknownAgent(name.to_owned()))?;
     Ok(agent.command())
-}
-
-/// What `attach` runs when the user names no command: the box's agent
-/// when it has one, a shell otherwise.
-pub fn attach_command(agent: Option<&str>) -> Vec<String> {
-    match agent.and_then(known) {
-        Some(agent) => agent.command(),
-        None => vec!["/bin/sh".to_owned()],
-    }
 }
 
 /// Where the agent reads its own instructions, relative to the box home,
@@ -1628,16 +1629,6 @@ mod tests {
         let manifest = full("[agent]\nrun = \"claude\"\npreflight = \"a'; rm -rf /; '\"\n");
         let command = launch_command(&manifest).expect("command");
         assert!(!command[2].contains("rm -rf"), "{}", command[2]);
-    }
-
-    #[test]
-    fn attach_without_a_command_runs_the_agent_or_a_shell() {
-        assert_eq!(
-            attach_command(Some("claude")),
-            vec!["claude", "--dangerously-skip-permissions"]
-        );
-        assert_eq!(attach_command(None), vec!["/bin/sh"]);
-        assert_eq!(attach_command(Some("telepathy")), vec!["/bin/sh"]);
     }
 
     #[test]

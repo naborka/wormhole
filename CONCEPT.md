@@ -365,6 +365,8 @@ The previous design planned to nudge the PTY size by one column so `SIGWINCH` wo
 
 This component is also what later gives detach/reattach and multi-agent tabs, so the control plane pulls forward work that §4 needs anyway.
 
+**Detach and reattach shipped without it.** A box keeps the terminal it was started in, and inside tmux, herdr or zellij that terminal is a pane: the multiplexer is the PTY master and the screen model, and it detaches, reattaches and shows the box on a phone with nothing asked of it (ADR 0006). The `Ctrl-\` toggle and the `vt100` model above remain only for a box started outside any multiplexer.
+
 ### The TUI holds no logic
 
 Every decision lives in a headless core the TUI renders. `--role X` bypasses the TUI entirely and is the path the test suite drives. A decision that exists only inside a terminal renderer cannot be unit-tested, and this document's testing strategy (§11) depends on it not existing there.

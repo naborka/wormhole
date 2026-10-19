@@ -323,9 +323,13 @@ To get a second terminal into a box that is already running, attach to it
 rather than starting it again:
 
 ```sh
-wormhole attach a3f9c1e40b2d          # its agent
-wormhole attach a3f9c1e40b2d -- sh    # a shell beside it
+wormhole attach a3f9c1e40b2d             # a shell in it
+wormhole attach a3f9c1e40b2d -- git log  # any command in it
 ```
+
+The agent stays in the terminal the box was started in. Start boxes in a
+tmux, herdr or zellij pane and that terminal can be reached from any other
+one, a phone included: [From your phone](remote.md).
 
 ## From the panel
 

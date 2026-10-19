@@ -77,7 +77,7 @@ const BOXES: &[Line] = &[
     Line {
         name: "attach",
         args: "ID|NAME [-- CMD...]",
-        blurb: "a second terminal into a running box",
+        blurb: "a shell in a running box, or CMD",
     },
     Line {
         name: "stop",
