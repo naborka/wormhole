@@ -252,6 +252,20 @@ What running the panel on a real terminal found:
   now all take the default under `$HOME`, which is what the XDG spec says
   and what the store's whole purpose needs.
 
+What running real boxes for remote control on 2026-10-16 found, fixed at the root:
+
+- **A read-only root could not start a box.** `[runtime] rootfs = "readonly"`
+  bound the image itself at `/`, so the box home at `/home/<you>`, and any
+  workspace or grant path the image lacked, had nowhere to be mounted:
+  `cannot create .../home/a: Read-only file system`. No kernel test started
+  a readonly box. The root is now a tmpfs: each directory on the way to a
+  mount point is a tmpfs of its own, and every other entry of the image is
+  bound back read-only (`MountOp::Mirror`, computed in `mount_plan::lend`),
+  so nothing is copied and nothing is written into the image. A directory
+  the image reaches through a symlink lends nothing, because following one
+  would read the host. Started on a real kernel: `/usr` refuses writes,
+  `/etc` takes them, and the image's `/home` stays empty.
+
 What a review on 2026-09-12 found by running real boxes, each fixed at the root:
 
 - **A start filed the box's name and its role's identity the wrong way

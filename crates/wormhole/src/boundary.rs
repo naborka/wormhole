@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs;
 use std::net::IpAddr;
 use std::os::unix::process::ExitStatusExt;
@@ -864,22 +864,64 @@ fn apply(root: &Path, op: &MountOp) -> Result<(), String> {
             std::os::unix::fs::symlink(to, &link)
                 .map_err(|e| format!("cannot symlink {}: {e}", link.display()))
         }
+        MountOp::Mirror { image, dir, except } => mirror(root, image, dir, except),
     }
 }
 
+/// The image's entries in `dir`, bound read-only into the writable layer
+/// at the same place in `root`. A `dir` the image reaches through a symlink
+/// lends nothing: following one here would read the host, not the image.
+fn mirror(root: &Path, image: &Path, dir: &Path, except: &[OsString]) -> Result<(), String> {
+    let mut source = image.to_owned();
+    for part in dir.components().skip(1) {
+        source.push(part);
+        match fs::symlink_metadata(&source) {
+            Ok(meta) if meta.is_dir() => {}
+            _ => return Ok(()),
+        }
+    }
+    let target = make_dir(root, dir)?;
+    let entries =
+        fs::read_dir(&source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+        let name = entry.file_name();
+        if except.contains(&name) {
+            continue;
+        }
+        let from = entry.path();
+        let to = target.join(&name);
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+        if kind.is_symlink() {
+            let link =
+                fs::read_link(&from).map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+            std::os::unix::fs::symlink(&link, &to)
+                .map_err(|e| format!("cannot symlink {}: {e}", to.display()))?;
+        } else {
+            bind_into(&from, &to, false)?;
+        }
+    }
+    Ok(())
+}
+
 fn bind(root: &Path, source: &Path, target: &Path, rw: bool) -> Result<(), String> {
-    let target = in_root(root, target);
+    bind_into(source, &in_root(root, target), rw)
+}
+
+/// `target` is a path in the scratch root, made here as a mount point.
+fn bind_into(source: &Path, target: &Path, rw: bool) -> Result<(), String> {
     if source.is_dir() {
-        fs::create_dir_all(&target)
+        fs::create_dir_all(target)
             .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
     } else {
-        create_parent(&target)?;
-        fs::File::create(&target)
-            .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+        create_parent(target)?;
+        fs::File::create(target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
     }
     mount(
         Some(source),
-        &target,
+        target,
         None::<&str>,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
@@ -891,7 +933,7 @@ fn bind(root: &Path, source: &Path, target: &Path, rw: bool) -> Result<(), Strin
             target.display()
         )
     })?;
-    if rw { Ok(()) } else { remount_ro(&target) }
+    if rw { Ok(()) } else { remount_ro(target) }
 }
 
 /// Read-only remount of a bind. The kernel refuses to drop flags a less

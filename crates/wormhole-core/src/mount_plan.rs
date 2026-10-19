@@ -3,6 +3,8 @@
 //! the filesystem.
 
 use core::fmt;
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
@@ -104,6 +106,15 @@ pub enum MountOp {
     /// A `devpts` of the box's own, so tools can open pseudo-terminals
     /// without seeing the host's.
     DevPts { target: PathBuf },
+    /// The image's entries in `dir`, each bound read-only into the writable
+    /// layer already there, all but `except`. How a read-only root gets mount
+    /// points the image lacks without writing the image. Symlinks are made
+    /// again, never followed, and a `dir` reached through one lends nothing.
+    Mirror {
+        image: PathBuf,
+        dir: PathBuf,
+        except: Vec<OsString>,
+    },
 }
 
 impl MountOp {
@@ -123,7 +134,16 @@ impl MountOp {
             | MountOp::Proc { target }
             | MountOp::DevPts { target } => Some(target),
             MountOp::Device { path } => Some(path),
-            MountOp::File { .. } | MountOp::Symlink { .. } => None,
+            MountOp::File { .. } | MountOp::Symlink { .. } | MountOp::Mirror { .. } => None,
+        }
+    }
+
+    /// Where this op makes something inside the box, mount or not.
+    fn path(&self) -> Option<&Path> {
+        match self {
+            MountOp::File { target, .. } => Some(target),
+            MountOp::Symlink { link, .. } => Some(link),
+            other => other.mount_point(),
         }
     }
 }
@@ -408,7 +428,7 @@ pub fn compute(
     match root {
         Root::Image(image) => ops.push(image_root(image, true)),
         Root::ImageReadOnly(image) => {
-            ops.push(image_root(image, false));
+            ops.push(MountOp::TmpfsRoot);
             // Before everything else that writes into the root: the
             // synthetic `/etc` files below land in this tmpfs, not in the
             // shared image, which is the whole reason the image can be
@@ -476,7 +496,63 @@ pub fn compute(
             rw: g.rw,
         });
     }
+    if let Root::ImageReadOnly(image) = root {
+        let lent = lend(image, &ops);
+        ops.splice(1..1, lent);
+    }
     Ok(ops)
+}
+
+/// A read-only root's way to every mount point: `/`, and every directory
+/// between it and a mount point outside the writable mounts, each a tmpfs
+/// lending the image's other entries read-only.
+fn lend(image: &Path, ops: &[MountOp]) -> Vec<MountOp> {
+    let writable: Vec<&Path> = ops
+        .iter()
+        .filter_map(|op| match op {
+            MountOp::Tmpfs { target, .. }
+            | MountOp::TmpfsFrom { target, .. }
+            | MountOp::Proc { target }
+            | MountOp::DevPts { target }
+            | MountOp::Bind {
+                target, rw: true, ..
+            } => Some(target.as_path()),
+            _ => None,
+        })
+        .collect();
+    let paths: Vec<&Path> = ops
+        .iter()
+        .filter_map(MountOp::path)
+        .filter(|path| *path != Path::new("/"))
+        .collect();
+    let mut dirs = BTreeSet::from([PathBuf::from("/")]);
+    for path in &paths {
+        if writable.iter().any(|w| path != w && path.starts_with(w)) {
+            continue;
+        }
+        dirs.extend(path.ancestors().skip(1).map(Path::to_path_buf));
+    }
+    let mut lent = Vec::with_capacity(dirs.len() * 2);
+    for dir in dirs {
+        let except: BTreeSet<OsString> = paths
+            .iter()
+            .filter_map(|path| path.strip_prefix(&dir).ok())
+            .filter_map(|rest| rest.components().next())
+            .map(|first| first.as_os_str().to_owned())
+            .collect();
+        if dir != Path::new("/") {
+            lent.push(MountOp::Tmpfs {
+                target: dir.clone(),
+                mode: 0o755,
+            });
+        }
+        lent.push(MountOp::Mirror {
+            image: image.to_owned(),
+            dir,
+            except: except.into_iter().collect(),
+        });
+    }
+    lent
 }
 
 /// Rejects escapes, collapses duplicates and covered nested grants, and
@@ -721,31 +797,122 @@ mod tests {
 
     /// The point of a read-only root: the image is bound, never copied,
     /// and the box cannot write to the thing every other box shares.
-    #[test]
-    fn a_readonly_root_binds_the_image_itself_and_binds_it_read_only() {
-        let image = Path::new("/data/images/abc");
-        let ops = compute(
-            Path::new("/w"),
+    fn readonly(workspace: &str, grants: &[Grant]) -> Vec<MountOp> {
+        compute(
+            Path::new(workspace),
             Path::new("/data/home"),
-            Root::ImageReadOnly(image),
+            Root::ImageReadOnly(Path::new("/data/images/abc")),
+            &user(),
+            grants,
+            &host_resolver(),
+        )
+        .expect("plan")
+    }
+
+    fn position(ops: &[MountOp], found: impl Fn(&MountOp) -> bool) -> usize {
+        ops.iter()
+            .position(found)
+            .unwrap_or_else(|| panic!("not in {ops:#?}"))
+    }
+
+    fn lent(ops: &[MountOp]) -> Vec<(&Path, Vec<String>)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                MountOp::Mirror { dir, except, .. } => Some((
+                    dir.as_path(),
+                    except
+                        .iter()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The image is never written to, not even for a mount point it lacks.
+    #[test]
+    fn a_readonly_root_is_a_tmpfs_that_lends_the_image_read_only() {
+        let ops = readonly("/w", &[]);
+
+        assert_eq!(ops.first(), Some(&MountOp::TmpfsRoot));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, MountOp::Bind { target, .. } if target == Path::new("/"))),
+            "the image bound whole: {ops:#?}"
+        );
+        let lent = lent(&ops);
+        let (root, except) = &lent[0];
+        assert_eq!(*root, Path::new("/"));
+        for name in ["dev", "etc", "home", "proc", "run", "tmp", "var", "w"] {
+            assert!(
+                except.iter().any(|n| n == name),
+                "{name} lent anyway: {except:?}"
+            );
+        }
+    }
+
+    /// The bug this pins: the box home is bound at `/home/<you>`, which the
+    /// read-only image did not have and could not be given.
+    #[test]
+    fn a_readonly_root_gets_a_writable_way_to_every_mount_point() {
+        let ops = readonly("/srv/proj", &[Grant::direct("/opt/data", false)]);
+
+        for (dir, child) in [("/home", "nabor"), ("/srv", "proj"), ("/opt", "data")] {
+            let tmpfs = position(
+                &ops,
+                |op| matches!(op, MountOp::Tmpfs { target, .. } if target == Path::new(dir)),
+            );
+            let lend = position(&ops, |op| {
+                matches!(op, MountOp::Mirror { image, dir: lent, except }
+                    if image == Path::new("/data/images/abc")
+                        && lent == Path::new(dir)
+                        && except.iter().any(|n| n == child))
+            });
+            let bind = position(
+                &ops,
+                |op| matches!(op, MountOp::Bind { target, .. } if target.parent() == Some(Path::new(dir))),
+            );
+            assert!(tmpfs < lend && lend < bind, "{dir}: {ops:#?}");
+        }
+    }
+
+    /// Below a writable mount a box makes its own mount points.
+    #[test]
+    fn nothing_under_a_writable_mount_is_shadowed() {
+        let ops = readonly("/home/nabor/proj", &[Grant::direct("/tmp/x", true)]);
+
+        let lent: Vec<&Path> = lent(&ops).into_iter().map(|(dir, _)| dir).collect();
+        assert_eq!(lent, [Path::new("/"), Path::new("/home")]);
+    }
+
+    #[test]
+    fn a_copied_root_is_writable_already_and_lends_nothing() {
+        let ops = compute(
+            Path::new("/srv/proj"),
+            Path::new("/data/home"),
+            Root::Image(Path::new("/data/images/abc")),
             &user(),
             &[],
             &host_resolver(),
         )
         .expect("plan");
-        assert_eq!(
-            ops.first(),
-            Some(&MountOp::Bind {
-                source: image.to_owned(),
-                target: PathBuf::from("/"),
-                rw: false,
-            })
-        );
+
+        assert!(lent(&ops).is_empty(), "{ops:#?}");
     }
 
-    /// A bare tmpfs over `/etc` would hide the image's own — the CA bundle
-    /// above all — so the box would lose TLS to gain writability. Seeding
-    /// it from the image keeps both.
+    /// What it mounts is read-only; a writable one would be unplanned and refused.
+    #[test]
+    fn lending_is_no_writable_mount_point() {
+        let op = MountOp::Mirror {
+            image: PathBuf::from("/i"),
+            dir: PathBuf::from("/"),
+            except: Vec::new(),
+        };
+
+        assert_eq!(op.mount_point(), None);
+    }
+
     #[test]
     fn a_readonly_root_gets_writable_etc_and_var_seeded_from_the_image() {
         let image = Path::new("/data/images/abc");

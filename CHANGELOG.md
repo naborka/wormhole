@@ -9,6 +9,15 @@ true.
 
 ## Unreleased
 
+### Fixed: a read-only root could not start a box
+
+`[runtime] rootfs = "readonly"` bound the image itself as the box's root,
+and then had to make a mount point for your home at `/home/<you>` inside
+it, which a read-only image cannot take. Every such start failed with
+"Read-only file system". The root is now a small in-memory layer with the
+image's own directories lent back read-only, one by one: nothing is copied,
+nothing is written into the image, and `/usr` still refuses every write.
+
 ### Fixed: a login shell lost the box's `PATH`
 
 Codex runs every command and hook through `sh -lc`, and Alpine's
