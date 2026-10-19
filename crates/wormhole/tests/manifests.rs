@@ -86,6 +86,30 @@ fn every_alpine_recipe_this_repo_ships_carries_zoneinfo() {
     every_alpine_recipe_installs(&["tzdata"]);
 }
 
+/// The build box maps one uid, so root there cannot `chown` to any other.
+/// GNU tar running as root restores the owner a tarball records, and a
+/// GitHub release records the runner's 1001: the nextest step failed with
+/// "Cannot change ownership to uid 1001" once GNU tar replaced BusyBox's.
+#[test]
+fn every_build_step_that_extracts_keeps_no_owner() {
+    for path in shipped_manifests() {
+        let text = std::fs::read_to_string(&path).expect("manifest");
+        let parsed = manifest::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        for step in parsed
+            .image
+            .build
+            .iter()
+            .filter(|step| step.contains("tar -x"))
+        {
+            assert!(
+                step.contains("--no-same-owner"),
+                "{} extracts without --no-same-owner: {step}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// A digest of zeros is a note to fill in later, and a build that reaches
 /// it fails on the download it names. It has no place in a shipped recipe.
 #[test]

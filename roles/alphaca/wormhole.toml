@@ -82,7 +82,7 @@ build = [
   "mkdir -p /tmp/rustup && cp /tmp/rustup-init /tmp/rustup/ && chmod +x /tmp/rustup/rustup-init",
   "RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /tmp/rustup/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1 -c rustfmt -c clippy -c rust-analyzer",
   "ln -s /usr/local/cargo/bin/* /usr/local/bin/",
-  "tar -xzf /tmp/cargo-nextest.tar.gz -C /usr/local/bin cargo-nextest",
+  "tar -xzf /tmp/cargo-nextest.tar.gz --no-same-owner -C /usr/local/bin cargo-nextest",
   # Alpine keeps postgres under /usr/libexec with nothing on PATH.
   "for f in /usr/libexec/postgresql17/*; do [ -x \"$f\" ] || continue; ln -sf \"$f\" /usr/local/bin/; done",
   # A cc that links with mold; CARGO_TARGET_*_LINKER below points at it.
