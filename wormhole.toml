@@ -20,6 +20,17 @@ packages = [
   "git",
   "openssh-client",
   "ca-certificates",
+  # GNU, not BusyBox: agents write GNU flags, BusyBox refuses them.
+  "grep",
+  "findutils",
+  "sed",
+  "coreutils",
+  "diffutils",
+  "gawk",
+  "tree",
+  "tar",
+  # Zoneinfo: without it TZ names fall back to UTC and PostgreSQL refuses them.
+  "tzdata",
   "ripgrep",
   "fd",
   "eza",

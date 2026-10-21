@@ -162,6 +162,14 @@ pub(crate) fn seed_agent_config(
     }
 }
 
+/// Writes the files the box owns in the agent's home, fresh on every
+/// start, so what the registry says is what the agent reads.
+pub(crate) fn seed_owned_files(manifest: &manifest::Manifest, home: &Path) {
+    for (target, content) in manifest::owned_files(manifest) {
+        seed_file(home, target, content);
+    }
+}
+
 /// A file's text, `None` when there is no such file.
 fn read_if_present(file: &Path) -> Option<String> {
     match std::fs::read_to_string(file) {

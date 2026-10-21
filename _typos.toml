@@ -1,0 +1,23 @@
+# Words typos would correct that are right as written.
+[default.extend-words]
+# The Rust TUI crate.
+ratatui = "ratatui"
+# `[Ll]ocation` in a sed pattern tokenizes as this.
+ocation = "ocation"
+
+[default.extend-identifiers]
+HashiCorp = "HashiCorp"
+# Seccomp prose: conditions ANDed, rules ORed.
+ANDed = "ANDed"
+ORed = "ORed"
+
+[default]
+extend-ignore-re = [
+  # Box ids and key fingerprints are hex, not words.
+  "\\b[0-9a-f]{12}\\b",
+  "\\b[0-9A-F]{4}\\b",
+  # Quoted as a typo on purpose, in the research notes.
+  "`boxs`",
+  # A quoted "(mis)features".
+  "\\(mis\\)",
+]

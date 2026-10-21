@@ -23,18 +23,21 @@ your mistakes survive.
 
 ## Use the modern tools
 
-They are installed. Prefer them — they are faster, and their output is easier to
-read correctly.
+They are installed. Prefer them — they skip what you do not want to read, and
+they print less.
 
 | Instead of | Use | Why |
 |---|---|---|
-| `grep -r` | `rg` | Skips ignored files, much faster |
-| `find` | `fd` | Simpler patterns, respects `.gitignore` |
-| `ls` | `eza` | Clearer listing; `eza --tree` for trees |
-| `du` | `ncdu` | Interactive, finds what is actually large |
-| `top` | `btop` | Readable process view |
+| `grep -r` | `rg` | Skips `.gitignore`d files, `.git` and binaries; `rg -c` to count, `rg --heading` to read |
+| `find` | `fd` | Same skipping, simpler patterns; `fd -u` to include ignored files |
+| `ls -la` | `eza -l --no-permissions --no-user --no-time` | A third of the bytes |
+| `du` | `du -sh <dir>/*` | One line per entry; `ncdu` is for a person at a terminal |
+| regex edits to code | `ast-grep run -p '<pattern>' -r '<rewrite>' -l <lang>` | Matches syntax, not text |
+| `time` | `hyperfine` | Warmup, repeats, a table |
 
 `rg --files` beats `find . -type f`. `fd -e rs` beats `find . -name '*.rs'`.
+`grep`, `find`, `sed`, `diff`, `tar` and `tree` are the GNU ones here, not BusyBox,
+so their usual flags work.
 
 Do not write shell aliases for these: a non-interactive shell never reads them,
 so call the real names.

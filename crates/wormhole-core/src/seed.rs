@@ -270,6 +270,39 @@ mod tests {
         assert_eq!(settings["switchModelsOnFlag"], json!(false));
     }
 
+    /// The bell is the one alert every terminal and multiplexer passes on.
+    #[test]
+    fn claude_rings_the_bell_when_it_needs_you_unless_told_otherwise() {
+        let settings = json_in(CLAUDE, &[], ".claude/settings.json");
+        assert_eq!(settings["preferredNotifChannel"], json!("terminal_bell"));
+        let chosen = json_in(
+            CLAUDE,
+            &[(
+                ".claude/settings.json",
+                r#"{"preferredNotifChannel":"kitty"}"#,
+            )],
+            ".claude/settings.json",
+        );
+        assert_eq!(chosen["preferredNotifChannel"], json!("kitty"));
+    }
+
+    /// tmux reports no focus by default, so Codex's own `unfocused` would
+    /// never ring in a tab you left.
+    #[test]
+    fn codex_rings_whenever_it_needs_you_unless_told_otherwise() {
+        let config = toml_in(CODEX, &[], ".codex/config.toml");
+        assert_eq!(
+            config["tui"]["notification_condition"].as_str(),
+            Some("always")
+        );
+        let own = "[tui]\nnotification_condition = \"unfocused\"\n";
+        let chosen = toml_in(CODEX, &[(".codex/config.toml", own)], ".codex/config.toml");
+        assert_eq!(
+            chosen["tui"]["notification_condition"].as_str(),
+            Some("unfocused")
+        );
+    }
+
     /// What the box settles it settles on every start: a past session
     /// cannot talk it out of it. Everything else in the file is the
     /// agent's own and survives.

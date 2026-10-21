@@ -36,7 +36,7 @@ fn main() {
         // which wormhole they have, or a bug report quoting it, wants a
         // plain line and a zero exit, not a refusal's usage wall.
         Some("version" | "--version" | "-V") => {
-            println!("wormhole {}", env!("CARGO_PKG_VERSION"));
+            println!("wormhole {}", wormhole_core::VERSION);
             std::process::exit(0);
         }
         Some("doctor") => {
@@ -444,6 +444,7 @@ fn run_box(args: &[String]) -> ! {
     seed::seed_preflight(&manifest, &manifest_dir, &home);
     seed::seed_rules(&manifest, &manifest_dir, &home);
     seed::seed_agent_config(&manifest, &workspace, &home, credentials);
+    seed::seed_owned_files(&manifest, &home);
     let shared_credentials = seed::seed_credentials(credentials, &manifest, &home);
     if manifest.access.dns.is_none() && !Path::new("/etc/resolv.conf").exists() {
         fail("the host has no /etc/resolv.conf; set [access] dns");
@@ -642,6 +643,24 @@ fn replace(file: &Path, content: &[u8], mode: Option<u32>) -> Result<(), String>
 fn gc_cmd(args: &[String]) -> ! {
     let sweep = run::parse_gc_args(args).unwrap_or_else(|e| usage(&e.to_string()));
     let data_home = data_home();
+    let items = store_items(&data_home);
+    // Partitioned once, so what the report describes and what the loop
+    // removes are the same set rather than two answers that have to agree.
+    let plan = gc::plan(&items, sweep);
+    print!("{}", gc::report(&items, sweep, &plan));
+    let refused = if sweep.delete {
+        give_back(&plan, true)
+    } else {
+        0
+    };
+    std::process::exit(i32::from(refused > 0));
+}
+
+/// Everything the data home holds, with what can be proven about each.
+///
+/// One walk, so `wormhole gc` and the store tab are looking at the same
+/// store rather than at two answers that have to agree.
+fn store_items(data_home: &Path) -> Vec<gc::Item> {
     let mut items = Vec::new();
     // What the store is keeping something alive for, gathered as the walks
     // go: the digests running boxes are using, and the recipes kept ones
@@ -651,7 +670,7 @@ fn gc_cmd(args: &[String]) -> ! {
     // A dead box's directory holds a whole root copy. Walked once and
     // never reaped here: `ps` and the panel reap, and a reap in the middle
     // of a scan renames the very tree this loop has just measured.
-    for entry in read_dir(&paths::boxes_dir(&data_home)) {
+    for entry in read_dir(&paths::boxes_dir(data_home)) {
         let path = entry.path();
         let verdict = match box_dir_pid(&path) {
             Some(pid) if alive(pid) => {
@@ -680,7 +699,7 @@ fn gc_cmd(args: &[String]) -> ! {
     let mut keys = BTreeSet::new();
     let mut recipes = BTreeMap::new();
     let mut complete = true;
-    for entry in read_dir(&paths::homes_dir(&data_home)) {
+    for entry in read_dir(&paths::homes_dir(data_home)) {
         let path = entry.path();
         let Some(key) = path
             .file_name()
@@ -689,7 +708,7 @@ fn gc_cmd(args: &[String]) -> ! {
         else {
             continue;
         };
-        let record = read_record(&data_home, &key).ok();
+        let record = read_record(data_home, &key).ok();
         keys.insert(key);
         // A home that could not be read is a recipe that could not be
         // asked, so it counts against completeness like an unreadable one.
@@ -730,8 +749,8 @@ fn gc_cmd(args: &[String]) -> ! {
     // answer this without a stat each.
     type Judge = fn(&str, &BTreeSet<String>) -> gc::Verdict;
     let beside_homes: [(PathBuf, Judge); 2] = [
-        (paths::locks_dir(&data_home), gc::lock_verdict),
-        (paths::records_dir(&data_home), gc::kept_verdict),
+        (paths::locks_dir(data_home), gc::lock_verdict),
+        (paths::records_dir(data_home), gc::kept_verdict),
     ];
     for (dir, verdict) in beside_homes {
         for entry in read_dir(&dir) {
@@ -748,9 +767,9 @@ fn gc_cmd(args: &[String]) -> ! {
     }
 
     for (dir, what) in [
-        (paths::images_dir(&data_home), "image"),
-        (paths::bases_dir(&data_home), "base"),
-        (paths::artifacts_dir(&data_home), "artifact"),
+        (paths::images_dir(data_home), "image"),
+        (paths::bases_dir(data_home), "base"),
+        (paths::artifacts_dir(data_home), "artifact"),
     ] {
         for entry in read_dir(&dir) {
             let path = entry.path();
@@ -769,25 +788,46 @@ fn gc_cmd(args: &[String]) -> ! {
 
     // Biggest first: what is worth deciding about is what is worth seeing.
     items.sort_by_key(|item| std::cmp::Reverse(item.bytes));
-    // Partitioned once, so what the report describes and what the loop
-    // removes are the same set rather than two answers that have to agree.
-    let plan = gc::plan(&items, sweep);
-    print!("{}", gc::report(&items, sweep, &plan));
+    items
+}
+
+/// Removes what a plan has taken, and counts what would not go.
+///
+/// The loud form when a person asked at a command line: space that did
+/// not come back must never be reported as though it had. The panel says
+/// the same thing on its own screen, so it asks for the quiet one.
+fn give_back(plan: &gc::Plan<'_>, loud: bool) -> usize {
     let mut refused = 0usize;
-    if sweep.delete {
-        for item in &plan.take {
-            // The loud form: a person asked for this, so space that did
-            // not come back must never be reported as though it had.
-            match image::remove(&item.path) {
-                Ok(()) => println!("removed {}", item.path.display()),
-                Err(why) => {
+    for item in &plan.take {
+        match image::remove(&item.path) {
+            Ok(()) if loud => println!("removed {}", item.path.display()),
+            Ok(()) => {}
+            Err(why) => {
+                if loud {
                     eprintln!("wormhole: {why}");
-                    refused += 1;
                 }
+                refused += 1;
             }
         }
     }
-    std::process::exit(i32::from(refused > 0));
+    refused
+}
+
+/// `x` on the store tab: give back everything this sweep has proven.
+fn sweep_store(data_home: &Path, unreferenced: bool) -> Result<(), String> {
+    let sweep = gc::Sweep {
+        delete: true,
+        unreferenced,
+    };
+    let items = store_items(data_home);
+    let plan = gc::plan(&items, sweep);
+    match give_back(&plan, false) {
+        0 => Ok(()),
+        refused => Err(format!(
+            "{refused} of {} could not be given back",
+            plan.take.len()
+        )),
+    }
 }
 
 /// The image a running box is using, from the entry it wrote at start.
@@ -879,6 +919,12 @@ fn ps(args: &[String]) -> ! {
             let listing = home::listed(&scan.boxes, &wanted)
                 .unwrap_or_else(|| fail(&home::no_box_found(&wanted)));
             print!("{}", home::list(std::slice::from_ref(listing), now));
+            // The `+N` on the row, spelled out. A fact reachable only
+            // from a panel is a fact no script can have.
+            print!(
+                "\n{}",
+                home::served_block(&home::served(&listing.record, &|path: &Path| path.is_dir()))
+            );
             if let Some(pid) = listing.running
                 && let Some(baked) = read_baked_env(&paths::box_dir(&data_home, pid))
             {
@@ -992,28 +1038,52 @@ fn reap(box_dir: &Path) {
 /// only the running ones. Enter joins a running box's agent or starts an
 /// idle one again, `n` starts another box here, `d` stops, `q` quits.
 fn tui() -> ! {
-    let data_home = data_home();
+    // Held across the loop, so a trip through the role list or the
+    // workspace picker comes back to the row it was opened from.
+    let mut panel = tui::Tui::default();
+    let mut machine = Machine {
+        data_home: data_home(),
+    };
     loop {
-        // A store the panel cannot read is a line on its own screen, not a
-        // refusal: there is no way out of here that would not leave the
-        // terminal in raw mode, and an empty list that says why is honest.
-        let scan = || {
-            box_listings(&data_home).unwrap_or_else(|e| home::Scan {
-                boxes: Vec::new(),
-                problems: vec![e],
-            })
-        };
-        let picked =
-            panel::run(scan, |what| panel_act(&data_home, what)).unwrap_or_else(|e| fail(&e));
+        let picked = panel::run(&mut panel, &mut machine).unwrap_or_else(|e| fail(&e));
+        let data_home = machine.data_home.clone();
         match picked {
             panel::Pick::Quit => std::process::exit(0),
-            panel::Pick::Attach(id) => attach_box(&id, None, &[]),
-            panel::Pick::Resume(id) => resume_from_panel(&data_home, &id),
+            panel::Pick::Attach(id) => session(&["attach".to_owned(), id], None),
+            panel::Pick::Workspaces(id) => start_somewhere(&data_home, &id),
             panel::Pick::New => new_box_from_panel(&data_home),
         }
     }
 }
 
+/// Runs one of this tool's own commands on the terminal the panel gave
+/// back, and returns when it ends, so the panel is drawn again: a
+/// launcher that exits is a list you cannot come back to. As itself, in
+/// a child, for the same reason the palette does. A session that failed
+/// waits for a key first, or the panel would cover what it said.
+fn session(argv: &[String], cwd: Option<&Path>) {
+    let line = format!("wormhole {}", argv.join(" "));
+    let me = match std::env::current_exe() {
+        Ok(me) => me,
+        Err(e) => return panel::pause(&format!("cannot find this wormhole to run: {e}")),
+    };
+    let mut command = std::process::Command::new(me);
+    command.args(argv);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let waited = command.spawn().and_then(|mut child| {
+        // Ctrl-C is the session's. A panel that died to it would hand the
+        // shell the prompt while the box still owned the terminal.
+        let _quiet = boundary::ignore_terminal_signals();
+        child.wait()
+    });
+    match waited {
+        Ok(status) if status.success() => {}
+        Ok(status) => panel::pause(&format!("{line}: {status}")),
+        Err(e) => panel::pause(&format!("cannot run {line}: {e}")),
+    }
+}
 /// Every kept box with the pid running it, most recently used first —
 /// which is resume order, so the list reads top-down as the boxes a bare
 /// `wormhole box` would pick — and everything the scan could not read.
@@ -1027,48 +1097,196 @@ fn box_listings(data_home: &Path) -> Result<home::Scan, String> {
     })
 }
 
-/// What the panel does to the box its cursor is on, without leaving its
-/// own screen.
-///
-/// Fallible where the commands' lookup exits: the panel owns the terminal
-/// and has a line of its own to say this on, and the problems a scan
-/// reports are already drawn there rather than printed over it. The same
-/// bodies the commands use, so `x` in here and `wormhole remove` out
-/// there can never mean two different things.
-fn panel_act(data_home: &Path, what: &tui::Act) -> Result<(), String> {
-    let id = match what {
-        tui::Act::Stop(pid) => return stop_box(data_home, *pid),
-        tui::Act::Remove(id) | tui::Act::Reset(id) => id,
-    };
-    // The panel always hands an id, and an id names its box from
-    // anywhere, so the workspace decides nothing here.
-    let (found, _, _) = find_targets(data_home, Path::new(""), std::slice::from_ref(id))?;
-    let target = found.first().ok_or_else(|| home::no_box_found(id))?;
-    let claimed = Claimed::take(data_home, target)?;
-    match what {
-        tui::Act::Remove(_) => claimed.remove(data_home),
-        tui::Act::Reset(_) => claimed.reset(data_home),
-        tui::Act::Stop(_) => unreachable!("returned above"),
+/// What the panel asks this host for. Every method is I/O — reading the
+/// store, walking the data home, probing the kernel — which is why the
+/// panel takes it as an interface rather than doing any of it.
+struct Machine {
+    data_home: PathBuf,
+}
+
+impl panel::Host for Machine {
+    /// A store the panel cannot read is a line on its own screen, not a
+    /// refusal: there is no way out of there that would not leave the
+    /// terminal in raw mode, and an empty list that says why is honest.
+    fn boxes(&mut self) -> home::Scan {
+        box_listings(&self.data_home).unwrap_or_else(|e| home::Scan {
+            boxes: Vec::new(),
+            problems: vec![e],
+        })
+    }
+
+    fn gather(&mut self, tab: tui::Tab, widened: bool) -> tui::Sheet {
+        match tab {
+            // The box list has its own body; this is asked for the rest.
+            tui::Tab::Boxes => tui::Sheet::default(),
+            tui::Tab::Roles => tui::roles_sheet(
+                &roles::listed(&self.data_home),
+                &paths::roles_dir(&config_home()).display().to_string(),
+            ),
+            tui::Tab::Store => {
+                let sweep = gc::Sweep {
+                    delete: false,
+                    unreferenced: widened,
+                };
+                tui::store_sheet(&store_items(&self.data_home), sweep)
+            }
+            tui::Tab::Secrets => {
+                tui::secrets_sheet(&read_secrets().keys().cloned().collect::<Vec<_>>())
+            }
+            tui::Tab::Doctor => tui::doctor_sheet(&doctor::evaluate(probes::run_all())),
+        }
+    }
+
+    /// The same bodies the commands use, so what a key does in here and
+    /// what the command does out there can never mean two things.
+    fn act(&mut self, what: &tui::Act) -> Result<(), String> {
+        let data_home = &self.data_home;
+        let id = match what {
+            tui::Act::Stop(pid) => return stop_box(data_home, *pid),
+            tui::Act::Uninstall(name) => return roles::uninstall(name),
+            tui::Act::Keep(name, value) => return keep_secret(name, value),
+            tui::Act::Forget(name) => return forget_secret(name),
+            tui::Act::Sweep(widened) => return sweep_store(data_home, *widened),
+            tui::Act::Remove(id) | tui::Act::Reset(id) | tui::Act::Rename(id, _) => id,
+        };
+        // The panel always hands an id, and an id names its box from
+        // anywhere, so the workspace decides nothing here.
+        let (found, kept, _) = find_targets(data_home, Path::new(""), std::slice::from_ref(id))?;
+        let target = found.first().ok_or_else(|| home::no_box_found(id))?;
+        let claimed = Claimed::take(data_home, target)?;
+        match what {
+            tui::Act::Remove(_) => claimed.remove(data_home),
+            tui::Act::Reset(_) => claimed.reset(data_home),
+            tui::Act::Rename(_, name) => claimed.rename(data_home, &kept, name),
+            _ => unreachable!("returned above"),
+        }
+    }
+
+    fn recipe(&mut self, name: &str) -> Result<String, String> {
+        roles::recipe_of(name)
+    }
+
+    fn install(&mut self, reference: &str) -> Result<(), String> {
+        roles::install(reference)
+    }
+
+    /// Runs one of this tool's own commands and hands back what it
+    /// printed.
+    ///
+    /// As itself, in a child: the palette shows the command line, so
+    /// running anything other than that line would make the line a lie —
+    /// and every one of these commands already ends in `exit`, which is
+    /// not something a panel can do in the middle of its own loop.
+    fn run(&mut self, argv: &[String]) -> Result<String, String> {
+        let me = std::env::current_exe()
+            .map_err(|e| format!("cannot find this wormhole to run: {e}"))?;
+        let done = std::process::Command::new(me)
+            .args(argv)
+            .output()
+            .map_err(|e| format!("cannot run wormhole {}: {e}", argv.join(" ")))?;
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&done.stdout),
+            String::from_utf8_lossy(&done.stderr)
+        ))
     }
 }
 
-/// Enter on an idle box: start it again with the home, history and
-/// toolchain it kept. In *its* workspace, not wherever the panel was
-/// opened — a box belongs to one tree, and starting it anywhere else
-/// would point its agent at a stranger's code.
-fn resume_from_panel(data_home: &Path, id: &str) -> ! {
+/// The record behind a row the panel handed back, or nothing when the box
+/// has gone since it was drawn.
+fn panel_record(data_home: &Path, id: &str) -> Option<home::Record> {
     let kept = kept_boxes(data_home).unwrap_or_else(|e| fail(&e));
     report_problems(&kept.problems);
-    let record = kept
-        .records
-        .into_iter()
-        .find(|record| record.id == id)
-        .unwrap_or_else(|| fail(&format!("no box {id} any more")));
-    let workspace = home::resume_in(&record, &here(), Path::is_dir).unwrap_or_else(|e| fail(&e));
-    std::env::set_current_dir(&workspace)
-        .unwrap_or_else(|e| fail(&format!("cannot enter {}: {e}", workspace.display())));
+    kept.records.into_iter().find(|record| record.id == id)
+}
+
+/// Starting a box is starting it somewhere, so the start stands in that
+/// directory rather than passing it along: `wormhole box` takes no
+/// workspace argument, and the workspace is where you are.
+fn start_in(id: &str, workspace: &Path) {
     // No `--role`: a named box starts from the role it records.
-    run_box(&["--id".to_owned(), id.to_owned()])
+    session(
+        &["box".to_owned(), "--id".to_owned(), id.to_owned()],
+        Some(workspace),
+    );
+}
+
+/// `w` in the panel: which workspace to start this box in.
+///
+/// The gap this closes: a box's record has always carried every workspace
+/// it served, `ps` said `+N` about them, and nothing could name one. The
+/// answer was to quit, `cd` there and retype the id.
+///
+/// Returns to the panel on any refusal or back-out, because one box that
+/// cannot be started somewhere is no reason to lose the list.
+fn start_somewhere(data_home: &Path, id: &str) {
+    let Some(record) = panel_record(data_home, id) else {
+        return;
+    };
+    let here = here();
+    let choices = home::resume_choices(&record, &here, &|path: &Path| path.is_dir());
+    // Nothing to offer means every workspace it served is gone, which is
+    // what `resume_in` already has a sentence for.
+    if choices.list.is_empty() {
+        say(&home::resume_in(&record, &here, Path::is_dir)
+            .err()
+            .unwrap_or_else(|| format!("box {id} has nowhere to start")));
+        return;
+    }
+    let items: Vec<String> = choices.list.iter().map(home::Choice::line).collect();
+    let Some(at) =
+        panel::choose_at(tui::WHERE_HEADING, &items, choices.at).unwrap_or_else(|e| fail(&e))
+    else {
+        return;
+    };
+    let chosen = &choices.list[at];
+    // A tree it has never served is not a place it goes back to, it is a
+    // place it is being given. What that costs is read first, in full,
+    // like any other start that hands a box something it did not have.
+    if chosen.fresh && !widening(data_home, &record, &chosen.path) {
+        return;
+    }
+    start_in(id, &chosen.path.clone());
+}
+
+/// Shows what starting this box in a tree it has never served would mean,
+/// with the recipe under it, and whether the answer was yes.
+fn widening(data_home: &Path, record: &home::Record, here: &Path) -> bool {
+    let role = record.role_ref();
+    let resolved = match roles::try_resolve_manifest(role.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(why) => {
+            say(&why);
+            return false;
+        }
+    };
+    // A role edited to drop the product this box records still lists and
+    // still has a home, so this is reachable — and it is a sentence on a
+    // screen, never the end of the panel. One unstartable box must not
+    // take the list of every other one with it.
+    let shown = match manifest::bound(resolved.manifest, record.agent.as_deref()) {
+        Ok(shown) => shown,
+        Err(why) => {
+            say(&why.to_string());
+            return false;
+        }
+    };
+    let image = paths::image_dir(data_home, &manifest::recipe_digest(&shown));
+    let text = tui::widening(&record.id, here)
+        + "\n"
+        + &tui::preview(
+            &shown,
+            role.as_deref().unwrap_or(WORKSPACE_LABEL),
+            image.is_dir(),
+        );
+    panel::confirm(&text).unwrap_or_else(|e| fail(&e))
+}
+
+/// One sentence on a screen of its own, for a refusal the panel has to
+/// hand back rather than print: it owns the terminal, and anything
+/// written to it draws over the box list.
+fn say(what: &str) {
+    panel::message(what).unwrap_or_else(|e| fail(&e));
 }
 
 /// `n` in the panel: pick what the new box starts from — the workspace's
@@ -1106,8 +1324,7 @@ fn new_box_from_panel(data_home: &Path) {
         let resolved = match roles::try_resolve_manifest(role) {
             Ok(resolved) => resolved,
             Err(why) => {
-                let _ = panel::confirm(&format!("{}\n\n{why}\n\nq back\n", labels[index]))
-                    .unwrap_or_else(|e| fail(&e));
+                say(&format!("{}\n\n{why}\n", labels[index]));
                 continue;
             }
         };
@@ -1126,22 +1343,19 @@ fn new_box_from_panel(data_home: &Path) {
             .unwrap_or_else(|e| fail(&e.to_string()));
         let digest = manifest::recipe_digest(&shown);
         let image = paths::image_dir(data_home, &digest);
-        let text = wormhole_core::tui::preview(&shown, &labels[index], image.is_dir())
-            + wormhole_core::tui::PREVIEW_HINTS;
+        // Everything a start can be told, before the screen that shows
+        // what the box will see. `--new`, because the key is `n` for new:
+        // an idle box is resumed with Enter on its own row, where you can
+        // see which one you are getting.
+        let form = tui::Form::new(role, run.as_deref());
+        let Some(args) = panel::fill(form).unwrap_or_else(|e| fail(&e)) else {
+            continue;
+        };
+        let text = wormhole_core::tui::preview(&shown, &labels[index], image.is_dir());
         if panel::confirm(&text).unwrap_or_else(|e| fail(&e)) {
-            // `--new`, because the key is `n` for new: an idle box is
-            // resumed with Enter on its own row, where you can see which
-            // one you are getting.
-            let mut args = vec!["--new".to_owned()];
-            if let Some(role) = role {
-                args.push("--role".to_owned());
-                args.push(role.to_owned());
-            }
-            if let Some(run) = run {
-                args.push("--run".to_owned());
-                args.push(run);
-            }
-            run_box(&args);
+            let mut argv = vec!["box".to_owned()];
+            argv.extend(args);
+            return session(&argv, None);
         }
     }
 }
@@ -1444,15 +1658,14 @@ fn attach(args: &[String]) -> ! {
     attach_box(&parsed.id, parsed.command, &parsed.env)
 }
 
-/// Joins the box: its agent by default — attaching means getting back to
-/// the agent, not a shell beside it — or the given command instead.
+/// Runs `command` in the running box, on this terminal. The agent stays
+/// in the terminal the box was started in.
 ///
 /// Takes the same id everything else does. A box is named one way in this
 /// CLI, so what `ps` prints is what `attach` and `--id` accept.
-fn attach_box(id: &str, command: Option<Vec<String>>, env_args: &[run::EnvArg]) -> ! {
+fn attach_box(id: &str, command: Vec<String>, env_args: &[run::EnvArg]) -> ! {
     let data_home = data_home();
     let entry = running_box(&data_home, id);
-    let command = command.unwrap_or_else(|| manifest::attach_command(entry.agent.as_deref()));
     // The baked env, refreshed: the attacher's host wins where it is set,
     // the baked value survives where it is not, fixed never moves. A box
     // started by an older wormhole left none; its attach keeps the old
@@ -1551,6 +1764,29 @@ fn secret_cmd(args: &[String]) -> ! {
         _ => usage("usage: wormhole secret list | set NAME | remove NAME"),
     }
     std::process::exit(0)
+}
+
+/// Keeps a value for every box, without exiting. The same store
+/// `wormhole secret set` writes, so the panel and the command cannot
+/// disagree about what is kept.
+fn keep_secret(name: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("an empty value would keep nothing; give one".to_owned());
+    }
+    let mut store = read_secrets();
+    store.insert(name.to_owned(), value.to_owned());
+    write_secrets(&store);
+    Ok(())
+}
+
+/// Forgets one. The next box whose recipe asks for it asks you again.
+fn forget_secret(name: &str) -> Result<(), String> {
+    let mut store = read_secrets();
+    if store.remove(name).is_none() {
+        return Err(format!("no secret {name} is kept"));
+    }
+    write_secrets(&store);
+    Ok(())
 }
 
 /// The host-side secret store, absent file meaning empty store.
@@ -1715,6 +1951,93 @@ mod tests {
         }
         // A parser that matched nothing would pass every assertion above.
         assert!(found > 10, "only found {found} commands to check");
+    }
+
+    /// The gap this closes: a panel with one key per verb can only have
+    /// as many verbs as there are letters, and the rest of the tool stays
+    /// on the command line. Read off the dispatch itself, like the help
+    /// page is, because a second list is exactly what drifts.
+    #[test]
+    fn every_command_the_dispatch_answers_is_in_the_palette() {
+        use wormhole_core::home;
+        use wormhole_core::tui::{Press, Tui, Viewport};
+
+        let record = |id: &str| {
+            let toml =
+                format!("id = \"{id}\"\nworkspace = \"/w\"\ncreated_unix = 1\nstarted_unix = 2\n");
+            home::parse(&toml, &format!("w-{id}")).expect("a record")
+        };
+        // One running and one idle: a verb that applies to one state is
+        // offered in that state, so what the palette reaches is the union
+        // of both — and offering `stop` on an idle box would be offering
+        // a key that does nothing.
+        let mut panel = Tui::default();
+        panel.refresh(home::Scan {
+            boxes: vec![
+                home::Listing {
+                    record: record("a3f9c1e40b2d"),
+                    running: Some(8213),
+                },
+                home::Listing {
+                    record: record("7d2e04ab91ff"),
+                    running: None,
+                },
+            ],
+            problems: Vec::new(),
+        });
+        let mut offered = String::new();
+        for _ in 0..2 {
+            for entry in panel.commands() {
+                offered.push_str(&entry.command);
+                offered.push('\n');
+            }
+            panel.update(Press::Typed('j'), Viewport::FALLBACK);
+        }
+
+        let source = include_str!("main.rs");
+        for arm in source.split("Some(\"").skip(1) {
+            let names = arm.split('"').next().expect("a quoted name");
+            for name in names.split("\" | \"") {
+                if name.starts_with("__") || name.starts_with('-') {
+                    continue;
+                }
+                assert!(
+                    offered.contains(&format!("wormhole {name}")),
+                    "`wormhole {name}` is dispatched and is in no palette entry:\n{offered}"
+                );
+            }
+        }
+    }
+    /// The default instructions reach every agent in every box, and the
+    /// agent has no terminal: a full-screen program it is told to run
+    /// never returns and never prints. The tools table used to send it to
+    /// `ncdu` and `btop`.
+    #[test]
+    fn the_tools_table_names_no_program_that_needs_a_person() {
+        const INTERACTIVE: [&str; 9] = [
+            "btop", "htop", "top", "ncdu", "less", "more", "vim", "nano", "fzf",
+        ];
+        let mut rows = 0;
+        for line in super::DEFAULT_INSTRUCTIONS.lines() {
+            let mut cells = line.split('|').skip(1).map(str::trim);
+            let (Some(instead), Some(uses)) = (cells.next(), cells.next()) else {
+                continue;
+            };
+            if instead.is_empty() || instead.starts_with("--") || instead == "Instead of" {
+                continue;
+            }
+            rows += 1;
+            for program in INTERACTIVE {
+                let names_it = uses
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|word| word == program);
+                assert!(
+                    !names_it,
+                    "the tools table sends the agent to `{program}`, which needs a terminal: {line}"
+                );
+            }
+        }
+        assert!(rows > 3, "only {rows} table rows were found to check");
     }
 
     /// And the other way: a page that lists a command the tool does not

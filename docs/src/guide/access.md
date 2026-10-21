@@ -40,8 +40,11 @@ default deny — see [what it can dial](#what-it-can-dial). Inside:
   workspace, is shared; a box that has been fed something hostile is
   reset (`wormhole reset`), not trusted. See
   [boxes](boxes.md#one-box-many-workspaces).
-- **Environment** — only declared variables. An undeclared host variable
-  never reaches the box.
+- **Environment** — only declared variables, plus a `PATH` of the box's
+  own: `~/.local/bin` first, the image's directories after. A login shell
+  (`sh -lc`, which hooks and codex use) is told the same through
+  `/etc/profile.d/00-wormhole.sh`, so `/etc/profile` cannot reset it. An
+  undeclared host variable never reaches the box.
 - **DNS** — the manifest's named resolver, or the host's own
   `/etc/resolv.conf` bound read-only.
 
@@ -102,6 +105,13 @@ services that gate on their own credential (X11 wants its cookie, which
 is a file the box does not have) stay shut, and anything that must be
 unreachable belongs behind that gate or off the host, exactly as for any
 other agent you run un-sandboxed on your network.
+
+What has no gate of its own is a way out of every box. Two met in
+practice: moshi-hook's gateway on `127.0.0.1:24543`, which obeys whoever
+reaches it and can type into any tmux pane, and Tailscale SSH, which lets
+any process on a tailnet device log in where the policy allows, with no
+key. Keep both off a host that runs boxes; [From your phone](remote.md)
+reaches every box without either.
 
 Every launch prints what it got beyond the baseline — the workspace, the
 host's own resolver, a copied root:

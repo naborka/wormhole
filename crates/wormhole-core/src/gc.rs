@@ -53,7 +53,7 @@ pub struct Sweep {
 
 impl Verdict {
     /// Whether this sweep takes it.
-    fn taken_by(&self, sweep: Sweep) -> bool {
+    pub fn taken_by(&self, sweep: Sweep) -> bool {
         match self {
             Verdict::Dead(_) => true,
             Verdict::Unreferenced(_) => sweep.unreferenced,
@@ -61,7 +61,7 @@ impl Verdict {
         }
     }
 
-    fn reason(&self) -> &str {
+    pub fn reason(&self) -> &str {
         match self {
             Verdict::Dead(r)
             | Verdict::Live(r)
@@ -70,7 +70,7 @@ impl Verdict {
         }
     }
 
-    fn word(&self) -> &'static str {
+    pub fn word(&self) -> &'static str {
         match self {
             Verdict::Dead(_) => "dead",
             Verdict::Live(_) => "live",
@@ -255,6 +255,14 @@ pub fn plan(items: &[Item], sweep: Sweep) -> Plan<'_> {
 /// What `wormhole gc` prints: every item, with the total that would be
 /// given back. Sizes are shown for everything, including what is kept — a
 /// pile you cannot see is a pile you cannot decide about.
+/// What a sweep would give back and what it would keep, in bytes. One
+/// body, so the report and the screen cannot show two totals.
+#[must_use]
+pub fn weights(plan: &Plan<'_>) -> (u64, u64) {
+    let weight = |of: &[&Item]| -> u64 { of.iter().map(|item| item.bytes).sum() };
+    (weight(&plan.take), weight(&plan.keep))
+}
+
 pub fn report(items: &[Item], sweep: Sweep, plan: &Plan<'_>) -> String {
     if items.is_empty() {
         return "nothing in the data home yet\n".to_owned();
@@ -275,11 +283,11 @@ pub fn report(items: &[Item], sweep: Sweep, plan: &Plan<'_>) -> String {
         ]);
     }
     let mut text = crate::table::render(&rows);
-    let weight = |of: &[&Item]| -> u64 { of.iter().map(|item| item.bytes).sum() };
+    let (taken, kept) = weights(plan);
     text.push_str(&format!(
         "\n{} reclaimable, {} kept\n",
-        Bytes(weight(&plan.take)),
-        Bytes(weight(&plan.keep))
+        Bytes(taken),
+        Bytes(kept)
     ));
     if !sweep.delete && !plan.take.is_empty() {
         text.push_str("nothing was removed; run `wormhole gc --delete` to give it back\n");

@@ -173,7 +173,7 @@ fn a_dead_box_that_never_wrote_an_entry_is_still_reaped() {
 /// A box that died without cleanup must not haunt the listing: its entry
 /// is removed, not just skipped.
 #[test]
-fn a_dead_boxs_entry_is_reaped() {
+fn a_dead_box_entry_is_reaped() {
     let temp = tempfile::tempdir().expect("temp dir");
     let dead = 4_000_000; // beyond any default pid_max
     write_entry(temp.path(), dead);
@@ -240,4 +240,46 @@ fn a_box_nobody_has_is_refused_by_name() {
         String::from_utf8_lossy(&output.stderr).contains("ghost"),
         "{output:?}"
     );
+}
+
+/// The gap this closes: a box's record has always carried every workspace
+/// it served, and every surface said `+N` and stopped. A fact reachable
+/// only from a panel is a fact no script can have.
+#[test]
+fn ps_names_every_workspace_one_box_has_served() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let data = temp.path();
+    let here = common::a_dir(data, "proj");
+    let other = common::a_dir(data, "other");
+    let gone = data.join("deleted");
+
+    let id = wormhole_core::paths::box_id(&here, 0);
+    let mut record = common::a_record(&here, &id, None);
+    record.earlier = vec![other.clone(), gone.clone()];
+    common::keep_box(data, &record);
+
+    let said = common::said(&run_ps(data, &["ps", &id]));
+
+    // The row still says `+2`; the block under it says which two.
+    assert!(said.contains("+2"), "{said}");
+    assert!(said.contains("workspaces:"), "{said}");
+    assert!(
+        line_of(&said, &here.display().to_string()).ends_with("(last used)"),
+        "{said}"
+    );
+    assert!(said.contains(&other.display().to_string()), "{said}");
+    assert!(
+        line_of(&said, &gone.display().to_string()).ends_with("(gone)"),
+        "{said}"
+    );
+}
+
+/// The one line of `said` that names `what`, trimmed. The table pads to
+/// its widest cell, so a test that asserted on the padding would be
+/// asserting on the other rows.
+fn line_of<'a>(said: &'a str, what: &str) -> &'a str {
+    said.lines()
+        .rfind(|line| line.contains(what))
+        .unwrap_or_else(|| panic!("nothing named {what} in:\n{said}"))
+        .trim()
 }

@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs;
 use std::net::IpAddr;
 use std::os::unix::process::ExitStatusExt;
@@ -85,7 +85,7 @@ pub fn run(
         let _ = child.wait();
         fail(&e);
     }
-    ignore_terminal_signals();
+    let _quiet = ignore_terminal_signals();
     match child.wait() {
         Ok(status) => exit_code(wait_outcome(status)),
         Err(e) => fail(&format!("cannot wait for boxed child: {e}")),
@@ -187,7 +187,7 @@ pub fn attach(
     let forked = unsafe { fork() };
     match forked {
         Ok(ForkResult::Parent { child }) => {
-            ignore_terminal_signals();
+            let _quiet = ignore_terminal_signals();
             report(child)
         }
         Ok(ForkResult::Child) => {
@@ -260,14 +260,33 @@ fn die_with_launcher(child: &mut Command) {
 /// the processes waiting on it died, the shell would take the prompt back
 /// while the box still owned the terminal. Installed only after the child
 /// exists, because `SIG_IGN` survives `execve` and would otherwise
-/// silence the command too.
-fn ignore_terminal_signals() {
+/// silence the command too. Dropping the guard restores the old handlers,
+/// for a waiter that goes on living — the panel.
+#[must_use]
+pub(crate) fn ignore_terminal_signals() -> TerminalSignals {
     let ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+    let mut before = Vec::new();
     for signal in [Signal::SIGINT, Signal::SIGQUIT] {
         #[expect(unsafe_code, reason = "SigIgn installs no handler code")]
         let done = unsafe { sigaction(signal, &ignore) };
-        if let Err(e) = done {
-            fail(&format!("cannot ignore {signal}: {e}"));
+        match done {
+            Ok(old) => before.push((signal, old)),
+            Err(e) => fail(&format!("cannot ignore {signal}: {e}")),
+        }
+    }
+    TerminalSignals { before }
+}
+
+/// What the terminal signals did before they were ignored.
+pub(crate) struct TerminalSignals {
+    before: Vec<(Signal, SigAction)>,
+}
+
+impl Drop for TerminalSignals {
+    fn drop(&mut self) {
+        for (signal, old) in &self.before {
+            #[expect(unsafe_code, reason = "restores the action sigaction handed back")]
+            let _ = unsafe { sigaction(*signal, old) };
         }
     }
 }
@@ -329,7 +348,7 @@ fn fork_into_box(
             {
                 fail(&format!("cannot write pidfile {pidfile}: {e}"));
             }
-            ignore_terminal_signals();
+            let _quiet = ignore_terminal_signals();
             report(child)
         }
         Ok(ForkResult::Child) => {
@@ -845,22 +864,64 @@ fn apply(root: &Path, op: &MountOp) -> Result<(), String> {
             std::os::unix::fs::symlink(to, &link)
                 .map_err(|e| format!("cannot symlink {}: {e}", link.display()))
         }
+        MountOp::Mirror { image, dir, except } => mirror(root, image, dir, except),
     }
 }
 
+/// The image's entries in `dir`, bound read-only into the writable layer
+/// at the same place in `root`. A `dir` the image reaches through a symlink
+/// lends nothing: following one here would read the host, not the image.
+fn mirror(root: &Path, image: &Path, dir: &Path, except: &[OsString]) -> Result<(), String> {
+    let mut source = image.to_owned();
+    for part in dir.components().skip(1) {
+        source.push(part);
+        match fs::symlink_metadata(&source) {
+            Ok(meta) if meta.is_dir() => {}
+            _ => return Ok(()),
+        }
+    }
+    let target = make_dir(root, dir)?;
+    let entries =
+        fs::read_dir(&source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+        let name = entry.file_name();
+        if except.contains(&name) {
+            continue;
+        }
+        let from = entry.path();
+        let to = target.join(&name);
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+        if kind.is_symlink() {
+            let link =
+                fs::read_link(&from).map_err(|e| format!("cannot read {}: {e}", from.display()))?;
+            std::os::unix::fs::symlink(&link, &to)
+                .map_err(|e| format!("cannot symlink {}: {e}", to.display()))?;
+        } else {
+            bind_into(&from, &to, false)?;
+        }
+    }
+    Ok(())
+}
+
 fn bind(root: &Path, source: &Path, target: &Path, rw: bool) -> Result<(), String> {
-    let target = in_root(root, target);
+    bind_into(source, &in_root(root, target), rw)
+}
+
+/// `target` is a path in the scratch root, made here as a mount point.
+fn bind_into(source: &Path, target: &Path, rw: bool) -> Result<(), String> {
     if source.is_dir() {
-        fs::create_dir_all(&target)
+        fs::create_dir_all(target)
             .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
     } else {
-        create_parent(&target)?;
-        fs::File::create(&target)
-            .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+        create_parent(target)?;
+        fs::File::create(target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
     }
     mount(
         Some(source),
-        &target,
+        target,
         None::<&str>,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
@@ -872,7 +933,7 @@ fn bind(root: &Path, source: &Path, target: &Path, rw: bool) -> Result<(), Strin
             target.display()
         )
     })?;
-    if rw { Ok(()) } else { remount_ro(&target) }
+    if rw { Ok(()) } else { remount_ro(target) }
 }
 
 /// Read-only remount of a bind. The kernel refuses to drop flags a less

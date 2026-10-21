@@ -61,7 +61,7 @@ the box's kept home, with `WORMHOLE_RUN` set to `claude`, `codex` or
 Nothing here is a wormhole schema. The hook calls each CLI's own
 commands, so wormhole never lags behind a CLI it does not control.
 
-Four rules:
+Seven rules:
 
 1. **Branch on `WORMHOLE_RUN`.** Each product has its own binary, its own
    MCP command and its own idea of a plugin.
@@ -92,6 +92,40 @@ Four rules:
    Keep what should stay current, like updating the CLI itself, above
    the guard.
 
+6. **Install a CLI the way its own installer does.** A CLI is often a
+   tree, not a binary: codex spawns `codex-code-mode-host` from beside
+   its own real path, so a lone `codex` binary starts, reports the right
+   version, and then fails mid-task with "host executable was not
+   found". Take the vendor's whole package and link to it, so the next
+   helper it adds arrives on its own.
+
+   ```sh
+   # the tree moves as one; $HOME/.local/bin/codex is a link into it
+   curl -fsSL ".../codex-package-$musl.tar.gz" | tar -xz -C "$pkg.new"
+   rm -rf "$pkg" && mv "$pkg.new" "$pkg"
+   ln -sfn "$pkg/bin/codex" "$bin/codex"
+   ```
+
+7. **Name and pin what you install.** A skill is instructions the agent
+   follows. `--skill '*'` hands the box whatever a third party added this
+   week, and an unpinned commit changes how the box behaves between
+   starts. It is a context budget as well: every installed skill's
+   description sits in the model's prompt for the whole session, so a
+   skill nobody uses is paid for on every message. Measured in `alphaca`
+   on 2026-09-20 — 59 skills installed, 37 of them in the listing, about
+   1,900 tokens a session; the named set is 21 skills and about 1,000.
+
+   Let the hook own the set, or an earlier run's picks stay forever:
+
+   ```sh
+   npx -y skills remove --all -g   # then add the ones this hook names
+   ```
+
+   Same for a CLI's own rule bundles. A skill that loads 265 rules in one
+   file costs ~9,500 tokens the moment it is invoked; the same guidance as
+   a `rules` file the persona points at costs a fraction, and lives in
+   your repository where you can read it.
+
 The shipped `alphaca` hook does exactly this. Measured on 2026-09-13,
 one `skills add` of `mattpocock/skills` took 3.6 s into an empty home and
 2.6 s again into one that already had them: the installer fetches every
@@ -110,11 +144,12 @@ case "$run" in                       # the CLI, and each tool's name for it
     *) echo "unknown product $run" >&2; exit 1 ;;
 esac
 
-# skills: -g puts them in the kept home, not the workspace
-for repo in JuliusBrussee/caveman mattpocock/skills; do
-    npx -y skills add "$repo" --skill '*' -a "$skills_agent" -g --yes </dev/null \
-        || echo "WARN: skills add $repo failed" >&2
-done
+# skills: named, from a pinned commit; -g keeps them out of the workspace
+npx -y skills remove --all -g </dev/null >/dev/null 2>&1 || true
+git init -q "$src" && git -C "$src" fetch -q --depth 1 "$repo_url" "$sha" \
+    && git -C "$src" checkout -q FETCH_HEAD
+npx -y skills add "$src" -s tdd -s code-review -a "$skills_agent" -g --yes </dev/null \
+    || echo "WARN: skills add failed" >&2
 
 # MCP: every CLI has `mcp add`, each with its own config file
 "$run" mcp add context7 -- npx -y @upstash/context7-mcp </dev/null \
@@ -429,7 +464,9 @@ travel by seeding into the box's kept home before start:
   actually reads gets a pointer to it — `.claude/CLAUDE.md` holding
   `@~/AGENTS.md`, or a symlink at `.codex/AGENTS.md` and
   `.grok/rules/AGENTS.md` — so the text exists once however many agents
-  learn to read it
+  learn to read it. Both are rewritten on every start, so a line a tool
+  appends to either lives one session; text that must stay belongs in the
+  role's instructions
 - `[agent] preflight` is copied to `.wormhole/preflight` in the box home
   and run from there, fresh on every start, with `WORMHOLE_RUN` set to the
   product this box is. Removed when the manifest stops naming one, so

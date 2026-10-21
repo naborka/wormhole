@@ -448,6 +448,8 @@ struct KnownAgent {
     /// Variables the box sets for this agent, for what it settles that no
     /// config file holds. A manifest that declares one means it and wins.
     env: &'static [(&'static str, &'static str)],
+    /// Files the box owns in the home, written fresh at every start.
+    files: &'static [(&'static str, &'static str)],
 }
 
 const TRUE: Literal = Literal::Bool(true);
@@ -506,6 +508,9 @@ const CLAUDE_SETTINGS: ConfigFile = ConfigFile {
         // model. CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK goes further but is
         // undocumented; this documented key is what holds if it goes.
         initial(&[], "switchModelsOnFlag", Literal::Bool(false)),
+        // Read from settings since at least 2.1.246. The bell is the one
+        // alert every terminal and multiplexer passes on.
+        initial(&[], "preferredNotifChannel", Literal::Text("terminal_bell")),
     ],
     model_key: None,
     login_fields: &[],
@@ -526,6 +531,13 @@ const CODEX_CONFIG: ConfigFile = ConfigFile {
         settled(&[], "web_search", Literal::Text("live")),
         // A popup offering a cheaper model near the rate limit.
         settled(&[Key::Name("notice")], "hide_rate_limit_model_nudge", TRUE),
+        // Its default rings only after the terminal reports losing focus,
+        // which tmux does not by default.
+        initial(
+            &[Key::Name("tui")],
+            "notification_condition",
+            Literal::Text("always"),
+        ),
     ],
     model_key: Some("model"),
     login_fields: &[],
@@ -577,6 +589,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
             ("IS_SANDBOX", "1"),
             ("CLAUDE_CODE_SANDBOXED", "1"),
         ],
+        files: &[],
     },
     KnownAgent {
         name: "codex",
@@ -592,6 +605,11 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         credential_write: CredentialWrite::InPlace,
         config: &[CODEX_CONFIG],
         env: &[],
+        // Under approval_policy = "never" codex forbids rm -f outright.
+        files: &[(
+            ".codex/rules/wormhole.rules",
+            "prefix_rule(pattern = [\"rm\"], decision = \"allow\")\n",
+        )],
     },
     KnownAgent {
         name: "grok",
@@ -611,6 +629,7 @@ const KNOWN_AGENTS: [KnownAgent; 3] = [
         // `--trust` grants the launch directory alone; a nested repository
         // or a moved workspace would ask again.
         env: &[("GROK_FOLDER_TRUST", "0")],
+        files: &[],
     },
 ];
 
@@ -868,15 +887,6 @@ pub fn agent_command(manifest: &Manifest) -> Result<Vec<String>, ManifestError> 
     Ok(agent.command())
 }
 
-/// What `attach` runs when the user names no command: the box's agent
-/// when it has one, a shell otherwise.
-pub fn attach_command(agent: Option<&str>) -> Vec<String> {
-    match agent.and_then(known) {
-        Some(agent) => agent.command(),
-        None => vec!["/bin/sh".to_owned()],
-    }
-}
-
 /// Where the agent reads its own instructions, relative to the box home,
 /// and how that path delivers the canonical `AGENTS.md`. One lookup, so
 /// the path and the pointer planted at it cannot disagree. `None` when
@@ -893,6 +903,16 @@ pub fn pointer_link(target: &str) -> String {
     let mut link = "../".repeat(target.matches('/').count());
     link.push_str(INSTRUCTIONS_SEED);
     link
+}
+
+/// The files the box owns in this agent's home, fresh at every start.
+#[must_use]
+pub fn owned_files(manifest: &Manifest) -> &'static [(&'static str, &'static str)] {
+    manifest
+        .agent
+        .product()
+        .and_then(known)
+        .map_or(&[], |agent| agent.files)
 }
 
 /// Every config file a start writes for this agent, every value resolved:
@@ -1612,16 +1632,6 @@ mod tests {
     }
 
     #[test]
-    fn attach_without_a_command_runs_the_agent_or_a_shell() {
-        assert_eq!(
-            attach_command(Some("claude")),
-            vec!["claude", "--dangerously-skip-permissions"]
-        );
-        assert_eq!(attach_command(None), vec!["/bin/sh"]);
-        assert_eq!(attach_command(Some("telepathy")), vec!["/bin/sh"]);
-    }
-
-    #[test]
     fn no_agent_means_nothing_to_run() {
         assert_eq!(agent_command(&full("")), Err(ManifestError::NoAgent));
     }
@@ -2107,6 +2117,21 @@ mod tests {
                 "--dangerously-bypass-approvals-and-sandbox".to_owned()
             ])
         );
+    }
+
+    /// `approval_policy = "never"` turns codex's own `rm -f` heuristic
+    /// from a prompt into a refusal, so the box answers it with a rule.
+    #[test]
+    fn codex_may_rm_because_the_box_holds_the_line() {
+        let manifest = full("[agent]\nrun = \"codex\"\n");
+        assert_eq!(
+            owned_files(&manifest),
+            [(
+                ".codex/rules/wormhole.rules",
+                "prefix_rule(pattern = [\"rm\"], decision = \"allow\")\n"
+            )]
+        );
+        assert!(owned_files(&full("[agent]\nrun = \"claude\"\n")).is_empty());
     }
 
     #[test]

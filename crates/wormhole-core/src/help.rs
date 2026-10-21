@@ -72,12 +72,12 @@ const BOXES: &[Line] = &[
     Line {
         name: "ps",
         args: "[--all | ID|NAME]",
-        blurb: "what runs; --all every box; one box, with its env",
+        blurb: "what runs; --all every box; one box, in full",
     },
     Line {
         name: "attach",
         args: "ID|NAME [-- CMD...]",
-        blurb: "a second terminal into a running box",
+        blurb: "a shell in a running box, or CMD",
     },
     Line {
         name: "stop",
@@ -207,9 +207,9 @@ const AFTER_BOXES: &str = r#"
   copy (yours, copied in once), share (your file, bound read-write).
 
 PANEL   (bare `wormhole`)
-  enter join or start · n new · d stop · x remove · r reset · q quit
-  n: pick a role, then claude/codex/grok if the role lists more than one.
-  Enter on a row resumes that box's product. x and r ask; y answers.
+  Five tabs (`tab`): boxes, roles, store, secrets, host. `?` lists that
+  tab's keys, `/` filters, `:` runs any command here. x and r ask, y is yes.
+  Enter joins a running box, or asks an idle one which folder to start in.
 
 MANIFEST
   ./wormhole.toml is the whole recipe; nothing reaches the box unless it

@@ -38,6 +38,20 @@ a3f9c1e40b2d  Alphaca  api    running 8213  alphaca  claude  2m         /home/me
 c518bb0d7a34  -        -      idle          -        claude  2d1h       /home/me/notes
 ```
 
+A `+2` on the end of a `WORKSPACE` cell means that box has served two
+more. `wormhole ps <id>` names them, and says which are still there:
+
+```
+$ wormhole ps a3f9c1e40b2d
+ID            NAME     ALIAS  STATE         ROLE     AGENT  LAST USED  WORKSPACE
+a3f9c1e40b2d  Alphaca  api    running 8213  alphaca  claude  2m        /home/me/proj +2
+
+workspaces:
+  /home/me/proj      (last used)
+  /home/me/rust/a
+  /home/me/rust/old  (gone)
+```
+
 ## Names
 
 An id is derived and cannot be chosen. Give a box a name and type that
@@ -309,9 +323,13 @@ To get a second terminal into a box that is already running, attach to it
 rather than starting it again:
 
 ```sh
-wormhole attach a3f9c1e40b2d          # its agent
-wormhole attach a3f9c1e40b2d -- sh    # a shell beside it
+wormhole attach a3f9c1e40b2d             # a shell in it
+wormhole attach a3f9c1e40b2d -- git log  # any command in it
 ```
+
+The agent stays in the terminal the box was started in. Start boxes in a
+tmux, herdr or zellij pane and that terminal can be reached from any other
+one, a phone included: [From your phone](remote.md).
 
 ## From the panel
 
@@ -319,19 +337,68 @@ wormhole attach a3f9c1e40b2d -- sh    # a shell beside it
 wormhole
 ```
 
-The panel lists every box, running and idle, most recently used first.
-Enter does the one thing that row allows — join a box that is running,
-start one that is not.
+The panel has five tabs, one per noun this tool has. `tab` moves between
+them:
+
+```
+[boxes] roles  store  secrets  host
+```
+
+- **boxes** — every box, running and idle, most recently used first
+- **roles** — what is installed, and whether each can start
+- **store** — what the data home holds and what of it can be given back
+- **secrets** — the names of values `ask` keeps, never the values
+- **host** — the probes `wormhole doctor` runs
+
+Every tab shares four keys. `?` lists that tab's own keys on a screen of
+its own — including the ones the hint line has no room for. `/` narrows
+the list to what you type next, and while you are typing it every letter
+is a letter rather than the key it spells. `:` opens every command this
+tool has, bound to the row the cursor is on and showing the exact command
+line each one is. `q` leaves; `esc` takes back a filter first.
+
+On the boxes tab, enter does the one thing that row allows — join a box
+that is running, start one that is not. The session runs on this
+terminal, and when it ends the panel is back, with the list as it now
+is. A session that failed waits for a key first, so what it printed can
+be read before the panel covers it.
 
 | Key | What it does |
 |---|---|
-| `enter` | join a running box, or start an idle one |
-| `n` | new box: pick a role, then the CLI |
+| `enter` | join a running box, or ask where to start an idle one |
+| `n` | new box: pick a role, then everything a start can be told |
 | `d` | stop the running box on this row |
+| `N` | name this box, without starting it |
 | `x` | remove this box — asks first |
 | `r` | reset this box, keeping the box — asks first |
 | `y` | the one key that answers a question |
 | `q` | quit, or take back a question |
+
+`j`/`k` and the arrows move; `g` and `G` go to the first and last row;
+PageUp and PageDown move a screenful. `?` names all of them.
+
+Under the list is everything the table has no column for, about the box
+the cursor is on: what it answers to, what it runs, the recipe it was made
+from, and every workspace it has served. The table says `+2` at the end of
+a row; this is what those two are.
+
+```
+  ID            NAME       STATE  AGENT   LAST USED  WORKSPACE
+> a4ae69443c54  Alphaca    idle   grok    3d0h       ~/work/checkout +2
+
+alias       -
+state       idle
+product     grok
+role        dir:/home/me/roles/alphaca-java
+workspaces
+            /home/me/work/checkout  (last used)
+            /home/me/rust/a
+            /home/me/rust/old  (gone)
+```
+
+A workspace marked `(gone)` is one the box served and that is not there
+any more. It is shown because it is part of what the box is, and it is
+never offered as somewhere to start.
 
 `x` and `r` both take an agent's history, so both ask before they act, and
 `y` is the only key that answers. **Every** other key cancels — `q`
@@ -347,11 +414,100 @@ under the hints, and the next key clears it. `d` on a box that is not
 running is that case: it kills nothing, and it tells you rather than
 redrawing a screen that looks unchanged.
 
-Resuming from the panel starts the box where it has already run: in the
-workspace the panel was opened in when the box has run there, otherwise in
-the latest of its workspaces that still exists. Never anywhere it has not
-run — the panel may be open in `~`, and Enter names a box, not a folder
-to hand it. To start a box somewhere new, `wormhole box --id` there.
+### Enter: which folder to start in
+
+A box can have worked in several folders, so starting one is two
+questions: which box, and where. Enter on an idle box asks the second:
+
+```
+start this box in:
+
+> /home/me/work/checkout  (last used)
+  /home/me/rust/a
+  /home/me/proj           (here, never run in)
+
+  enter choose   q back
+```
+
+The cursor starts on the folder a start that asked nobody would have
+taken — the one you are standing in when the box has worked there,
+otherwise the one it used last. So agreeing costs one more keystroke than
+not being asked, and disagreeing is possible at all, which it was not when
+the panel chose silently.
+
+A folder that is gone is not offered, because it is not somewhere a box
+can start. `wormhole ps <id>` still lists it, marked `(gone)`, because it
+is part of what the box is.
+
+The last entry, `(here, never run in)`, appears when the box may run in
+the folder you are standing in and never has. Choosing it is the same
+thing `wormhole box --id <id>` typed in a new folder does: it points the
+box's kept home, with its history and its logins, at this folder, and adds
+this folder to the ones it can be resumed in. So it is not done on a
+keystroke — the screen says what it means and shows the whole recipe under
+it, and Enter is what agrees:
+
+```
+box a4ae69443c54 has never run in /home/me/proj.
+Starting it here points its kept home — its history, its logins, whatever
+it installed — at this tree, and adds this tree to the list it can be
+resumed in.
+
+manifest: role alphaca-java
+...
+enter start   jk scroll   q back
+```
+
+A box made from a folder's own `wormhole.toml` is never offered a second
+folder. Its recipe is that file, so it runs where that file is, and the
+list it is asked about holds one entry.
+
+### `n`: everything a start can be told
+
+`n` asks what the box starts from — this workspace's `wormhole.toml` or an
+installed role — then, when that role lists more than one, which CLI. Then
+it shows what the start will be, as the command line it is:
+
+```
+start a box with:
+
+> recipe               alphaca
+  product              grok
+  name                 none; the id names it
+  login                what the recipe says
+  variable             only what the recipe declares
+  instead of the agent nothing; the agent runs
+
+  wormhole box --new --role alphaca --run grok
+```
+
+Enter on a line sets it; enter on the last line starts. The login cycles
+through `none`, `copy` and `share` rather than being typed. What is unset
+reads as what leaving it unset means, the same way the permission preview
+reads. The last line is the command, and it is the command that runs — so
+the screen cannot promise an argument the start would refuse.
+
+### The other tabs
+
+**roles** lists what is installed. Enter shows a role's whole recipe, the
+same screen `wormhole role show` prints. `a` installs a role you wrote,
+by the directory it lives in. `x` takes a name back and leaves the
+directory alone.
+
+A role pinned to somebody else's commit is still installed with `wormhole
+role add <url>@<sha>`. Fetching a stranger's repository and approving the
+shell it would run on your machine is the one thing in this tool that has
+to be asked for deliberately, so it stays a command you typed.
+
+**store** is `wormhole gc` as a list: every item, what can be proven about
+it, and how big it is. `u` widens the count to what no box on this host
+references. `x` gives back everything the sweep has proven, asking first.
+
+**secrets** lists the names of what `ask` has kept — never the values. `s`
+keeps one, reading it masked. `x` forgets one.
+
+**host** is `wormhole doctor`: every probe and its result, with the detail
+of a failure under the list. `r` runs them again.
 
 A home the panel cannot read is named under `could not read:`, on the
 panel's own screen — nothing prints over the box list while the panel is

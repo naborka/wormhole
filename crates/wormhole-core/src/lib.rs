@@ -20,6 +20,10 @@ pub mod table;
 pub mod terminfo;
 pub mod tui;
 
+/// Which wormhole this is. One constant, so the line `version` prints
+/// and the line the panel shows cannot come from two places.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// The one spelling of a SHA-256 digest everywhere in wormhole:
 /// lowercase hex, full length. Cache names, recipe digests and rootfs
 /// verification all compare these strings, so one body owns the format.

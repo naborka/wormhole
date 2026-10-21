@@ -9,6 +9,303 @@ true.
 
 ## Unreleased
 
+### Fixed: a read-only root could not start a box
+
+`[runtime] rootfs = "readonly"` bound the image itself as the box's root,
+and then had to make a mount point for your home at `/home/<you>` inside
+it, which a read-only image cannot take. Every such start failed with
+"Read-only file system". The root is now a small in-memory layer with the
+image's own directories lent back read-only, one by one: nothing is copied,
+nothing is written into the image, and `/usr` still refuses every write.
+
+### Every box from a phone, with tmux as it is
+
+A box runs in the terminal you start it in, and in a tmux window that is
+all a phone needs: Moshi, or any SSH app, lists the session, opens the tab
+and finds the agent running. Open a new tab, start the panel there, and
+Enter runs the box right in that tab; another box wants another tab.
+wormhole asks tmux for nothing and needs no setting, on any computer.
+Claude and Codex boxes now ring the terminal bell whenever they need you,
+so tmux marks their tab and every terminal attached hears it.
+`wormhole attach` now opens a shell in the box instead of starting a second
+agent beside the first: the agent stays in its own tab. The handbook's new
+"From your phone" page has the rest, including which tmux defaults to keep
+and why moshi-hook and Tailscale SSH must stay off a wormhole host: every
+box can reach both.
+
+### Fixed: a login shell lost the box's `PATH`
+
+Codex runs every command and hook through `sh -lc`, and Alpine's
+`/etc/profile` opens by setting `PATH` to the image's directories. So
+`rtk`, `codex` and whatever else the preflight put in `~/.local/bin`
+answered "not found" from every hook and every rewritten command, while
+the same binaries ran fine by absolute path. The box now writes its own
+`PATH` into `/etc/profile.d/00-wormhole.sh` at every start, which
+`/etc/profile` sources after its own line, so a login shell ends where
+the exec began.
+
+### Codex may `rm`
+
+Codex forbids `rm -f` outright under `approval_policy = "never"`: with
+prompts off it cannot ask, so it refuses, and the bypass flag does not
+reach that check. In a box the workspace is the only thing that
+survives, version control is the undo point, and the box is what holds
+the line, so every codex start now writes `~/.codex/rules/wormhole.rules`
+allowing `rm`.
+
+### The `alphaca` box carries more of what a task needs
+
+Measured against one day's work in it: `pnpm` (JavaScript build; a
+repository's `packageManager` pin switches to that version's JavaScript
+build, never the native one, which has no musl binary), `python3` for
+the skills that ship scripts, PostgreSQL 17 with pgvector for a
+disposable test database, `tzdata` so a time zone name resolves, GNU
+`tar`. rtk's display emoji are turned off, as the box's writing rule
+asks. Playwright's browsers stay out, Alpine cannot run them; the box
+instead takes `PW_TEST_CONNECT_WS_ENDPOINT` from the host, so a host-side
+`npx playwright run-server` serves the suite. `rules/box.md` says how
+each is used. `tar` and `tzdata` join every Alpine recipe shipped here,
+and a test keeps them there.
+
+### Fixed: a codex box died at its first start
+
+Codex now starts a background app-server on every run, and records the
+process it spawned by asking `ps -p <pid> -o stat= -o lstart=`. Alpine's
+`ps` is a BusyBox applet that knows neither `-p` nor `lstart`, so the
+question failed and codex exited with "failed to read start time for
+pid-managed app server" before the agent ever appeared. The `alphaca`
+role now installs `procps-ng`, whose `ps` answers, and a test keeps it in
+every Alpine recipe that can run codex. Same class as the `grep` fix
+below: a BusyBox applet refusing the flags a program writes.
+
+### The panel comes back
+
+Enter used to exec into the box: the panel was a launcher that exited,
+and when the agent ended you had a shell prompt and typed `wormhole`
+again. Now the session runs as a child on the same terminal and the panel
+is drawn again when it ends, with the list as it now is. A session that
+failed waits for a key first, so its message is read before the panel
+covers it. Ctrl-C still belongs to the session: the panel waiting behind
+it ignores the signal while it waits, and takes its handlers back after.
+
+### Fixed: the box's `grep` was BusyBox, and it refused the agent
+
+Alpine's `grep`, `find`, `sed`, `diff` and `tree` are BusyBox applets,
+and BusyBox refuses the GNU flags every agent writes. Worse, the rtk hook
+that compacts Claude's command output passes `--null` to whatever `grep`
+is on the path, so in the shipped image every plain `grep` from Claude
+failed with a usage message, and `rtk tree` printed its own options back
+as errors. Run directly, BusyBox grep took four and a half minutes over
+this repository where GNU grep took nine seconds and ripgrep well under
+one — longer than the agent waits, so it looked like a hang.
+
+Every Alpine recipe this repository ships — the workspace's own, the
+`alphaca` role, and the starter `wormhole init` writes — now installs the
+GNU `grep`, `findutils`, `sed`, `coreutils`, `diffutils`, `gawk` and
+`tree`, three megabytes together, and a test keeps it so. The default
+instructions no longer send the agent to `ncdu` and `btop`, which are
+full-screen programs that never return in a pipe; a second test keeps
+that table free of programs that need a person.
+
+### Fixed: a codex box got nothing from rtk
+
+rtk is what keeps command output short for the agent. For codex it did
+nothing: its codex hook answers no rewrite for the payload codex sends,
+and the instructions line it appended went through wormhole's
+`.codex/AGENTS.md` symlink into the canonical file, which the next start
+rewrites. The alphaca hook now writes codex's `hooks.json` itself, pointing
+at the rtk processor that does answer, and the role's own instructions
+carry the text rtk used to append. The guide says why: pointer files are
+rewritten every start. Measurements in `docs/research/box-tools-jvm.md`.
+
+### The alphaca box builds and tests faster, and says less
+
+Measured inside the box, on this repository: linking with `mold` takes a
+rebuild after an edit from 2.3 s to 1.0 s; `cargo nextest` runs the suite
+in 1.8 s instead of 2.4 s and, with two environment variables the role now
+fixes, reports 595 tests in 510 bytes instead of 44 KB. `ast-grep` answers
+"any `.unwrap()` outside tests?" with the exact number where ripgrep hands
+back 25 lines to read. `jq`, `hyperfine`, `shellcheck` and `typos` join
+them; the last two found a one-item loop in the role's own hook and two
+misspelled test names, both fixed. The measurements and the verdict on
+every other tool from the usual lists are in `docs/research/box-tools.md`.
+
+### Enter asks which folder, instead of guessing
+
+A box remembers every folder it has worked in, and Enter picked one for
+you: the folder you were standing in if the box had worked there,
+otherwise the one it used last. That guess was right often enough to be
+invisible, and when it was wrong there was no way to say so — which was
+the original complaint, and `w` only answered it for people who had found
+`w`.
+
+Enter on an idle box now asks. The list is the folders that box can
+actually be started in, each marked: the one it used last, the one you are
+standing in, and — when the box may run here and never has — the one you
+are standing in as somewhere new. The cursor starts on the folder the old
+guess would have taken, so agreeing costs one more keystroke than not
+being asked at all, and disagreeing is possible, which it was not before.
+
+Choosing the new folder still shows what it means and the whole recipe
+under it before anything starts: pointing a box's kept home at a tree it
+has never seen is what `wormhole box --id X` typed there already did, and
+it should not happen on a reflex.
+
+`w` is gone. It did exactly what Enter now does, and a second key for one
+thing is a key that can start meaning something else.
+### The panel reaches the whole tool, not just boxes
+
+The panel listed boxes and did six things to them. Roles, the store, the
+kept secrets and the host check had no screen at all, and a start from it
+could not say what to call the box, which login to use, which variable to
+carry or what to run instead of the agent. Those were command-line-only,
+which meant quitting the panel to do most of what this tool does.
+
+It now has five tabs, one per noun the tool has, and `tab` moves between
+them: boxes, roles, store, secrets, host. Roles lists what is installed
+and shows any role's whole recipe; `a` installs one you wrote and `x`
+takes a name back. The store is `wormhole gc` as a list you can look
+through before giving anything back. Secrets lists the names of what has
+been kept, never the values, and keeps or forgets one. Host is the doctor
+check, re-run on a key.
+
+Installing a role pinned to somebody else's commit is still a typed
+command. Fetching a stranger's repository and approving the shell it
+would run on this machine is the one thing here that should not happen on
+a keystroke.
+
+### Every key is on a screen, and every command is on a list
+
+`?` puts the keys of whatever screen you are on onto a screen of its own,
+including the ones the hint line has no room to name. The hints and the
+help and the decoder now read one table, so a key that works and is not
+listed cannot exist, and a keycap on the screen that does nothing cannot
+either.
+
+`:` opens every command this tool has, bound to the row the cursor is on
+and showing the exact command line each one is. Choosing one does the
+same thing the key for it does — they are one body, so the list cannot
+drift from the keys. A test reads the tool's own command dispatch and
+fails if anything it answers to is missing from that list.
+
+### The list can be narrowed, and moved through
+
+`/` narrows the list to what you type. While you are typing it, every
+letter is a letter rather than the key it spells, which is what lets you
+search for `qw` on a screen where `q` leaves and `w` picks a folder. The
+screen says what it is hiding and how much. `esc` takes the filter back
+before it takes the panel.
+
+`g` and `G` go to the first and last row, PageUp and PageDown move a
+screenful, and Home and End are the same two keys under other names.
+
+### A start from the panel can say everything a start can say
+
+`n` now shows what the start will be, as the command line it is: the
+recipe, the product, a name, the login, a variable, a command instead of
+the agent. Enter on a line sets it, enter on the last line starts. What
+is unset reads as what leaving it unset means. The line on the screen is
+the line that runs, and a test parses it back with the same parser
+`wormhole box` uses, so the screen cannot offer an argument the start
+would refuse.
+
+### Naming a box no longer needs the command line
+
+`N` on a box asks for a name and sets it. A name another box already
+answers to is refused with the reason, and what you typed stays on the
+screen to be edited — retyping a whole name because one character was
+taken is the kind of friction that sends people back to the shell.
+
+### The panel says which folders a box has worked in, and lets you pick one
+
+A box remembers every folder it has run in. Until now the only sign of
+that was a `+2` on the end of a line, and there was no way to see what
+those two were or to go back to one. The panel picked for you: the folder
+you were standing in if the box had run there, otherwise the most recent
+one still on disk. Going back to a particular folder meant quitting the
+panel, `cd`-ing there and retyping the box's id.
+
+Now the panel has a pane under the list showing everything about the box
+the cursor is on, including every folder it has served and whether each is
+still there. `w` opens a list of them and starts the box in the one you
+pick. `wormhole ps <id>` prints the same list, so a script can have it too.
+
+`w` also offers the folder you are standing in, when the box has never
+worked there and is allowed to. Choosing it is the same thing `wormhole
+box --id <id>` typed in a new folder already did — it points that box's
+kept home, with its history and its logins, at this folder — so it is not
+done on a keystroke: the screen says what it means, shows the whole recipe
+under it, and Enter is what agrees. A box made from a folder's own
+`wormhole.toml` is never offered a second folder, because its recipe is
+that file.
+
+### The panel fits the terminal it is drawn on
+
+The box table is eight columns wide and a folder path has no length limit,
+so on an ordinary eighty-column terminal every row wrapped and the cursor
+marked half of one. The panel never knew how big the terminal was: it
+built one long string and wrote it. A list longer than the screen ran off
+the bottom, taking the key hints with it, and moving the cursor down moved
+it out of sight. Resizing the window did nothing at all — the panel kept
+whatever the old size had left on the screen until something else changed.
+
+The panel now measures the terminal and draws for it. Columns that do not
+fit are dropped rather than squeezed, emptiest first, and the folder path
+keeps its end rather than its beginning. A long list scrolls and says
+which part of it you are looking at. A resize redraws. And the permission
+preview that a role from someone else is approved on — forty-odd lines,
+of which the last ones are the commands that will actually run — scrolls
+now, instead of being drawn past the bottom edge where nobody could read
+it.
+
+### The cursor follows the box, not the row
+
+The list is sorted by which box ran most recently and it is re-read once a
+second, so a box started in another terminal could re-sort the list under
+your cursor. `d` does not ask before it stops a box. Between one blink and
+the next, the row you were pointing at could be a different box. The
+cursor now holds on to the box itself.
+
+### The alphaca box carries fewer skills, and the same ones every time
+
+The hook installed every skill in three repositories — 59 of them, to use
+about twenty. Whatever a third party added last week arrived at the next
+start, unread. And every installed skill's description sits in the
+model's prompt for the whole session, called or not.
+
+The hook now names the skills it wants and pins each repository to a
+commit, and it owns the home's set: anything it does not name is removed
+on the next start. Twenty-one skills instead of fifty-nine, and a session
+starts about 900 tokens lighter.
+
+The `rust-skills` repository went with them. Its single file costs about
+9,500 tokens the moment it is invoked, over ground the role's own
+`rules/rust.md` mostly covered already. That file grew instead, by what
+it was missing — numbers, async, memory, concurrency — and still costs
+about 1,400.
+
+### Fixed: codex could not use code mode
+
+Codex is no longer one program. It starts a second one,
+`codex-code-mode-host`, from the folder its own binary sits in. The hook
+installed only the first, so code mode failed part-way through a task
+with "host executable was not found" — and a box already on the newest
+codex never repaired itself, because the version it reported looked
+right.
+
+The hook now installs the whole package OpenAI publishes, the same one
+their own installer uses, into `~/.local/codex`, and points
+`~/.local/bin/codex` at it. Whatever helper codex adds next arrives with
+it. That costs about 30 MB more than the bare binary.
+
+### One role, not three
+
+`alphaca-codex` and `alphaca-grok` are gone. They were copies of
+`alphaca` from before one role could offer three CLIs, and `wormhole box
+--role alphaca --run codex` has done their job since. A box still
+recorded against either name keeps its home, but can no longer be
+resumed by that name.
+
 ### One box for every project
 
 A role can keep one box for all your projects instead of one per project.

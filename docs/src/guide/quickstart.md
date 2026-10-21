@@ -64,8 +64,8 @@ wormhole box --id <id|name>     # that exact box, whenever
 wormhole ps               # running boxes
 wormhole ps --all         # every box this host keeps, running or idle
 wormhole ps <id|name>     # one box, and the environment it runs under
-wormhole attach <id|name> # second terminal into a running box (its agent)
-wormhole attach <id> -- sh
+wormhole attach <id|name> # a shell in a running box
+wormhole attach <id> -- <cmd>
 wormhole box --credentials copy  # this start: your login, copied in once
 wormhole secret list      # values `ask = true` keeps, shared by every box
 wormhole stop <id|name>   # end a running box from anywhere

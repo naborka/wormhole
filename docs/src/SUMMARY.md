@@ -11,6 +11,7 @@
 - [Roles](guide/roles.md)
 - [Credentials](guide/credentials.md)
 - [What the box can reach](guide/access.md)
+- [From your phone](guide/remote.md)
 - [What every box tells its agent](agent.md)
 - [What changed](changelog.md)
 

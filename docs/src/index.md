@@ -41,7 +41,7 @@ The rest of the commands:
 |---|---|
 | `wormhole help` | the whole tool on one page — start here |
 | `wormhole doctor` | eight host probes and a plain verdict — run this first |
-| `wormhole ps [--all \| <id\|name>]` / `attach <id\|name>` | what is running or kept, one box with its environment, and a second terminal into it |
+| `wormhole ps [--all \| <id\|name>]` / `attach <id\|name>` | what is running or kept, one box with its environment, and a shell in it |
 | `wormhole stop <id\|name>` | end a running box, from anywhere |
 | `wormhole rename <id\|name> <new>` | call a box something else, without starting it |
 | `wormhole reset <id\|name>` | keep the box, empty its home |
@@ -60,8 +60,9 @@ covers every key and [Boxes](guide/boxes.md) covers running several at once.
 [Roles](guide/roles.md) make a box recipe shareable across
 workspaces, and [credentials](guide/credentials.md) says how the agent
 logs in. [What the box can reach](guide/access.md) is the security
-model — read it before granting anything. [What changed](changelog.md) is
-the plain-words history.
+model — read it before granting anything. [From your phone](guide/remote.md)
+reaches every box from a phone through tmux, with nothing to set.
+[What changed](changelog.md) is the plain-words history.
 
 The working documents — [Concept](concept.md), [Plan](plan.md),
 [Status](status.md) — are the project's own source of truth, rendered here

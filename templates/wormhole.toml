@@ -11,7 +11,13 @@ package_sources = [
   "http://dl-cdn.alpinelinux.org/alpine/v3.22/main",
   "http://dl-cdn.alpinelinux.org/alpine/v3.22/community",
 ]
-packages = ["bash", "nodejs", "npm", "git", "ca-certificates"]
+# The GNU ones replace BusyBox's: agents write GNU flags, BusyBox refuses them.
+packages = [
+  "bash", "nodejs", "npm", "git", "ca-certificates",
+  "grep", "findutils", "sed", "coreutils", "diffutils", "gawk", "tree", "tar",
+  # Zoneinfo: without it TZ names fall back to UTC.
+  "tzdata",
+]
 # Shell lines, run as root while the image is built.
 build = ["npm install -g @anthropic-ai/claude-code"]
 

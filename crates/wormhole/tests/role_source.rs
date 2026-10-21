@@ -369,7 +369,13 @@ fn approving_on_a_terminal_installs_the_role_and_never_asks_twice() {
          [agent]\nrun = \"claude\"\n",
     );
 
-    let seen = on_a_terminal(
+    // Scrolled to the end, then kept. The build lines are the last thing
+    // a recipe says and the only part that executes, so the proof this
+    // test owes is that they can be *reached* — before the screen was
+    // paged they were written past the bottom of the terminal, which
+    // this test could see in the byte stream and a reader could not see
+    // at all.
+    let seen = common::shown(&on_a_terminal(
         box_.command(&[
             "role",
             "add",
@@ -378,8 +384,8 @@ fn approving_on_a_terminal_installs_the_role_and_never_asks_twice() {
             "smoke",
         ]),
         "enter start",
-        b"\r",
-    );
+        b"jjjjjjjjjj\r",
+    ));
 
     // The screen carried what would execute, not just what would be
     // mounted. That is the whole reason it is shown.

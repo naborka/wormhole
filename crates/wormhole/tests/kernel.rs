@@ -291,7 +291,7 @@ fn home_is_set_to_the_box_home() {
 /// has no `/bin`, Alpine keeps busybox there, so an inherited `PATH` finds
 /// neither `mkdir` nor `apk`.
 #[test]
-fn path_is_the_boxs_own_not_the_hosts() {
+fn path_is_the_box_own_not_the_host() {
     let inside = run_stdout(&["__run", "--", "sh", "-c", "echo $PATH"]);
     assert!(
         inside.ends_with(wormhole_core::mount_plan::BOX_PATH),
@@ -467,6 +467,7 @@ fn attach_joins_a_running_box() {
     std::fs::copy(temp.path().join("init.pid"), box_dir.join("init.pid")).expect("init.pid");
     let entry = wormhole_core::registry::Entry {
         box_id: BOX_ID.to_owned(),
+        key: None,
         pid: running.id(),
         workspace: std::env::current_dir().expect("cwd"),
         image: "/i".to_owned(),
@@ -521,6 +522,7 @@ fn an_attached_session_is_narrowed_like_the_box_itself() {
     std::fs::copy(temp.path().join("init.pid"), box_dir.join("init.pid")).expect("init.pid");
     let entry = wormhole_core::registry::Entry {
         box_id: BOX_ID.to_owned(),
+        key: None,
         pid: running.id(),
         workspace: std::env::current_dir().expect("cwd"),
         image: "/i".to_owned(),

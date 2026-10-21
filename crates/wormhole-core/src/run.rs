@@ -420,9 +420,8 @@ pub struct AttachArgs {
     /// The box to join: the id `wormhole ps` shows. The same id `--id`
     /// takes and `--all` lists — wormhole names a box exactly one way.
     pub id: String,
-    /// A command that replaces the default. `None` means the box's own
-    /// agent, or a shell when it has none (`manifest::attach_command`).
-    pub command: Option<Vec<String>>,
+    /// What runs in the box: a shell unless a command follows `--`.
+    pub command: Vec<String>,
     /// Variables set or refreshed for the box from here on.
     pub env: Vec<EnvArg>,
 }
@@ -431,9 +430,9 @@ pub fn parse_attach_args(args: &[String]) -> Result<AttachArgs, ParseError> {
     let mut parts = args.splitn(2, |a| a == "--");
     let before = parts.next().unwrap_or_default();
     let command = match parts.next() {
-        None => None,
+        None => vec!["/bin/sh".to_owned()],
         Some([]) => return Err(ParseError::AttachUsage),
-        Some(command) => Some(command.to_vec()),
+        Some(command) => command.to_vec(),
     };
     let [id, rest @ ..] = before else {
         return Err(ParseError::AttachUsage);
@@ -1075,12 +1074,12 @@ mod tests {
     }
 
     #[test]
-    fn attach_with_only_an_id_leaves_the_command_to_the_default() {
+    fn attach_with_only_an_id_opens_a_shell() {
         assert_eq!(
             parse_attach_args(&strings(&["0123456789ab"])),
             Ok(AttachArgs {
                 id: "0123456789ab".to_owned(),
-                command: None,
+                command: strings(&["/bin/sh"]),
                 env: Vec::new(),
             })
         );
@@ -1092,7 +1091,7 @@ mod tests {
             parse_attach_args(&strings(&["0123456789ab", "--", "claude", "-r"])),
             Ok(AttachArgs {
                 id: "0123456789ab".to_owned(),
-                command: Some(strings(&["claude", "-r"])),
+                command: strings(&["claude", "-r"]),
                 env: Vec::new(),
             })
         );

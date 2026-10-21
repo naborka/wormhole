@@ -540,54 +540,234 @@ pub fn listed<'a>(boxes: &'a [Listing], wanted: &str) -> Option<&'a Listing> {
 pub const NO_BOXES_YET: &str = "no boxes yet";
 pub const NO_BOXES_RUNNING: &str = "no boxes running";
 
+/// One workspace a box has served, and what is true of it now.
+///
+/// The list a box carries is the answer to "where can I go back to", and
+/// until this existed the only surface for it was `+N` on the end of a
+/// table cell. Whether a directory is still there is the caller's to say:
+/// this crate makes decisions and does no I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Served {
+    pub path: PathBuf,
+    /// The one the box ran in last, and so the one a bare resume takes.
+    pub latest: bool,
+    /// The directory is not there any more. A box cannot be resumed in it
+    /// and `gc` counts it towards proving the home dead.
+    pub gone: bool,
+}
+
+impl Served {
+    /// What a screen puts after the path. Both facts can be true at once,
+    /// and a mark that dropped either would drop the one that mattered.
+    #[must_use]
+    pub fn mark(&self) -> String {
+        let marks = [(self.latest, "last used"), (self.gone, "gone")];
+        let said: Vec<&str> = marks
+            .iter()
+            .filter_map(|(is, word)| is.then_some(*word))
+            .collect();
+        if said.is_empty() {
+            return String::new();
+        }
+        format!("({})", said.join(", "))
+    }
+}
+
+/// Every workspace this box has served, latest first, each marked.
+pub fn served(record: &Record, exists: &dyn Fn(&Path) -> bool) -> Vec<Served> {
+    record
+        .workspaces()
+        .enumerate()
+        .map(|(at, path)| Served {
+            latest: at == 0,
+            gone: !exists(path),
+            path: path.to_owned(),
+        })
+        .collect()
+}
+
+/// The workspace list as `ps <id>` prints it. Empty for a caller with
+/// nothing to show, like every other listing here.
+pub fn served_block(list: &[Served]) -> String {
+    if list.is_empty() {
+        return String::new();
+    }
+    let rows: Vec<Vec<String>> = list
+        .iter()
+        .map(|one| vec![one.path.display().to_string(), one.mark()])
+        .collect();
+    let mut block = String::from("workspaces:\n");
+    for line in table::render(&rows).lines() {
+        block.push_str(&format!("  {line}\n"));
+    }
+    block
+}
+
+/// One place a box could be started, and what is true of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub path: PathBuf,
+    /// The one it ran in last, and so the one a start with nobody
+    /// choosing would take.
+    pub latest: bool,
+    /// The directory the panel was opened in.
+    pub here: bool,
+    /// Never served. Starting here points the box's kept home at a tree
+    /// it has not seen, which is what `wormhole box --id X` typed in a
+    /// new tree already does — and not something a keystroke should do
+    /// without saying so.
+    pub fresh: bool,
+}
+
+impl Choice {
+    /// What the screen puts after the path. The wording lives here, like
+    /// every other word on a screen: a caller that invented its own would
+    /// be a second description of the same fact.
+    #[must_use]
+    pub fn mark(&self) -> String {
+        let marks = [
+            (self.latest, "last used"),
+            (self.here && !self.fresh, "here"),
+            (self.fresh, "here, never run in"),
+        ];
+        let said: Vec<&str> = marks
+            .iter()
+            .filter_map(|(is, word)| is.then_some(*word))
+            .collect();
+        if said.is_empty() {
+            return String::new();
+        }
+        format!("({})", said.join(", "))
+    }
+
+    /// The whole row, path and mark.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let mark = self.mark();
+        if mark.is_empty() {
+            return self.path.display().to_string();
+        }
+        format!("{}  {mark}", self.path.display())
+    }
+}
+
+/// Where a box may be started again, for the screen that asks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Choices {
+    /// Every place it could start, the ones it has served first.
+    pub list: Vec<Choice>,
+    /// Which of them the cursor starts on.
+    pub at: usize,
+}
+
+/// Which workspaces a resume of this box could name.
+///
+/// The rule for `here` is [`refused_elsewhere`]'s, asked rather than
+/// restated: a screen that offered what the start would refuse would be
+/// lying about what pressing enter does.
+pub fn resume_choices(record: &Record, here: &Path, exists: &dyn Fn(&Path) -> bool) -> Choices {
+    let mut list: Vec<Choice> = record
+        .workspaces()
+        .filter(|workspace| exists(workspace))
+        .enumerate()
+        .map(|(at, workspace)| Choice {
+            path: workspace.to_owned(),
+            // The workspaces come latest first, so the first is the one
+            // a bare start would have taken.
+            latest: at == 0,
+            here: workspace == here,
+            fresh: false,
+        })
+        .collect();
+    // Last, and marked: this one is not going back to a workspace, it is
+    // adding one. The rule is [`refused_elsewhere`]'s, asked rather than
+    // restated — a screen that offered what the start would refuse would
+    // be lying about what pressing enter does.
+    if !record.serves(here) && exists(here) && refused_elsewhere(record, here).is_none() {
+        list.push(Choice {
+            path: here.to_owned(),
+            latest: false,
+            here: true,
+            fresh: true,
+        });
+    }
+    // Where the cursor starts: what a start with nobody choosing would
+    // have taken, so agreeing with the screen costs one more key than
+    // not being asked at all.
+    let at = list
+        .iter()
+        .position(|choice| choice.here && !choice.fresh)
+        .or_else(|| list.iter().position(|choice| choice.latest))
+        .unwrap_or(0);
+    Choices { list, at }
+}
+
 /// The one table every listing draws: `ps`, `ps --all`, `ps <id>` and
 /// the panel. An idle box is listed with what it would resume as, because
 /// the whole point of keeping it is that it can be resumed. Nothing
 /// renders as nothing; the caller says so in its own words.
 pub fn list(boxes: &[Listing], now_unix: u64) -> String {
+    table::render(&list_rows(boxes, now_unix))
+}
+
+/// The same table as cells, header first.
+///
+/// The panel fits these into a terminal it knows the width of, which it
+/// cannot do to a rendered string. One body produces both, so a column
+/// added here appears on every surface or on none.
+pub fn list_rows(boxes: &[Listing], now_unix: u64) -> Vec<Vec<String>> {
     if boxes.is_empty() {
-        return String::new();
+        return Vec::new();
     }
-    let mut rows = vec![
-        [
-            "ID",
-            "NAME",
-            // What you can type instead of the id. Its own column, not
-            // folded into NAME: the manifest's name is a label several
-            // boxes share, and only this one names exactly one box.
-            "ALIAS",
-            "STATE",
-            "ROLE",
-            "AGENT",
-            "LAST USED",
-            "WORKSPACE",
-        ]
-        .map(str::to_owned)
-        .to_vec(),
-    ];
-    for entry in boxes {
-        let record = &entry.record;
-        rows.push(vec![
-            record.id.clone(),
-            table::or_dash(record.name.as_deref()),
-            table::or_dash(record.alias.as_deref()),
-            match entry.running {
-                Some(pid) => format!("running {pid}"),
-                None => "idle".to_owned(),
-            },
-            table::or_dash(record.role.as_deref()),
-            table::or_dash(record.agent.as_deref()),
-            match record.started_unix {
-                0 => "never".to_owned(),
-                started => table::age(now_unix.saturating_sub(started)),
-            },
-            match record.earlier.len() {
-                0 => record.workspace.display().to_string(),
-                more => format!("{} +{more}", record.workspace.display()),
-            },
-        ]);
-    }
-    table::render(&rows)
+    let mut rows = vec![list_header()];
+    rows.extend(boxes.iter().map(|entry| list_row(entry, now_unix)));
+    rows
+}
+
+/// The column titles, alone. A surface that filters rows needs a row at
+/// a time and the header once, which a table built whole cannot give it.
+#[must_use]
+pub fn list_header() -> Vec<String> {
+    [
+        "ID",
+        "NAME",
+        // What you can type instead of the id. Its own column, not
+        // folded into NAME: the manifest's name is a label several
+        // boxes share, and only this one names exactly one box.
+        "ALIAS",
+        "STATE",
+        "ROLE",
+        "AGENT",
+        "LAST USED",
+        "WORKSPACE",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// One box as a row of cells, in the columns [`list_header`] names.
+#[must_use]
+pub fn list_row(entry: &Listing, now_unix: u64) -> Vec<String> {
+    let record = &entry.record;
+    vec![
+        record.id.clone(),
+        table::or_dash(record.name.as_deref()),
+        table::or_dash(record.alias.as_deref()),
+        match entry.running {
+            Some(pid) => format!("running {pid}"),
+            None => "idle".to_owned(),
+        },
+        table::or_dash(record.role.as_deref()),
+        table::or_dash(record.agent.as_deref()),
+        match record.started_unix {
+            0 => "never".to_owned(),
+            started => table::age(now_unix.saturating_sub(started)),
+        },
+        match record.earlier.len() {
+            0 => record.workspace.display().to_string(),
+            more => format!("{} +{more}", record.workspace.display()),
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -608,6 +788,159 @@ mod tests {
             created_unix: 1,
             started_unix: started,
         }
+    }
+
+    /// A role box that has served `workspace` and then `earlier`, in that
+    /// order of recency.
+    fn served_by(workspace: &str, earlier: &[&str]) -> Record {
+        Record {
+            earlier: earlier.iter().map(PathBuf::from).collect(),
+            source: Some("dir:/roles/alphaca".to_owned()),
+            ..record("a3f9c1e40b2d", workspace, Some("alphaca"), 10)
+        }
+    }
+
+    /// Everything but `gone` is there.
+    fn all_but(gone: &[&str]) -> impl Fn(&Path) -> bool {
+        let gone: Vec<PathBuf> = gone.iter().map(PathBuf::from).collect();
+        move |path: &Path| !gone.iter().any(|missing| missing == path)
+    }
+
+    /// The gap this closes: a box knew every workspace it had served and
+    /// no surface could show them — the table said `+2` and stopped.
+    #[test]
+    fn every_workspace_a_box_served_is_listed_newest_first_and_marked() {
+        let record = served_by("/w/a", &["/w/b", "/w/c"]);
+        let served = served(&record, &all_but(&["/w/c"]));
+        assert_eq!(
+            served
+                .iter()
+                .map(|s| (s.path.display().to_string(), s.mark()))
+                .collect::<Vec<_>>(),
+            [
+                ("/w/a".to_owned(), "(last used)".to_owned()),
+                ("/w/b".to_owned(), String::new()),
+                ("/w/c".to_owned(), "(gone)".to_owned()),
+            ]
+        );
+    }
+
+    /// Both facts can be true of one workspace, and a mark that dropped
+    /// either would be the one a reader needed.
+    #[test]
+    fn the_last_used_workspace_can_also_be_gone() {
+        let record = served_by("/w/a", &["/w/b"]);
+        let served = served(&record, &all_but(&["/w/a"]));
+        assert_eq!(served[0].mark(), "(last used, gone)");
+    }
+
+    #[test]
+    fn the_block_names_every_workspace_and_nothing_names_none() {
+        let record = served_by("/w/a", &["/w/b"]);
+        let block = served_block(&served(&record, &all_but(&["/w/b"])));
+        assert!(block.contains("workspaces:"), "{block}");
+        assert!(block.contains("/w/a  (last used)"), "{block}");
+        assert!(block.contains("/w/b  (gone)"), "{block}");
+        assert_eq!(served_block(&[]), "");
+    }
+
+    /// The paths a set of choices offers, in order.
+    fn paths(choices: &Choices) -> Vec<String> {
+        choices
+            .list
+            .iter()
+            .map(|one| one.path.display().to_string())
+            .collect()
+    }
+
+    /// A workspace that is gone cannot be started in, so it is not
+    /// offered — the picker's items are what Enter can actually do.
+    #[test]
+    fn the_resume_choices_leave_out_a_workspace_that_is_gone() {
+        let record = served_by("/w/a", &["/w/b", "/w/c"]);
+        let choices = resume_choices(&record, Path::new("/w/a"), &all_but(&["/w/b"]));
+        assert_eq!(paths(&choices), ["/w/a", "/w/c"]);
+        // `here` is already served, so there is nothing new to offer.
+        assert!(!choices.list.iter().any(|one| one.fresh));
+    }
+
+    /// `wormhole box --id X` in a new tree is how a role's box is shared
+    /// on purpose. The picker reaches the same thing, and only where the
+    /// command would have been allowed to — and it says which one that
+    /// is, because starting there widens what the box can reach.
+    #[test]
+    fn here_is_offered_last_to_a_role_box_that_has_not_served_it() {
+        let record = served_by("/w/a", &[]);
+        let choices = resume_choices(&record, Path::new("/w/new"), &all_but(&[]));
+        assert_eq!(paths(&choices), ["/w/a", "/w/new"]);
+        let new = choices.list.last().expect("a choice");
+        assert!(new.fresh && new.here);
+        assert_eq!(new.mark(), "(here, never run in)");
+        assert_eq!(choices.list[0].mark(), "(last used)");
+    }
+
+    /// A box made from a workspace's own wormhole.toml runs only there;
+    /// its recipe is that file. `refused_elsewhere` says so, and the
+    /// picker must not offer what the start would refuse.
+    #[test]
+    fn here_is_never_offered_to_a_box_made_from_a_workspaces_own_manifest() {
+        let record = record("a3f9c1e40b2d", "/w/a", None, 10);
+        let choices = resume_choices(&record, Path::new("/w/new"), &all_but(&[]));
+        assert_eq!(paths(&choices), ["/w/a"]);
+        assert!(!choices.list.iter().any(|one| one.fresh));
+    }
+
+    /// A directory that is not there is not somewhere to start a box.
+    #[test]
+    fn here_is_not_offered_when_here_does_not_exist() {
+        let record = served_by("/w/a", &[]);
+        let choices = resume_choices(&record, Path::new("/w/new"), &all_but(&["/w/new"]));
+        assert_eq!(paths(&choices), ["/w/a"]);
+    }
+
+    /// The screen asks every time, so agreeing with it has to cost one
+    /// key rather than a search: the cursor starts where a start with
+    /// nobody choosing would have gone, which is what `resume_in` says.
+    #[test]
+    fn the_cursor_starts_where_a_start_with_nobody_choosing_would_go() {
+        let record = served_by("/w/a", &["/w/b", "/w/c"]);
+        for here in ["/w/a", "/w/b", "/w/c"] {
+            let choices = resume_choices(&record, Path::new(here), &all_but(&[]));
+            assert_eq!(
+                choices.list[choices.at].path,
+                resume_in(&record, Path::new(here), |_| true).expect("somewhere"),
+                "from {here}"
+            );
+        }
+        // From a tree it has never served, on the latest it has.
+        let choices = resume_choices(&record, Path::new("/w/new"), &all_but(&[]));
+        assert_eq!(choices.list[choices.at].path, PathBuf::from("/w/a"));
+        assert!(!choices.list[choices.at].fresh, "never the new one");
+    }
+
+    /// Here is marked as here even when the box has served it, so the
+    /// row the cursor starts on says why it starts there.
+    #[test]
+    fn a_served_workspace_that_is_also_here_says_so() {
+        let record = served_by("/w/a", &["/w/b"]);
+        let choices = resume_choices(&record, Path::new("/w/b"), &all_but(&[]));
+        assert_eq!(choices.list[1].mark(), "(here)");
+        assert_eq!(choices.list[1].line(), "/w/b  (here)");
+        assert_eq!(choices.at, 1);
+    }
+    /// The table and the panel draw one table, so they read one body.
+    #[test]
+    fn the_listing_rows_are_what_the_listing_renders() {
+        let listing = [Listing {
+            record: served_by("/w/a", &["/w/b"]),
+            running: Some(7),
+        }];
+        let rows = list_rows(&listing, 100);
+        assert_eq!(rows[0][0], "ID");
+        assert_eq!(rows[1][0], "a3f9c1e40b2d");
+        assert_eq!(rows[1][3], "running 7");
+        assert_eq!(rows[1][7], "/w/a +1");
+        assert_eq!(list(&listing, 100), table::render(&rows));
     }
 
     fn called(mut record: Record, alias: &str) -> Record {
