@@ -200,10 +200,8 @@ if command -v rtk >/dev/null 2>&1; then
             rtk init -g --auto-patch </dev/null && rtk_ok=1
             ;;
         codex)
-            # `rtk hook codex` answers nothing; the claude one speaks the
-            # same JSON. docs/research/box-tools-jvm.md.
             mkdir -p "$HOME/.codex" \
-                && printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}\n' \
+                && printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook codex"}]}]}}\n' \
                     >"$HOME/.codex/hooks.json" \
                 && rtk_ok=1
             ;;
